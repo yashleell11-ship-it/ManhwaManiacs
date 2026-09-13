@@ -20,7 +20,7 @@ from time import sleep
 from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import Depends
-from sqlalchemy import and_, select, tuple_
+from sqlalchemy import and_, select, tuple_, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -36,7 +36,12 @@ from core.content_rating import (
 from core.errors import AppError
 from core.profile_context import ProfileContext, resolve_profile_context
 from core.time_utils import clamp_client_clock, utcnow
-from database.models import ChapterProgress, FollowedSeries, ReadingSession
+from database.models import (
+    ChapterProgress,
+    FollowedSeries,
+    ReadingSession,
+    UpdateNotification,
+)
 from database.session import get_db
 from services.browse_service import BrowseService, get_browse_service
 
@@ -652,7 +657,54 @@ class ProgressService:
                 commit=False,
             )
 
+        self._clear_update_notification(
+            user_id, profile_id, source_id, series_key, chapter_key
+        )
+
         return row, merged
+
+    def _clear_update_notification(
+        self,
+        user_id: int,
+        profile_id: int,
+        source_id: str,
+        series_key: str,
+        chapter_key: str,
+    ) -> None:
+        """Mark this chapter's "new chapter" notification read, if there is one.
+
+        Reading a chapter IS the acknowledgement. Before this, ``is_read`` moved
+        only when someone pressed a button, reachable from the two routes in
+        ``routes/updates.py`` and nowhere else -- so the unread badge counted
+        chapters that had already been read, and a counter that lies is one the
+        reader stops looking at. That badge is the only thing in the product
+        whose job is to bring someone back.
+
+        Runs inside the caller's transaction, so a rolled-back progress push
+        cannot leave a notification wrongly cleared.
+
+        Scoped to (user_id, profile_id): two profiles following the same series
+        each get their own notification row, and one of them reading the chapter
+        must not clear the other's. That is the same isolation
+        ``chapter_progress`` has, and this box currently has two profiles
+        following the same novel, so the wrong query here would be visible.
+
+        ``chapter_key`` arrives already ``fully_unquote``d, which is why
+        ``update_service`` canonicalises the key it writes: the two spellings
+        would compare unequal and this UPDATE would silently match nothing.
+        """
+        self._db.execute(
+            update(UpdateNotification)
+            .where(
+                UpdateNotification.user_id == user_id,
+                UpdateNotification.profile_id == profile_id,
+                UpdateNotification.source_id == source_id,
+                UpdateNotification.series_key == series_key,
+                UpdateNotification.chapter_key == chapter_key,
+                UpdateNotification.is_read.is_(False),
+            )
+            .values(is_read=True)
+        )
 
     def _claim_row(
         self,

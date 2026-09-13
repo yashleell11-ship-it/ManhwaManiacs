@@ -23,6 +23,7 @@ from fastapi import Depends
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
+from connectors.ids import fully_unquote
 from connectors.registry import list_installed_connectors
 from core.config import get_settings
 from core.connector_directory import descriptor_for_source
@@ -724,17 +725,28 @@ class UpdateService:
                 # time, and a listing can even repeat an id within one fetch;
                 # neither is an error, so skip what this follow has already been
                 # told about instead of letting the INSERT fail the run.
-                emitted = set(
-                    self._db.execute(
+                # Canonicalised on the way OUT too: rows written before keys
+                # were canonicalised hold the connector's raw spelling, and
+                # comparing those against a canonical key would miss and emit
+                # one duplicate notification per such chapter.
+                emitted = {
+                    fully_unquote(k)
+                    for k in self._db.execute(
                         select(UpdateNotification.chapter_key).where(
                             UpdateNotification.followed_series_id == row.id
                         )
                     )
                     .scalars()
                     .all()
-                )
+                }
                 for c in new_chapters:
-                    key = str(c["id"])
+                    # Canonicalised on the way in, because the notification is
+                    # matched against chapter_progress later (progress_service
+                    # marks a notification read once its chapter is opened) and
+                    # THAT table stores fully_unquote'd keys. Two spellings of
+                    # the same chapter would make the match silently find
+                    # nothing, which looks exactly like the feature working.
+                    key = fully_unquote(str(c["id"]))
                     if key in emitted:
                         continue
                     emitted.add(key)
