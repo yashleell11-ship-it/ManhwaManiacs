@@ -792,27 +792,64 @@ class ReadingStatsService:
         return out
 
     def _recent(self) -> list[dict[str, Any]]:
-        """The last few sessions, deliberately *not* windowed.
+        """The last few SITTINGS, deliberately *not* windowed.
+
+        A row here is one chapter on one LOCAL day, not one ping. The write side
+        appends a ``reading_sessions`` row per advance (``progress_service``),
+        which is right for the totals and wrong for a list a human reads: one
+        evening with a chapter produced a dozen identical rows. The live table
+        showed exactly that -- twelve rows for one chapter, "1 page" each,
+        06:27 to 06:50 -- and the three chapters read before it were pushed off
+        a ten-row list by a single sitting.
+
+        Grouping rules worth keeping:
+
+        * On the three raw key columns, never a folded ``source||series||chapter``
+          string: connector keys contain slashes, so folding would merge
+          ``("a/b", "c")`` with ``("a", "b/c")`` into one sitting.
+        * By the caller's LOCAL day, so a sitting is split where the reader's
+          midnight is, not Greenwich's.
+        * ``seconds_read`` sums the ALREADY-CAPPED per-row expression. The cap
+          is a per-ping policy (``SESSION_SECONDS_CAP``); applying it to the
+          merged group instead would silently shrink every long sitting to an
+          hour.
+        * Ordered by the LAST ping of each sitting. A bare column beside a
+          GROUP BY is legal in SQLite and picks an arbitrary row, which would
+          order this list by nothing in particular.
 
         "Recent activity" that goes blank because the caller asked for a 7-day
-        chart and last read a fortnight ago is worse than useless.
+        chart and last read a fortnight ago is worse than useless -- so there is
+        still no window here, however tempting one is for the GROUP BY.
         """
+        day = self._day().label("day")
+        last_at = func.max(ReadingSession.started_at)
         rows = self._db.execute(
             self._sessions(
                 select(
                     ReadingSession.source_id,
                     ReadingSession.series_key,
                     ReadingSession.chapter_key,
-                    ReadingSession.chapter_number,
-                    ReadingSession.pages_read,
-                    ReadingSession.started_at,
-                    ReadingSession.ended_at,
-                    self._seconds().label("seconds_read"),
+                    day,
+                    func.max(ReadingSession.chapter_number).label("chapter_number"),
+                    func.coalesce(func.sum(ReadingSession.pages_read), 0).label(
+                        "pages_read"
+                    ),
+                    func.coalesce(func.sum(self._seconds()), 0).label("seconds_read"),
+                    func.min(ReadingSession.started_at).label("started_at"),
+                    func.max(ReadingSession.ended_at).label("ended_at"),
+                    func.count().label("sessions"),
                     FollowedSeries.title.label("title"),
                 ).select_from(ReadingSession),
                 needs_follow=True,
             )
-            .order_by(ReadingSession.started_at.desc(), ReadingSession.id.desc())
+            .group_by(
+                ReadingSession.source_id,
+                ReadingSession.series_key,
+                ReadingSession.chapter_key,
+                day,
+                FollowedSeries.title,
+            )
+            .order_by(last_at.desc())
             .limit(_RECENT_SESSIONS)
         ).all()
         return [
@@ -822,8 +859,11 @@ class ReadingStatsService:
                 "chapter_key": r.chapter_key,
                 "chapter_number": r.chapter_number,
                 "title": r.title,
+                "day": r.day,
                 "pages_read": int(r.pages_read or 0),
                 "seconds_read": int(r.seconds_read or 0),
+                #: How many pings this sitting merged. 1 means it really was one.
+                "sessions": int(r.sessions or 0),
                 "started_at": _iso(r.started_at),
                 "ended_at": _iso(r.ended_at),
             }
