@@ -134,6 +134,30 @@ class Changelog(BaseModel):
 # consume the exact same source of truth.
 _RELEASE_NOTES: list[ChangelogEntry] = [
     ChangelogEntry(
+        version="2.7.5",
+        build=45,
+        date="September 2026",
+        highlights=[
+            "You can bookmark from the Sources tab now. It was the only one of "
+            "the readers that had no bookmark button, which is awkward given "
+            "it is the tab you reach anything you do not already follow "
+            "through — and the Bookmarks screen had been telling you to tap an "
+            "icon that was not there",
+            "The unread count goes down when you read the chapter. Before, it "
+            "only moved if you pressed Mark read, so over time the badge was "
+            "counting chapters you had already finished",
+            "Recent sessions shows one row per sitting instead of one per "
+            "page. An evening with a single chapter used to fill the whole "
+            "list with a dozen identical lines and push everything you read "
+            "before it off the bottom; now it reads as one line with the real "
+            "page count and time",
+            "A source that comes back to life is noticed. The nightly check "
+            "already visits every source you follow, and now it remembers "
+            "whether they answered — so one that had a bad day stops being "
+            "marked broken without you having to go and search it by hand",
+        ],
+    ),
+    ChangelogEntry(
         version="2.7.4",
         build=44,
         date="September 2026",

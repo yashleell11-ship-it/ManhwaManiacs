@@ -78,11 +78,11 @@ def test_the_recorded_message_never_carries_the_exception_text():
     # on the instance, and an upstream exception routinely embeds the full
     # request URL with its query string.
     leaky = ConnectionError(
-        "failed to GET https://example.test/api?token=SECRET&user=yash"
+        "failed to GET https://example.test/api?token=tok_abc123&user=someone"
     )
     recorded = us._health_failure(leaky)
     assert recorded is not None
-    assert "SECRET" not in recorded
+    assert "tok_abc123" not in recorded
     assert "example.test" not in recorded
     assert recorded == us._HEALTH_TRANSPORT
 
