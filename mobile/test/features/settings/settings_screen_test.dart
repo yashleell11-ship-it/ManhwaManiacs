@@ -13,7 +13,6 @@ import 'package:manhwamaniacs/core/utils/result.dart';
 import 'package:manhwamaniacs/features/library/models/collection.dart';
 import 'package:manhwamaniacs/features/library/models/collection_detail.dart';
 import 'package:manhwamaniacs/features/library/models/continue_reading_item.dart';
-import 'package:manhwamaniacs/features/library/models/dashboard_data.dart';
 import 'package:manhwamaniacs/features/library/models/followed_series.dart';
 import 'package:manhwamaniacs/features/library/models/library_list_state.dart';
 import 'package:manhwamaniacs/features/library/models/library_statistics.dart';
@@ -97,12 +96,8 @@ class _EmptyUpdatesNotifier extends UpdatesNotifier {
 }
 
 List<Override> _metadataCacheProviderOverrides() => [
-      dashboardProvider.overrideWith(
-        (ref) async => const DashboardData(
-          recentlyUpdated: [],
-          continueReading: [],
-          stats: _emptyLibraryStatistics,
-        ),
+      continueReadingProvider.overrideWith(
+        (ref) async => const <ContinueReadingItem>[],
       ),
       libraryListProvider.overrideWith(_EmptyLibraryListNotifier.new),
       searchListProvider.overrideWith(_EmptySearchListNotifier.new),

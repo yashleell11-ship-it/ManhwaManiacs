@@ -13,6 +13,7 @@ import 'package:manhwamaniacs/features/content_mode/widgets/content_mode_switch.
 import 'package:manhwamaniacs/features/library/models/followed_series.dart';
 import 'package:manhwamaniacs/features/library/utils/library_shelf.dart';
 import 'package:manhwamaniacs/features/library/widgets/home/followed_series_card.dart';
+import 'package:manhwamaniacs/features/library/widgets/library/continue_reading_strip.dart';
 import 'package:manhwamaniacs/features/library/widgets/library/series_actions_sheet.dart';
 import 'package:manhwamaniacs/features/novels/widgets/novel_shelf.dart';
 import 'package:manhwamaniacs/features/profiles/widgets/profile_switcher_chip.dart';
@@ -236,6 +237,10 @@ class _FollowedShelf extends ConsumerWidget {
             ),
           ),
         ),
+        // Above the shelf, because resuming is what the reader came to do and
+        // the shelf is how they find something else. Renders nothing when
+        // there is no answer yet, so it never delays the follows below it.
+        SliverToBoxAdapter(child: ContinueReadingStrip(gutter: gutter)),
         if (isNovelMode)
           NovelShelf(
             itemCount: followed.length,

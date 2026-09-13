@@ -134,6 +134,30 @@ class Changelog(BaseModel):
 # consume the exact same source of truth.
 _RELEASE_NOTES: list[ChangelogEntry] = [
     ChangelogEntry(
+        version="2.7.4",
+        build=44,
+        date="September 2026",
+        highlights=[
+            "The Library tab picks up where you left off. There is a row "
+            "across the top now for whatever you are part-way through, and "
+            "tapping it opens that chapter straight away. Getting back into a "
+            "book used to mean opening the app, finding the cover, waiting for "
+            "the series page and then hunting for the chapter — the website "
+            "has had this as one tap the whole time",
+            "An update notification finally opens the chapter it is telling "
+            "you about. The card had nothing to tap, so the only way to reach "
+            "a new chapter was to remember the series and go and find it "
+            "yourself",
+            "Notifications say which series, not which site. They used to "
+            "print 'asurascans' where the name of the thing you follow "
+            "belongs, even though the app already knew the title",
+            "And the unread count clears itself when you actually read one. "
+            "It only went down if you pressed a separate Mark read button, so "
+            "the badge was counting chapters you had already finished — which "
+            "is a badge you stop believing",
+        ],
+    ),
+    ChangelogEntry(
         version="2.7.3",
         build=43,
         date="September 2026",

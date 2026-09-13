@@ -26,7 +26,7 @@ final List<void Function(Ref ref)> profileScopedInvalidators = [
   // Follows + update notifications.
   (ref) => ref.invalidate(updatesProvider),
   // Continue-reading / dashboard rails.
-  (ref) => ref.invalidate(dashboardProvider),
+  (ref) => ref.invalidate(continueReadingProvider),
   // Library lists + search results.
   (ref) => ref.invalidate(libraryListProvider),
   (ref) => ref.invalidate(searchListProvider),

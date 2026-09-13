@@ -25,7 +25,7 @@ const Map<String, List<String>> _providersByService = {
   'followed_series_service': [
     'libraryListProvider',
     'seriesDetailProvider',
-    'dashboardProvider',
+    'continueReadingProvider',
     'collectionsProvider',
     'collectionDetailProvider',
   ],

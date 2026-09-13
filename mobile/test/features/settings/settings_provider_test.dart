@@ -34,6 +34,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// top-level metadata providers resolve without a network call.
 class _EmptyLibraryRepository implements LibraryRepository {
   var statisticsCallCount = 0;
+  var continueReadingCallCount = 0;
   var listSeriesCallCount = 0;
 
   @override
@@ -74,8 +75,10 @@ class _EmptyLibraryRepository implements LibraryRepository {
       throw UnimplementedError();
 
   @override
-  Future<Result<List<ContinueReadingItem>>> continueReading({int limit = 10}) async =>
-      const Ok([]);
+  Future<Result<List<ContinueReadingItem>>> continueReading({int limit = 10}) async {
+    continueReadingCallCount++;
+    return const Ok([]);
+  }
 
   @override
   Future<Result<List<FollowedSeries>>> recentlyUpdated({int limit = 10}) async => const Ok([]);
@@ -418,29 +421,33 @@ void main() {
       // screen ref.watch()es it -- otherwise these autoDispose providers
       // would refetch on every plain container.read() regardless of
       // invalidation, making this test meaningless.
-      container.listen(dashboardProvider, (_, __) {}, fireImmediately: true);
+      container.listen(continueReadingProvider, (_, __) {}, fireImmediately: true);
       container.listen(bookmarksProvider, (_, __) {}, fireImmediately: true);
       container.listen(updatesProvider, (_, __) {}, fireImmediately: true);
 
-      await container.read(dashboardProvider.future);
+      await container.read(continueReadingProvider.future);
       await container.read(bookmarksProvider.future);
       await container.read(updatesProvider.future);
-      expect(libraryRepo.statisticsCallCount, 1);
+      // continueReadingProvider fetches exactly one endpoint now. It used to be
+      // a three-call `dashboardProvider` whose refetch was proved through
+      // statistics(); that call is gone, so proving it through statistics would
+      // pass forever on a count stuck at zero.
+      expect(libraryRepo.continueReadingCallCount, 1);
       expect(readerRepo.bookmarksCallCount, 1);
       expect(libraryRepo.listSeriesCallCount, 1);
 
       // Reading again while still listened must hit the cached value, not
       // refetch -- confirms the baseline before we invalidate.
-      await container.read(dashboardProvider.future);
-      expect(libraryRepo.statisticsCallCount, 1);
+      await container.read(continueReadingProvider.future);
+      expect(libraryRepo.continueReadingCallCount, 1);
 
-      final statisticsCallsBefore = libraryRepo.statisticsCallCount;
+      final continueReadingCallsBefore = libraryRepo.continueReadingCallCount;
       final bookmarksCallsBefore = readerRepo.bookmarksCallCount;
       final followedCallsBefore = libraryRepo.listSeriesCallCount;
 
       container.read(settingsActionsProvider).clearMetadataCache();
 
-      await container.read(dashboardProvider.future);
+      await container.read(continueReadingProvider.future);
       await container.read(bookmarksProvider.future);
       await container.read(updatesProvider.future);
 
@@ -449,7 +456,10 @@ void main() {
       // at least once" rather than an exact count -- what matters is that
       // clearMetadataCache() demonstrably forced new server calls instead
       // of silently reusing the stale cached value.
-      expect(libraryRepo.statisticsCallCount, greaterThan(statisticsCallsBefore));
+      expect(
+        libraryRepo.continueReadingCallCount,
+        greaterThan(continueReadingCallsBefore),
+      );
       expect(readerRepo.bookmarksCallCount, greaterThan(bookmarksCallsBefore));
       expect(libraryRepo.listSeriesCallCount, greaterThan(followedCallsBefore));
     });

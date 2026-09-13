@@ -22,8 +22,8 @@ import 'package:manhwamaniacs/shared/widgets/stat_card.dart';
 
 /// The sections of the statistics screen.
 ///
-/// Split out of the screen the way `widgets/dashboard/dashboard_sections.dart`
-/// is, so the screen file stays the composition and the async states. Every
+/// Split out of the screen so the screen file stays the composition and the
+/// async states, the way the library widgets under `widgets/library/` are. Every
 /// section renders only what the payload can back up: a profile that last read
 /// months ago still has all-time totals and recent sessions but an empty
 /// window, and each section decides for itself whether it has anything to say.

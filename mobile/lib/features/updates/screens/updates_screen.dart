@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -6,6 +8,7 @@ import 'package:manhwamaniacs/app/router/routes.dart';
 import 'package:manhwamaniacs/app/theme/app_colors.dart';
 import 'package:manhwamaniacs/app/theme/app_presets.dart';
 import 'package:manhwamaniacs/core/error/app_error.dart';
+import 'package:manhwamaniacs/features/content_mode/content_mode.dart';
 import 'package:manhwamaniacs/features/content_mode/content_mode_controller.dart';
 import 'package:manhwamaniacs/features/content_mode/widgets/content_mode_chip.dart';
 import 'package:manhwamaniacs/features/library/models/followed_series.dart';
@@ -74,6 +77,13 @@ class UpdatesScreen extends ConsumerWidget {
           final notifications =
               scope.filter(state.notifications, (n) => n.sourceId);
           final followed = scope.filter(state.followed, (f) => f.sourceId);
+          // A notification carries a chapter title and a source id but not the
+          // SERIES title, so the card used to print the bare source ("asurascans")
+          // where the name of the thing you follow belongs. The follows are in
+          // the same state object; one map turns that into a real line.
+          final seriesTitles = {
+            for (final f in state.followed) f.id: f.title,
+          };
           final unread = notifications.where((n) => !n.isRead).length;
           final gutter = context.space.xl2;
           return RefreshIndicator(
@@ -155,6 +165,21 @@ class UpdatesScreen extends ConsumerWidget {
                                   EdgeInsets.only(bottom: context.space.md),
                               child: _NotificationCard(
                                 notification: notification,
+                                seriesTitle:
+                                    seriesTitles[notification.followedSeriesId],
+                                isNovel: scope.modeOf(notification.sourceId) ==
+                                    ContentMode.novel,
+                                // Opening the chapter IS reading it, so the
+                                // badge clears on the way through rather than
+                                // asking for a second, separate tap on a
+                                // button most people never press.
+                                onOpen: () {
+                                  if (!notification.isRead) {
+                                    unawaited(
+                                      notifier.markRead(notification.id),
+                                    );
+                                  }
+                                },
                                 onMarkRead: notification.isRead
                                     ? null
                                     : () => _run(
@@ -241,6 +266,9 @@ class _SectionHeader extends StatelessWidget {
 class _NotificationCard extends StatelessWidget {
   const _NotificationCard({
     required this.notification,
+    required this.isNovel,
+    this.seriesTitle,
+    this.onOpen,
     this.onMarkRead,
   });
 
@@ -249,6 +277,21 @@ class _NotificationCard extends StatelessWidget {
   static final DateFormat _stamp = DateFormat.yMMMd().add_jm();
 
   final UpdateNotification notification;
+
+  /// The followed series' own name, resolved from the follows in the same
+  /// payload. Null when the follow is gone (unfollowed since the notification
+  /// was written), in which case the source id is still better than nothing.
+  final String? seriesTitle;
+
+  /// Which reader this row opens. The notification carries a source id and no
+  /// kind, so the kind comes from the source-mode index — the same resolution
+  /// reading history, downloads and continue-reading make. Getting it wrong
+  /// opens a novel in the page reader.
+  final bool isNovel;
+
+  /// Side effects of opening, run before navigating.
+  final VoidCallback? onOpen;
+
   final VoidCallback? onMarkRead;
 
   @override
@@ -263,6 +306,25 @@ class _NotificationCard extends StatelessWidget {
     // for the one-per-screen surfaces.
     return GlassCard(
       padding: EdgeInsets.all(context.space.lg),
+      // The whole point of the screen: a new chapter you can open. This card
+      // used to have no tap target at all, so the only way to reach the chapter
+      // it announced was to remember the series and go find it.
+      onTap: () {
+        onOpen?.call();
+        context.push(
+          isNovel
+              ? RoutePaths.novelReader(
+                  notification.sourceId,
+                  notification.seriesKey,
+                  notification.chapterKey,
+                )
+              : RoutePaths.reader(
+                  notification.sourceId,
+                  notification.seriesKey,
+                  notification.chapterKey,
+                ),
+        );
+      },
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -270,7 +332,7 @@ class _NotificationCard extends StatelessWidget {
             children: [
               Expanded(
                 child: Text(
-                  notification.chapterTitle,
+                  seriesTitle ?? notification.chapterTitle,
                   style: context.text.labelLg,
                 ),
               ),
@@ -279,7 +341,11 @@ class _NotificationCard extends StatelessWidget {
           ),
           SizedBox(height: context.space.xs),
           Text(
-            notification.sourceId,
+            // With the series named above, this line is now the chapter — the
+            // thing the notification is actually about.
+            seriesTitle == null
+                ? notification.sourceId
+                : notification.chapterTitle,
             style: context.text.body.copyWith(color: context.colors.muted),
           ),
           if (date != null) ...[

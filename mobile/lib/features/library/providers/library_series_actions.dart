@@ -70,7 +70,7 @@ class LibrarySeriesActions {
       _remember(series, slots);
       return (error: result.error, slots: _noSlots);
     }
-    _ref.invalidate(dashboardProvider);
+    _ref.invalidate(continueReadingProvider);
     return (error: null, slots: slots);
   }
 
@@ -112,7 +112,7 @@ class LibrarySeriesActions {
     }
 
     _remember(restored, slots);
-    _ref.invalidate(dashboardProvider);
+    _ref.invalidate(continueReadingProvider);
     return null;
   }
 

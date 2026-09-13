@@ -1,42 +1,32 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:manhwamaniacs/core/error/app_error.dart';
-import 'package:manhwamaniacs/core/utils/result.dart';
-import 'package:manhwamaniacs/features/library/models/dashboard_data.dart';
+import 'package:manhwamaniacs/features/library/models/continue_reading_item.dart';
 import 'package:manhwamaniacs/shared/providers/repository_providers.dart';
 
-final dashboardProvider = FutureProvider.autoDispose<DashboardData>((ref) async {
+/// What this profile is part-way through, newest first.
+///
+/// This replaced a `dashboardProvider` that fetched three endpoints at once —
+/// recently-updated, continue-reading and statistics — for a home screen that
+/// was never built. Nothing watched it: the only references were the five
+/// `ref.invalidate` calls that still surround this provider, so the fetch never
+/// ran and the Library tab had no resume affordance at all.
+///
+/// Deliberately NOT a revival of that three-call provider. `GET
+/// /library/statistics` scans the profile's whole session history and is the
+/// heaviest endpoint in the app; putting it behind the Library tab would pay
+/// that cost on every launch to render a strip that does not use it.
+///
+/// Kept `autoDispose` and kept under the same invalidations, because reading
+/// position is per-(user, profile) and the 18+ gate can hide a series: a
+/// profile switch or a mature-setting change must not leave the previous
+/// persona's row on screen.
+final continueReadingProvider =
+    FutureProvider.autoDispose<List<ContinueReadingItem>>((ref) async {
   final repo = ref.watch(libraryRepositoryProvider);
-
-  // Started together, awaited after: the home screen cannot draw until all
-  // three have landed, and statistics is the heaviest endpoint in the app
-  // (`GET /library/statistics` scans the profile's whole session history), so
-  // running it third in a chain put its cost in front of first paint for no
-  // reason. Every request is independent and none feeds another.
-  final recentlyUpdated = repo.recentlyUpdated(limit: 8);
-  final continueReading = repo.continueReading(limit: 6);
-  final statistics = repo.statistics();
-
-  final recentlyUpdatedResult = await recentlyUpdated;
-  final continueReadingResult = await continueReading;
-  final statisticsResult = await statistics;
-
-  final error = _firstError([
-    recentlyUpdatedResult,
-    continueReadingResult,
-    statisticsResult,
-  ]);
-  if (error != null) throw error;
-
-  return DashboardData(
-    recentlyUpdated: recentlyUpdatedResult.value,
-    continueReading: continueReadingResult.value,
-    stats: statisticsResult.value,
-  );
+  final result = await repo.continueReading(limit: _continueReadingLimit);
+  if (result.isErr) throw result.error;
+  return result.value;
 });
 
-AppError? _firstError(List<Result<dynamic>> results) {
-  for (final result in results) {
-    if (result.isErr) return result.error;
-  }
-  return null;
-}
+/// Enough to fill the strip on the widest phone and leave a little to scroll,
+/// without asking the server for a page of rows nobody will reach.
+const int _continueReadingLimit = 8;

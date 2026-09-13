@@ -125,7 +125,7 @@ final List<void Function(Ref ref)> matureScopedInvalidators = [
   // from the same gated service (followed_series_service).
   (ref) => ref.invalidate(libraryListProvider),
   (ref) => ref.invalidate(seriesDetailProvider),
-  (ref) => ref.invalidate(dashboardProvider),
+  (ref) => ref.invalidate(continueReadingProvider),
   // Reading intelligence surfaces (reading_stats_service).
   (ref) => ref.invalidate(statisticsProvider),
   (ref) => ref.invalidate(recommendationsProvider),
@@ -388,7 +388,7 @@ final setupCompletedProvider = Provider<bool>(
 /// `ref.watch`, so invalidating only the repository would silently miss
 /// them.
 final List<void Function(Ref ref)> metadataCacheInvalidators = [
-  (ref) => ref.invalidate(dashboardProvider),
+  (ref) => ref.invalidate(continueReadingProvider),
   (ref) => ref.invalidate(libraryListProvider),
   (ref) => ref.invalidate(searchListProvider),
   (ref) => ref.invalidate(statisticsProvider),
