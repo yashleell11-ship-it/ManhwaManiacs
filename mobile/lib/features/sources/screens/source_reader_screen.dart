@@ -6,9 +6,11 @@ import 'package:go_router/go_router.dart';
 import 'package:manhwamaniacs/app/router/routes.dart';
 import 'package:manhwamaniacs/core/error/app_error.dart';
 import 'package:manhwamaniacs/core/network/network_connectivity.dart';
+import 'package:manhwamaniacs/features/downloads/providers/bookmark_outbox_provider.dart';
 import 'package:manhwamaniacs/features/downloads/providers/downloads_scope.dart';
 import 'package:manhwamaniacs/features/downloads/queue/download_queue_controller.dart';
 import 'package:manhwamaniacs/features/downloads/widgets/open_chapter_scope.dart';
+import 'package:manhwamaniacs/features/reader/models/bookmark.dart';
 import 'package:manhwamaniacs/features/reader/models/reader_chapter.dart';
 import 'package:manhwamaniacs/features/reader/providers/series_reading_order_provider.dart';
 import 'package:manhwamaniacs/features/reader/utils/reader_feed_controller.dart';
@@ -343,7 +345,41 @@ class _SourceReaderScreenState extends ConsumerState<SourceReaderScreen> {
             scrollStorageKey:
                 '${widget.sourceId}:${widget.seriesId}:${widget.chapterId}',
             initialPage: widget.initialPage,
-            showBookmark: false,
+            // Most reading STARTS here — this is the tab you reach anything you
+            // do not already follow through — and this reader was the only one
+            // of the three that could not make a bookmark. The bookmarks table
+            // had zero rows in production while the empty state told the reader
+            // to "tap the bookmark icon in either reader"; one of the two
+            // readers simply did not have one.
+            //
+            // Same outbox as the library reader (reader_screen.dart:442-460):
+            // the push is best-effort, so bookmarking with no signal is an
+            // ordinary success. `true` means "stored", not "sent".
+            onAddBookmark: (chapter, anchor) => ref
+                .read(bookmarkOutboxControllerProvider)
+                .create(
+                  id: (
+                    sourceId: widget.sourceId,
+                    seriesKey: widget.seriesId,
+                    chapterKey: chapter.id,
+                  ),
+                  media: BookmarkMedia.manga,
+                  anchorIndex: anchor.page,
+                  anchorFraction: anchor.fraction,
+                  // The pages actually in the feed, not the manifest's count:
+                  // the anchor was measured against what is on screen, and a
+                  // disagreeing total puts "page 9 of 8" on the Bookmarks
+                  // screen.
+                  anchorTotal: chapter.pages.length,
+                  // chapterNumber is left at its default null: this reader
+                  // keeps no chapter-number index, so a bookmark from here
+                  // reads "62% through this chapter" rather than naming a
+                  // number. Carrying it would mean threading the number through
+                  // ReaderChapter, which drags it into that model's `==` and
+                  // churns replaceChapter — not worth it for a label.
+                  seriesTitle: chapter.seriesTitle,
+                )
+                .then((bookmark) => bookmark != null),
             onReachedFeedEnd: feedController.extendForward,
             onReachedFeedStart: feedController.extendBackward,
             onSaveProgress: _saveProgress,

@@ -95,7 +95,7 @@ void main() {
       expect(find.text('Loading chapter…'), findsOneWidget);
     });
 
-    testWidgets('renders online chapter title, pages and hides bookmark',
+    testWidgets('renders online chapter title and pages',
         (tester) async {
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
@@ -125,8 +125,49 @@ void main() {
 
       expect(find.text('Chapter 1'), findsOneWidget);
       expect(find.textContaining('Page 1 / 2'), findsOneWidget);
-      // Online reader never offers bookmarks (not visible in main overlay or sheet).
-      expect(find.text('Save bookmark'), findsNothing);
+    });
+
+    testWidgets('offers a bookmark — most reading starts in this tab',
+        (tester) async {
+      // This screen used to pass showBookmark: false, so the Sources reader was
+      // the only one of the three that could not make a bookmark, while the
+      // Bookmarks screen's empty state told the reader to "tap the bookmark
+      // icon in either reader". The bookmarks table had zero rows in production.
+      //
+      // The assertion that was here before checked find.text('Save bookmark')
+      // findsNothing WITHOUT opening the more-options sheet that row lives in,
+      // so it passed whatever the flag said and proved nothing.
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+
+      await tester.binding.setSurfaceSize(const Size(430, 932));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(
+        _wrap(
+          [
+            sharedPrefsProvider.overrideWithValue(prefs),
+            sourceReaderPayloadProvider((
+              sourceId: 'mangadex',
+              seriesId: 'manga-1',
+              chapterId: 'manga-1:1',
+            ),).overrideWith((ref) async => _onlineChapter()),
+          ],
+          const SourceReaderScreen(
+            sourceId: 'mangadex',
+            seriesId: 'manga-1',
+            chapterId: 'manga-1:1',
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      await tester.tap(find.byTooltip('Reader settings'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text('Save bookmark'), findsOneWidget);
     });
 
     testWidgets('enables prev/next buttons when payload provides chapter ids',
