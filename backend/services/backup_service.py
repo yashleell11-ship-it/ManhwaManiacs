@@ -21,6 +21,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
+from core.cache_tables import CACHE_TABLES
 from core.backup_restore import (
     has_pending_restore,
     pending_restore_path,
@@ -39,12 +40,12 @@ _REQUIRED_TABLES = {"users", "followed_series", "chapter_progress", "alembic_ver
 # live box these four are ~97% of the file, so an export that carried them
 # would be dominated by bytes that are worthless the moment they are restored.
 # Nothing references them by foreign key, so emptying them leaves no orphans.
-_CACHE_TABLES = (
-    "source_series_cache",
-    "novel_chapter_cache",
-    "source_cover_cache",
-    "source_browse_cache",
-)
+#
+# Imported rather than written out here, because the nightly host job
+# (ops/vps/backup-db.sh) needs the same list and cannot import this module —
+# it runs under the VPS's system python with no virtualenv. See
+# core/cache_tables for why one tuple, and for what the drift cost.
+_CACHE_TABLES = CACHE_TABLES
 
 
 def spool_dir() -> Path:

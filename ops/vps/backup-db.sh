@@ -47,11 +47,27 @@ set -euo pipefail
 
 DB="${MM_DB_PATH:-/srv/manhwamaniacs/data/manhwamaniacs.db}"
 ROOT="${MM_BACKUP_ROOT:-/srv/manhwamaniacs/backups}"
+# The other half of this instance's state. It holds the registration invite code
+# and the global mature-content flag, it lives beside the database on the /data
+# volume, and nothing backed it up: a rebuilt box came back with the code gone
+# and every 18+ series hidden again (the setting defaults to false), with
+# nothing in the runbook to hint a file had been skipped. Copied rather than
+# rotated -- it is a few hundred bytes of current configuration, and having it
+# at all matters far more than having last Tuesday's.
+SETTINGS="${MM_SETTINGS_PATH:-/srv/manhwamaniacs/data/settings.json}"
 KEEP_DAILY="${MM_BACKUP_KEEP_DAILY:-7}"
 KEEP_WEEKLY="${MM_BACKUP_KEEP_WEEKLY:-4}"
 WEEKLY_DOW="${MM_BACKUP_WEEKLY_DOW:-7}"      # ISO weekday, 7 = Sunday
 ZSTD_LEVEL="${MM_BACKUP_ZSTD_LEVEL:-9}"
 PY="${MM_PYTHON:-python3}"
+# The one list of cache tables, shared with the in-app export so the two cannot
+# drift (backend/core/cache_tables.py is dependency-free precisely so this
+# script's bare system python can read it).
+CACHE_TABLES_PY="${MM_CACHE_TABLES_PY:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/backend/core/cache_tables.py}"
+# 1 keeps the regenerable cache in the snapshot, for cloning a box that should
+# come up warm. The default drops it: on the live box those tables are ~96% of
+# the file and are worthless the moment they are restored.
+INCLUDE_CACHE="${MM_BACKUP_INCLUDE_CACHE:-0}"
 LOG="$ROOT/backup.log"
 
 say(){ echo "==> $*"; }
@@ -63,9 +79,30 @@ need(){ command -v "$1" >/dev/null 2>&1 || { err "missing tool: $1"; exit 1; }; 
 # Snapshot $1 (live db) into $2 (fresh path) with VACUUM INTO over a read-only
 # connection, then integrity_check the COPY and print a JSON summary line.
 snapshot(){
-  "$PY" - "$1" "$2" <<'PY'
+  "$PY" - "$1" "$2" "$CACHE_TABLES_PY" "$INCLUDE_CACHE" <<'PY'
 import json, os, sqlite3, sys, time
 src, dst = sys.argv[1], sys.argv[2]
+cache_list_path = sys.argv[3] if len(sys.argv) > 3 else ""
+include_cache = (sys.argv[4] if len(sys.argv) > 4 else "0") == "1"
+
+
+def _cache_tables(path):
+    """The shared tuple, read without importing the backend package.
+
+    exec of a module whose entire body is one tuple literal: this runs under the
+    VPS's system python, which has none of the backend's dependencies. Returns
+    () when the file is missing so a snapshot NEVER fails over this -- keeping
+    the cache makes a fat backup, not a broken one, and a fat backup beats none.
+    """
+    if not path or not os.path.exists(path):
+        return ()
+    namespace = {}
+    try:
+        with open(path) as handle:
+            exec(compile(handle.read(), path, "exec"), namespace)
+        return tuple(namespace.get("CACHE_TABLES") or ())
+    except Exception:
+        return ()
 t0 = time.time()
 if os.path.exists(dst):
     os.remove(dst)
@@ -76,6 +113,28 @@ try:
     con.execute("VACUUM INTO ?", (dst,))
 finally:
     con.close()
+
+# Empty the derived tables, then vacuum again -- a DELETE alone leaves the freed
+# pages allocated, and it is the second vacuum that actually makes the file
+# small. Same policy the in-app export has always had; the nightly job simply
+# never got it, so the backups that matter were the fat ones.
+dropped = []
+if not include_cache:
+    work = sqlite3.connect(dst)
+    try:
+        present = {
+            r[0] for r in work.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        for table in _cache_tables(cache_list_path):
+            if table in present:
+                work.execute(f"DELETE FROM {table}")
+                dropped.append(table)
+        if dropped:
+            work.commit()
+            work.execute("VACUUM")
+    finally:
+        work.close()
+
 # SQLite does not fsync a VACUUM INTO target; do it ourselves before we trust it.
 fd = os.open(dst, os.O_RDONLY)
 try:
@@ -104,6 +163,7 @@ try:
         "fk_violations": len(fk),
         "counts": counts,
         "snapshot_s": round(time.time() - t0, 3),
+        "cache_dropped": dropped,
     }
 finally:
     copy.close()
@@ -160,10 +220,24 @@ cmd_run(){
   ls -1 "$ROOT/daily"/manhwamaniacs-*.db.zst  2>/dev/null | sort | head -n "-$KEEP_DAILY"  | xargs -r rm -f
   ls -1 "$ROOT/weekly"/manhwamaniacs-*.db.zst 2>/dev/null | sort | head -n "-$KEEP_WEEKLY" | xargs -r rm -f
 
+  # Refreshed in place beside the rotated snapshots. Deliberately NOT one file
+  # per run: the rotation globs manhwamaniacs-*.db.zst, so a second timestamped
+  # artefact per run would accumulate forever with nothing pruning it.
+  local settings_state="absent"
+  if [ -r "$SETTINGS" ]; then
+    if cp -f "$SETTINGS" "$ROOT/settings.json.bak.tmp" \
+       && mv -f "$ROOT/settings.json.bak.tmp" "$ROOT/settings.json.bak"; then
+      settings_state="saved"
+    else
+      settings_state="FAILED"
+      rm -f "$ROOT/settings.json.bak.tmp"
+    fi
+  fi
+
   local zst_bytes total_bytes
   zst_bytes=$(stat -c %s "$final")
   total_bytes=$(du -sb "$ROOT" | cut -f1)
-  log "OK $final zst_bytes=$zst_bytes elapsed_s=$(( $(date +%s) - t0 )) backups_total_bytes=$total_bytes info=$info"
+  log "OK $final zst_bytes=$zst_bytes elapsed_s=$(( $(date +%s) - t0 )) backups_total_bytes=$total_bytes settings=$settings_state info=$info"
 }
 
 cmd_verify(){

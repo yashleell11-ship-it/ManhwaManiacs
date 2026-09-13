@@ -19,14 +19,26 @@ this file *is* the product.
    Consistent under WAL, never blocks the app's writers, never checkpoints,
    never writes to the live file. Same primitive the admin "export" button
    uses (`backend/services/backup_service.py:59`). Verified on the live box:
-   0.09 s for the 21 MB DB, copy integrity_check ok, gzip ≈ 10 MB.
-2. fsync the copy (SQLite does not fsync a VACUUM INTO target).
-3. `PRAGMA integrity_check` + `foreign_key_check` **on the copy**; a bad copy
+   0.56 s for the 57 MB DB, copy integrity_check ok.
+2. **Empty the four derived tables, then vacuum again**, unless
+   `MM_BACKUP_INCLUDE_CACHE=1`. The list comes from
+   `backend/core/cache_tables.py`, the same tuple the in-app export reads, so
+   the two cannot drift (`tests/test_audit_backup_cache_tables.py` fails if
+   they do). This is most of the file: measured on live data the snapshot goes
+   **57 MB -> 860 KB** and the compressed artefact **43.5 MB -> 53 KB**. A
+   restored copy comes up COLD — the first browse of each source refetches —
+   which is the trade, and it is a good one: those bytes are worthless the
+   moment they land.
+3. fsync the copy (SQLite does not fsync a VACUUM INTO target).
+4. `PRAGMA integrity_check` + `foreign_key_check` **on the copy**; a bad copy
    is discarded and the run fails loudly (systemd unit → failed).
-4. `zstd -9`, atomic `mv` into `/srv/manhwamaniacs/backups/daily/`, `sync -f`.
-5. Rotation: 7 daily; on Sundays (or when `weekly/` is empty) hard-link into
+5. `zstd -9`, atomic `mv` into `/srv/manhwamaniacs/backups/daily/`, `sync -f`.
+6. Rotation: 7 daily; on Sundays (or when `weekly/` is empty) hard-link into
    `weekly/`, keep 4. `latest.db.zst` symlink → newest daily.
-6. One log line per run in `backups/backup.log` and the journal:
+7. Copy `settings.json` to `backups/settings.json.bak`, refreshed in place
+   rather than rotated. See below — it is the other half of this instance's
+   state and nothing used to back it up.
+8. One log line per run in `backups/backup.log` and the journal:
    status, file, compressed bytes, elapsed, total bytes on disk, and a JSON
    blob with alembic revision, uncompressed size, live `.db`/`-wal` sizes,
    FK violations and row counts of users / reading_profiles / followed_series /
@@ -36,7 +48,31 @@ this file *is* the product.
 Free-space guard: refuses to run with less than 3 × (db + wal) free on the
 backup disk. Lock: `flock` on `backups/.lock`.
 
-Budget on the current DB: ~10 MB × 11 files ≈ 110 MB on a disk with 47 GB free.
+Budget on the current DB: ~53 KB × 11 files ≈ 600 KB on a disk with 46 GB free.
+It was ~110 MB before the cache tables were dropped, and the live `backups/`
+directory had reached 287 MB — which is what made the off-box pull below look
+expensive when it is in fact trivial.
+
+### `settings.json` — the other half of the state
+
+`/srv/manhwamaniacs/data/settings.json` holds the **registration invite code**
+and the global **mature-content** flag (`MM_SETTINGS_PATH` in the compose file;
+written by `deploy.sh set-invite-code`). It lives beside the database and was in
+no backup and no restore step, so a rebuilt box came back with the invite code
+gone and every 18+ series hidden again — the setting defaults to false — with
+nothing in this runbook to say a file had been skipped.
+
+The nightly job now copies it to `backups/settings.json.bak`. **Restoring the
+database does not restore it**: put it back by hand with
+
+```bash
+cp /srv/manhwamaniacs/backups/settings.json.bak /srv/manhwamaniacs/data/settings.json
+sudo chown 1000:1000 /srv/manhwamaniacs/data/settings.json
+```
+
+then restart the backend. The log line for each run ends with
+`settings=saved|absent|FAILED`; `absent` is normal until an invite code has been
+set for the first time.
 
 ## Install (once, after the patch lands)
 
