@@ -166,6 +166,62 @@ apk_version(){
     | head -1
 }
 
+# Build the APK this script is about to publish, with the dart-defines a
+# production build REQUIRES.
+#
+# Why this exists: `apk` used to only grade an APK you had built in another
+# shell, and the rebuild command it suggested omitted both defines. Without them
+# Env.flavor is 'dev' and Env.defaultApiUrl is http://127.0.0.1:8000
+# (mobile/lib/core/config/env.dart:7-16), so hasBakedProductionUrl is false and a
+# FRESH install opens the manual setup screen pre-filled with localhost instead
+# of connecting — and allowInsecureBaseUrl becomes true, defeating the
+# https-only rule that exists so the bearer token never travels in clear text.
+# 2.7.3 shipped exactly that way. An existing install hides it, because the
+# server URL lives in secure storage.
+#
+# JAVA_HOME is equally load-bearing: without JDK 17 Gradle fails while still
+# exiting 0, leaving the PREVIOUS apk in build/app/outputs for this script to
+# publish.
+APK_API_URL="${MM_APK_API_URL:-https://app.manhwamaniacs.xyz}"
+APK_JAVA_HOME="${MM_APK_JAVA_HOME:-$HOME/jdk17}"
+
+build_apk(){
+  local flutter_bin="${MM_FLUTTER:-$HOME/flutter/bin/flutter}"
+  [ -x "$flutter_bin" ] || { echo "!! no flutter at $flutter_bin (set MM_FLUTTER)" >&2; exit 1; }
+  [ -d "$APK_JAVA_HOME" ] || { echo "!! no JDK 17 at $APK_JAVA_HOME (set MM_APK_JAVA_HOME)" >&2; exit 1; }
+  say "building the release APK (FLAVOR=prod, API_URL=$APK_API_URL)"
+  ( cd "$REPO/mobile" && JAVA_HOME="$APK_JAVA_HOME" "$flutter_bin" build apk --release \
+      --dart-define=FLAVOR=prod \
+      --dart-define=API_URL="$APK_API_URL" ) \
+    || { echo "!! flutter build apk failed" >&2; exit 1; }
+}
+
+# The production API URL must be COMPILED IN, not merely passed on a command
+# line that may have been forgotten. dart-defines land in libapp.so, so read it
+# back out of the artifact — the only check that cannot be fooled by a build
+# that failed and left the previous apk behind.
+verify_apk_is_production(){
+  local apk="$1" host
+  host="${APK_API_URL#https://}"; host="${host%%/*}"
+  python3 - "$apk" "$host" <<'PYBAKED'
+import sys, zipfile
+apk, host = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(apk) as z:
+    names = [n for n in z.namelist() if n.endswith("/libapp.so")]
+    if not names:
+        print("!! no libapp.so in the APK — cannot confirm the baked URL", file=sys.stderr)
+        raise SystemExit(3)
+    blob = z.read(names[0])
+if blob.count(host.encode()) == 0:
+    print(f"!! REFUSING TO PUBLISH: {host} is not compiled into this APK.", file=sys.stderr)
+    print( "   It was built without --dart-define=API_URL, so it defaults to", file=sys.stderr)
+    print( "   http://127.0.0.1:8000 and a fresh install lands on the setup", file=sys.stderr)
+    print( "   screen instead of connecting. Rebuild via: ops/vps/push.sh apk", file=sys.stderr)
+    raise SystemExit(3)
+print(f"   production URL baked in: {host}")
+PYBAKED
+}
+
 verify_apk(){
   local apk="$1" abis missing=""
   local want got
@@ -178,7 +234,10 @@ verify_apk(){
 !! REFUSING TO PUBLISH: this APK is $got, but mobile/pubspec.yaml says $want.
    A Flutter release build can fail and still exit 0, leaving the PREVIOUS apk
    in build/app/outputs/ for this script to find. Rebuild before publishing:
-     (cd mobile && JAVA_HOME=/home/yash/jdk17 flutter build apk --release)
+     ops/vps/push.sh apk
+   Do NOT hand-run `flutter build apk --release`: without
+   --dart-define=FLAVOR=prod --dart-define=API_URL=https://app.manhwamaniacs.xyz
+   the APK defaults to http://127.0.0.1:8000 and a fresh install cannot connect.
 EOF
     exit 3
   else
@@ -242,6 +301,9 @@ case "${1:-all}" in
     read -r c b < <(stamp); remote_deploy "$c" "$b" ;;
   apk)
     APK="$REPO/mobile/build/app/outputs/flutter-apk/app-release.apk"
+    # Build it here unless explicitly told not to. Publishing an artifact this
+    # script did not produce is how a dev-flavour APK reached /app/download.
+    [ "${MM_APK_NO_BUILD:-0}" = 1 ] || build_apk
     if [ ! -f "$APK" ]; then
       echo "no APK at $APK — run the release build first:" >&2
       echo "    (cd mobile && flutter build apk --release)" >&2
@@ -253,6 +315,7 @@ case "${1:-all}" in
       exit 1
     fi
     verify_apk "$APK"
+    verify_apk_is_production "$APK"
     say "publishing the APK"
     # The version endpoint reads the pubspec through a single-FILE bind mount,
     # and `apk` is usually run on its own — so without this the box happily

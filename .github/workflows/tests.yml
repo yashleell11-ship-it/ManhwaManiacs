@@ -1,0 +1,106 @@
+name: tests
+
+# The correctness gate. Runs the backend, frontend and mobile suites — roughly
+# 2600 pytest, 2304 vitest and 1611 flutter tests — on every push to the working
+# branch and on every pull request.
+#
+# Why this exists: until it did, NOTHING ran a test on a push. The four
+# .forgejo/workflows/* files target a Forgejo instance on the household NAS,
+# which is offline, and the only workflow GitHub actually ran was ios-build.yml,
+# which went pub get -> build -> `gh release create` with no test step at all.
+# `ops/vps/push.sh` gates a VPS deploy on backend pytest and a Next build, so the
+# frontend and mobile suites were only ever run by hand, by someone remembering
+# to. 2.7.3 shipped that way.
+#
+# It is also callable (workflow_call) so ios-build.yml can gate the step that
+# publishes an .ipa to the phone on a green run. See the `tests` job there.
+
+on:
+  push:
+    branches:
+      - feat/vps-slim-source-native
+      - master
+  pull_request:
+  workflow_call:
+
+# A second push supersedes the first: these three suites take minutes and the
+# only run whose result matters is the newest. Never cancel on master — a
+# superseded run there would leave the default branch with no verdict at all.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # requires-python is >=3.11; the VPS image and the developer venv both
+          # run 3.14, and SQLAlchemy is pinned to 2.0.52 precisely because
+          # 2.0.35 crashes there. Test on what production runs.
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest==9.1.1
+      - name: pytest
+        working-directory: backend
+        # The suite deselects its live-network tests by default. Those are the
+        # ones that fail on a NAT64 network for reasons that have nothing to do
+        # with the code, so a CI runner must not opt into them either.
+        run: pytest -q --no-header
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Typecheck
+        working-directory: frontend
+        run: npm run typecheck
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+      - name: Unit tests
+        working-directory: frontend
+        run: npm run test
+      - name: Production build
+        working-directory: frontend
+        run: npm run build
+
+  mobile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          # Pinned to the same version ios-build.yml builds the shipped .ipa
+          # with. If these drift, CI can pass on a toolchain that is not the one
+          # that produces the binary on the phone.
+          flutter-version: '3.44.6'
+          channel: stable
+          cache: true
+      - name: Resolve packages
+        working-directory: mobile
+        run: flutter pub get
+      - name: Static analysis
+        working-directory: mobile
+        # Bare, NOT `analyze lib`: the lib-scoped form skips test/, which is
+        # where a broken fixture hides until someone runs the suite locally.
+        run: flutter analyze
+      - name: Unit and widget tests
+        working-directory: mobile
+        run: flutter test

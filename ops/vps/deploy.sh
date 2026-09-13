@@ -12,6 +12,9 @@
 #   ops/vps/deploy.sh set-invite-code [CODE|clear]
 #                                      set/rotate (or clear) the registration
 #                                      invite code; generates one if omitted
+#   ops/vps/deploy.sh rollback         put the PREVIOUS images back and restart
+#                                      (refuses across a forward migration unless
+#                                       MM_ROLLBACK_FORCE=1 — see cmd_rollback)
 #   ops/vps/deploy.sh logs             tail both containers
 #   ops/vps/deploy.sh edge             (re)install the Caddy + cloudflared routing
 #
@@ -44,16 +47,16 @@ cmd_deploy() {
   export GIT_COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
   export GIT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
   echo ">> building $GIT_BRANCH @ $GIT_COMMIT"
+  tag_previous_images
   "${COMPOSE[@]}" build
   "${COMPOSE[@]}" up -d
-  echo ">> waiting for health"
-  for i in $(seq 1 30); do
-    if docker inspect --format '{{.State.Health.Status}}' manhwamaniacs-frontend 2>/dev/null | grep -q healthy \
-    && docker inspect --format '{{.State.Health.Status}}' manhwamaniacs-backend  2>/dev/null | grep -q healthy; then
-      echo ">> both healthy"; break
-    fi
-    sleep 3
-  done
+
+  if ! wait_for_health; then
+    echo "!! containers did not become healthy" >&2
+    "${COMPOSE[@]}" ps
+    rollback_to_previous "containers never became healthy"
+    return 1
+  fi
   "${COMPOSE[@]}" ps
   echo ">> in-container health:"
   docker exec manhwamaniacs-backend python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=4).read().decode())" || true
@@ -99,6 +102,16 @@ sys.exit(1)
 PYCHECK
   then
     echo ">> DEPLOY NOT VERIFIED — see the mismatch above" >&2
+    rollback_to_previous "the deployed-code check failed"
+    return 1
+  fi
+
+  # Everything above this line is reachable from inside the box. None of it
+  # proves a reader on a phone can load the site: that path is
+  # cloudflared -> Caddy -> container, and a broken vhost or a tunnel that did
+  # not pick up a new container IP fails while every container reports healthy.
+  if ! verify_public_url; then
+    rollback_to_previous "the public URL did not answer"
     return 1
   fi
 
@@ -140,6 +153,170 @@ reclaim_build_cache() {
     echo ">> root disk free: ${before}M -> ${after}M (reclaimed $((after - before))M)"
   fi
   df -h / | tail -1 | sed 's/^/>> /'
+}
+
+# --------------------------------------------------------------------------
+# Release safety: a rollback target, and gates that can actually fail.
+#
+# Before this, `deploy` could not fail. The health loop broke on success and had
+# no else branch, so thirty failed polls fell straight through to `compose ps`
+# and a green-looking deploy; nothing ever checked the public URL; and both
+# services are pinned to `:latest` in the compose file, so each rebuild replaced
+# the only copy of the working image. A bad deploy was unnoticed and
+# unrecoverable in the same breath.
+#
+# The shape is lifted from the NAS-era ops/deploy.sh, which had all of this.
+# --------------------------------------------------------------------------
+
+IMAGES=(local/manhwamaniacs-backend local/manhwamaniacs-frontend)
+PUBLIC_HEALTH_URL="${MM_PUBLIC_HEALTH_URL:-https://app.manhwamaniacs.xyz/health}"
+
+# Tag what is running as :previous so the build about to overwrite :latest
+# leaves something to go back to. Tagging is a cheap pointer, not a copy, and
+# because :previous is a TAG it survives `docker image prune -f` (which removes
+# dangling images only) — that is what makes reclaim_build_cache safe to keep.
+tag_previous_images() {
+  local img
+  for img in "${IMAGES[@]}"; do
+    if docker image inspect "$img:latest" >/dev/null 2>&1; then
+      docker tag "$img:latest" "$img:previous" \
+        && echo ">> kept $img:previous as a rollback target"
+    else
+      echo ">> no $img:latest yet — first deploy, nothing to keep"
+    fi
+  done
+}
+
+# Both containers healthy, or non-zero. 30 x 3s = 90s, the same budget the old
+# loop used; the difference is that running out now means something.
+wait_for_health() {
+  local i status_f status_b
+  echo ">> waiting for health"
+  for i in $(seq 1 30); do
+    status_f="$(docker inspect --format '{{.State.Health.Status}}' manhwamaniacs-frontend 2>/dev/null || echo missing)"
+    status_b="$(docker inspect --format '{{.State.Health.Status}}' manhwamaniacs-backend  2>/dev/null || echo missing)"
+    if [ "$status_f" = healthy ] && [ "$status_b" = healthy ]; then
+      echo ">> both healthy"
+      return 0
+    fi
+    sleep 3
+  done
+  echo "!! after 90s: frontend=$status_f backend=$status_b" >&2
+  return 1
+}
+
+# The path a phone actually takes: cloudflared -> Caddy -> container. A broken
+# vhost, or a tunnel still pointing at the old container IP, fails here while
+# every container reports healthy.
+# Retried, because the consequence of a false negative here is rolling back a
+# perfectly good release. The round trip leaves the box, so a single failed
+# curl is as likely to be a Cloudflare blip as a broken deploy; three failures
+# twenty seconds apart is not. Measured from the VPS: 200 in 0.1-0.3s.
+verify_public_url() {
+  local code attempt
+  echo ">> public URL check: $PUBLIC_HEALTH_URL"
+  for attempt in 1 2 3; do
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$PUBLIC_HEALTH_URL" 2>/dev/null || echo 000)"
+    case "$code" in
+      2*|3*) echo ">> public URL answered $code"; return 0 ;;
+    esac
+    echo ">> attempt $attempt: HTTP $code"
+    [ "$attempt" = 3 ] || sleep 10
+  done
+  echo "!! public URL still answering $code after 3 attempts" >&2
+  return 1
+}
+
+# The alembic head baked into an image, or empty if it cannot be read.
+image_alembic_head() {
+  # `-i` is load-bearing for the same reason the deployed-code check above says
+  # so: without it stdin is not attached, python reads an empty program, exits 0,
+  # and this returns an empty revision — which the caller would read as "cannot
+  # tell" and wave the rollback through.
+  docker run --rm -i --entrypoint python "$1" - <<'PYHEAD' 2>/dev/null || true
+try:
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    heads = ScriptDirectory.from_config(Config("alembic.ini")).get_heads()
+    print(heads[0] if len(heads) == 1 else "")
+except Exception:
+    print("")
+PYHEAD
+}
+
+# The revision the live database is actually stamped at.
+db_alembic_version() {
+  docker exec -i manhwamaniacs-backend python - <<'PYVER' 2>/dev/null || true
+import sqlite3
+try:
+    con = sqlite3.connect("file:/data/manhwamaniacs.db?mode=ro", uri=True)
+    row = con.execute("SELECT version_num FROM alembic_version").fetchone()
+    print(row[0] if row else "")
+except Exception:
+    print("")
+PYVER
+}
+
+# Put :previous back. Used automatically by a failed deploy and by `rollback`.
+restore_previous_images() {
+  local img missing=0
+  for img in "${IMAGES[@]}"; do
+    docker image inspect "$img:previous" >/dev/null 2>&1 || { missing=1; echo "!! no $img:previous" >&2; }
+  done
+  [ "$missing" = 0 ] || return 1
+  for img in "${IMAGES[@]}"; do
+    docker tag "$img:previous" "$img:latest"
+  done
+  "${COMPOSE[@]}" up -d --force-recreate
+  wait_for_health
+}
+
+# Automatic rollback on a failed deploy. Never masks the original failure: the
+# caller still returns non-zero either way.
+rollback_to_previous() {
+  local why="$1"
+  echo "!! DEPLOY FAILED: $why" >&2
+  echo ">> rolling back to the previous images" >&2
+  if restore_previous_images; then
+    echo ">> ROLLED BACK — the previous release is running again" >&2
+    verify_public_url || echo "!! rollback is up but the public URL still fails — check Caddy/cloudflared" >&2
+  else
+    echo "!! ROLLBACK NOT POSSIBLE — no previous images. The stack is left as-is;" >&2
+    echo "!! inspect with: $0 logs" >&2
+  fi
+  echo "!! NOTE: migrations run at container start, so if this release migrated" >&2
+  echo "!! the database, the restored image may be older than the schema." >&2
+}
+
+# Manual rollback.
+#
+# The guard that matters: migrations run on container start
+# (database/session.py), so the database may already be one or more revisions
+# ahead of the image being restored. Putting an older image in front of a newer
+# schema is not a rollback, it is a second outage — so refuse by default and
+# make the operator say MM_ROLLBACK_FORCE=1 out loud.
+cmd_rollback() {
+  local db_rev img_rev
+  db_rev="$(db_alembic_version | tr -d '[:space:]')"
+  img_rev="$(image_alembic_head "local/manhwamaniacs-backend:previous" | tr -d '[:space:]')"
+  echo ">> database is stamped at: ${db_rev:-unknown}"
+  echo ">> :previous image expects: ${img_rev:-unknown}"
+
+  if [ -n "$db_rev" ] && [ -n "$img_rev" ] && [ "$db_rev" != "$img_rev" ]; then
+    echo "!! REFUSING: the database has moved past the image you are rolling back to." >&2
+    echo "!! Rolling the code back will not undo a migration. Restore the database" >&2
+    echo "!! from a backup taken before the migration (ops/vps/RESTORE.md), or" >&2
+    echo "!! re-run with MM_ROLLBACK_FORCE=1 if you are certain the schema is" >&2
+    echo "!! compatible with both revisions." >&2
+    [ "${MM_ROLLBACK_FORCE:-0}" = 1 ] || return 1
+    echo ">> MM_ROLLBACK_FORCE=1 — proceeding anyway" >&2
+  elif [ -z "$db_rev" ] || [ -z "$img_rev" ]; then
+    echo ">> could not read one of the revisions; proceeding, but verify by hand"
+  fi
+
+  restore_previous_images || { echo "!! rollback failed" >&2; return 1; }
+  verify_public_url || { echo "!! rolled back but the public URL still fails" >&2; return 1; }
+  echo ">> rolled back and verified"
 }
 
 cmd_create_owner() {
@@ -522,8 +699,9 @@ case "${1:-deploy}" in
   create-owner)    cmd_create_owner ;;
   reset-accounts)  cmd_reset_accounts ;;
   set-invite-code) cmd_set_invite_code "${2:-}" ;;
+  rollback)        cmd_rollback ;;
   logs)            cmd_logs ;;
   edge)            cmd_edge ;;
   install-timers)  cmd_install_timers ;;
-  *) echo "usage: $0 {deploy|create-owner|reset-accounts|set-invite-code [CODE|clear]|logs|edge|install-timers}"; exit 2 ;;
+  *) echo "usage: $0 {deploy|rollback|create-owner|reset-accounts|set-invite-code [CODE|clear]|logs|edge|install-timers}"; exit 2 ;;
 esac

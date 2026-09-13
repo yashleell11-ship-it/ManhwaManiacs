@@ -14,7 +14,22 @@ on:
   workflow_dispatch:
 
 jobs:
+  # The full backend/frontend/mobile suite. Gating the PUBLISH step on this is
+  # the point: a push to this branch puts an .ipa on the phone within 15 minutes
+  # (mm-fetch-ios.timer polls /releases/latest, and the build number is
+  # 1000 + run_number so it always beats whatever is installed). Before this,
+  # a mid-work push shipped itself with zero tests run and no way to roll an
+  # .ipa back.
+  tests:
+    uses: ./.github/workflows/tests.yml
+
   build-ios:
+    needs: tests
+    # Build even when the suite is red. `needs` alone would skip this job, and a
+    # failing test would then cost a Mac build nobody can reproduce locally —
+    # there is no Mac in this project. So: always build and upload the artifact,
+    # and let only the release step care about the verdict.
+    if: always()
     runs-on: macos-latest
     # Needed to publish the .ipa as a release asset (see the last step for why a
     # release rather than just an artifact).
@@ -159,6 +174,11 @@ jobs:
           echo "purpose strings present"
 
       - name: Publish the .ipa as a release asset
+        # THE GATE: a release is what reaches the phone, so it requires a green
+        # suite. The build above ran regardless, so a red run still leaves a
+        # downloadable artifact for anyone who wants to inspect it — it just
+        # never becomes an update SideStore will offer.
+        if: needs.tests.result == 'success'
         # GitHub requires authentication to download a workflow *artifact*, even
         # on a public repo — so the NAS could not fetch a build without a PAT
         # minted and stored as root. Release assets on a public repo are
