@@ -42,6 +42,7 @@ from database.models import (
     UpdateSettings,
 )
 from database.session import SessionLocal, get_db
+from services.source_health import record_outcomes
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,46 @@ def _loads(value: str | None) -> list[dict[str, Any]]:
         return data if isinstance(data, list) else []
     except (ValueError, TypeError):
         return []
+
+
+#: Failures that mean the SOURCE is unwell, mapped to the fixed phrase stored in
+#: the global ``source_health`` row.
+#:
+#: Fixed phrases, not the exception text. ``FollowedSeries.last_error`` may carry
+#: ``str(exc)`` because that row belongs to one (user, profile) and is shown only
+#: to its owner; ``source_health`` is global and served to every account on the
+#: instance, and an upstream exception routinely embeds the full request URL.
+_HEALTH_TRANSPORT = "The source could not be reached."
+_HEALTH_REFUSED = "The source refused the request."
+_HEALTH_BROKE = "The source answered, but not in a way we could read."
+
+
+def _health_failure(exc: BaseException) -> str | None:
+    """What this exception says about the SOURCE, or None if it says nothing.
+
+    Three things a sweep failure can mean, and only one of them is the site
+    being unwell:
+
+    * The source answered correctly that a particular series is gone
+      (``series_not_found``). One series disappearing is not an outage — the
+      site is working, it just does not have that page any more.
+    * The source is not registered at all in this process (``source_not_found``),
+      which is configuration, not health. A novel connector with the novels flag
+      off raises exactly this, and counting it would mark a perfectly good source
+      dead because of a local setting.
+    * Anything else — DNS, TLS, connection, timeout, a 403 bot wall, markup we
+      cannot parse — is the source, and is what the streak is for.
+    """
+    code = getattr(exc, "code", None)
+    if code in {"series_not_found", "source_not_found"}:
+        return None
+    if isinstance(exc, AppError):
+        # Everything else an AppError can be here came from the upstream
+        # request itself.
+        return _HEALTH_REFUSED if (exc.status_code or 0) == 403 else _HEALTH_BROKE
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+        return _HEALTH_TRANSPORT
+    return _HEALTH_BROKE
 
 
 class UpdateService:
@@ -520,6 +561,16 @@ class UpdateService:
             deadline = max(0, cfg.update_sweep_deadline_minutes) * 60
             sweep_started = _monotonic()
             source_spent: dict[str, float] = {}
+            # Per-SOURCE evidence for source_health, accumulated across the
+            # pass. The sweep already contacts every followed source, so this
+            # costs no extra upstream request — and before it, the only thing
+            # that could ever clear a failure streak was the owner personally
+            # typing a search while the source happened to answer
+            # (record_outcomes' one caller is the federated-search fan-out).
+            # Live proof of the cost: source_health had not moved in eight days
+            # and two sources had sat at the failure ceiling for ten.
+            ok_sources: set[str] = set()
+            failed_sources: dict[str, str] = {}
 
             for row in rows:
                 if deadline and _monotonic() - sweep_started >= deadline:
@@ -541,9 +592,18 @@ class UpdateService:
                     )
                     continue
                 row_started = _monotonic()
+                self._last_check_degraded = False
                 try:
                     new_found += self._check_one(row)
                     checked += 1
+                    # A degraded answer (markup drifted, a soft block, an empty
+                    # page) returns normally but is NOT evidence the source is
+                    # well. Counting it as success would reset a soft-blocked
+                    # source's streak from the ceiling straight back to zero,
+                    # every single pass, so it can never be recorded as failing.
+                    # It counts as neither.
+                    if not self._last_check_degraded:
+                        ok_sources.add(row.source_id)
                 except Exception as exc:  # noqa: BLE001 - one dead source never aborts the sweep
                     # A failure inside a flush leaves the session refusing every
                     # later statement until it is rolled back, so without this
@@ -551,6 +611,14 @@ class UpdateService:
                     # finalised, and one bad row 500'd the whole sweep.
                     self._db.rollback()
                     row.last_error = str(exc)[:500]
+                    # last_error above is per-(user, profile) and only ever
+                    # shown to its owner. source_health is GLOBAL and served to
+                    # everyone, so it gets a classified, fixed phrase instead:
+                    # an upstream exception string can carry a full URL with
+                    # query parameters, and this instance has four accounts.
+                    kind = _health_failure(exc)
+                    if kind is not None:
+                        failed_sources.setdefault(row.source_id, kind)
                     logger.warning(
                         "update check failed for %s/%s: %s",
                         row.source_id,
@@ -577,6 +645,17 @@ class UpdateService:
             settings = self.get_global_settings()
             settings.last_run_at = run.finished_at
             self._db.commit()
+
+            # One call for the whole pass. A source that answered for ANY of
+            # its series counts as healthy: one dead series is not a dead site,
+            # and the failure streak exists to describe the site.
+            outcomes: dict[str, str | None] = {
+                src: None for src in ok_sources
+            }
+            for src, kind in failed_sources.items():
+                outcomes.setdefault(src, kind)
+            if outcomes:
+                record_outcomes(self._db, outcomes)
 
         if followed_ids is None:
             self._prune_history()
@@ -698,6 +777,9 @@ class UpdateService:
                 # released in between never diffs as new and never notifies.
                 # Keep the snapshot, record why, and let the next pass try again.
                 row.last_error = "Source returned no chapters; snapshot kept."
+                # Read by run_check: this is neither a success nor a failure
+                # for the SOURCE, so it must not touch its health streak.
+                self._last_check_degraded = True
                 logger.warning(
                     "update check for %s/%s returned an empty chapter list; "
                     "keeping the %d-chapter snapshot",

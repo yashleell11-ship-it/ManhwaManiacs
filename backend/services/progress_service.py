@@ -658,7 +658,13 @@ class ProgressService:
             )
 
         self._clear_update_notification(
-            user_id, profile_id, source_id, series_key, chapter_key
+            user_id,
+            profile_id,
+            source_id,
+            series_key,
+            # Both spellings: the canonical one this row is keyed by, and the
+            # raw one the client sent. See the helper for why.
+            {chapter_key, payload.chapter_key},
         )
 
         return row, merged
@@ -669,7 +675,7 @@ class ProgressService:
         profile_id: int,
         source_id: str,
         series_key: str,
-        chapter_key: str,
+        chapter_keys: set[str],
     ) -> None:
         """Mark this chapter's "new chapter" notification read, if there is one.
 
@@ -689,9 +695,16 @@ class ProgressService:
         ``chapter_progress`` has, and this box currently has two profiles
         following the same novel, so the wrong query here would be visible.
 
-        ``chapter_key`` arrives already ``fully_unquote``d, which is why
-        ``update_service`` canonicalises the key it writes: the two spellings
-        would compare unequal and this UPDATE would silently match nothing.
+        Matched against BOTH spellings of the key, because the two tables did
+        not always agree. ``chapter_progress`` stores the ``fully_unquote``d
+        form; ``update_service`` now canonicalises what it writes, but rows
+        written before that keep the connector's raw spelling. Those differ for
+        real: a madara-family source takes its chapter id straight out of an
+        HTML href (``connectors/madara/mappers.py``), so it carries
+        percent-escapes whenever the site's slug is non-ASCII. Checking both
+        costs one bound parameter and means the match cannot depend on when a
+        row happened to be written. No live row differs today, which is exactly
+        the kind of thing that is true until it isn't.
         """
         self._db.execute(
             update(UpdateNotification)
@@ -700,7 +713,7 @@ class ProgressService:
                 UpdateNotification.profile_id == profile_id,
                 UpdateNotification.source_id == source_id,
                 UpdateNotification.series_key == series_key,
-                UpdateNotification.chapter_key == chapter_key,
+                UpdateNotification.chapter_key.in_(chapter_keys),
                 UpdateNotification.is_read.is_(False),
             )
             .values(is_read=True)

@@ -153,6 +153,24 @@ def test_a_percent_encoded_key_still_matches(db_session, acct, seed_follow):
     )
 
 
+def test_a_legacy_raw_key_still_matches(db_session, acct, seed_follow):
+    # Rows written before update_service canonicalised its keys keep the
+    # connector's RAW spelling. A madara-family source takes its chapter id
+    # straight out of an HTML href, so that spelling really can carry
+    # percent-escapes -- and such a row would otherwise be unclearable forever.
+    uid, pid = acct
+    raw = "series/chapters/ch%2F41"
+    follow = seed_follow(uid, pid, source_id=SRC, series_key=SERIES)
+    notif = _notify(db_session, uid, pid, follow.id, chapter_key=raw)
+
+    ProgressService(db_session, user_id=uid, profile_id=pid).save_one(
+        _push(chapter_key=raw)
+    )
+
+    db_session.refresh(notif)
+    assert notif.is_read, "a notification stored in the raw spelling never clears"
+
+
 def test_an_already_read_notification_is_not_rewritten(
     db_session, acct, seed_follow
 ):
