@@ -134,6 +134,21 @@ class Changelog(BaseModel):
 # consume the exact same source of truth.
 _RELEASE_NOTES: list[ChangelogEntry] = [
     ChangelogEntry(
+        version="2.7.6",
+        build=46,
+        date="September 2026",
+        highlights=[
+            "Reading a novel scrolls smoothly again. The reader was rebuilding "
+            "the entire page about twice a second while you read — every "
+            "paragraph, every time — just to move the percentage in the top "
+            "bar by one. Now only the percentage redraws",
+            "And every indented paragraph was being laid out twice. The indent "
+            "was built in a way that makes the text engine measure the "
+            "paragraph, then measure it again; it now costs one pass. It looks "
+            "exactly the same",
+        ],
+    ),
+    ChangelogEntry(
         version="2.7.5",
         build=45,
         date="September 2026",

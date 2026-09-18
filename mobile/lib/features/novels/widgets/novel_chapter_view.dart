@@ -171,8 +171,17 @@ class _Paragraph extends StatelessWidget {
       child: Text.rich(
         TextSpan(
           children: [
+            // A zero-width space carrying the indent as letter spacing, NOT a
+            // WidgetSpan. A WidgetSpan turns RenderParagraph from a leaf into a
+            // render object with children: it has to lay out each placeholder
+            // box, feed the dimensions back in and lay the text out a second
+            // time — per paragraph, per frame it is rebuilt. The pen advances
+            // by exactly `indent` either way, so this renders identically.
             if (indent > 0)
-              WidgetSpan(child: SizedBox(width: indent, height: 1)),
+              TextSpan(
+                text: '\u200B',
+                style: TextStyle(letterSpacing: indent),
+              ),
             TextSpan(text: text),
           ],
         ),

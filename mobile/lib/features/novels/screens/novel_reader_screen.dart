@@ -202,7 +202,14 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
   int _furthestSent = 0;
 
   /// The bucket currently under the reading line, for the read-out.
-  int _bucket = 1;
+  /// The progress bucket, as a notifier rather than a field.
+  ///
+  /// Buckets are 1% of a chapter (kMaxProgressBuckets = 100) and the scroll
+  /// debounce fires every 500 ms, so during ordinary reading the bucket changes
+  /// on nearly every tick. As setState that rebuilt the whole body — the
+  /// CustomScrollView and every built paragraph — about twice a second, for the
+  /// entire session. Only the chrome's percent actually depends on it.
+  final ValueNotifier<int> _bucket = ValueNotifier<int>(1);
 
   /// How long this reader has been read, for the reading-time statistic.
   final ReadingClock _clock = ReadingClock(DateTime.now());
@@ -271,6 +278,7 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
     _progressTimer?.cancel();
     _autoNextTimer?.cancel();
     _scrollController.dispose();
+    _bucket.dispose();
     // Symmetric with initState: leaving a chapter restores exactly what the
     // app launched with rather than permanently changing its shape.
     applyRestingSystemUiMode();
@@ -308,8 +316,8 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
       _restoreFraction = widget.initialFraction ?? 0;
       _restoreToReadingLine = true;
       _pendingRestoreParagraph = target;
-      _bucket = bucketForParagraph(target, paragraphs);
-      _furthestSent = _bucket;
+      _bucket.value = bucketForParagraph(target, paragraphs);
+      _furthestSent = _bucket.value;
       _restoreFrames = 0;
       _lastRestoreMaxExtent = -1;
       if (requested > paragraphs) _reportStaleAnchor(requested, paragraphs);
@@ -318,7 +326,7 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
     }
     final target = paragraphForBucket(widget.initialBucket, paragraphs);
     if (target <= 0) {
-      _bucket = bucketForParagraph(0, paragraphs);
+      _bucket.value = bucketForParagraph(0, paragraphs);
       // Opening at the top is still progress worth remembering as "seen", but
       // never as further than the reader actually got.
       _furthestSent = 0;
@@ -326,7 +334,7 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
     }
     _pendingRestoreParagraph = target;
     _furthestSent = widget.initialBucket;
-    _bucket = widget.initialBucket;
+    _bucket.value = widget.initialBucket;
     _restoreFrames = 0;
     _lastRestoreMaxExtent = -1;
     _attemptRestore();
@@ -526,8 +534,9 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
       anchor.index,
       widget.chapter.paragraphs.length,
     );
-    if (position.bucket != _bucket) {
-      setState(() => _bucket = position.bucket);
+    if (position.bucket != _bucket.value) {
+      // No setState: the notifier repaints only the chrome's percent.
+      _bucket.value = position.bucket;
     }
 
     final push = nextProgressPush(position, _furthestSent);
@@ -701,26 +710,31 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
               ),
             ),
           ),
-          NovelReaderChrome(
-            visible: _chromeVisible,
-            surface: surface,
-            title: chapter.title,
-            percent: chapterPercent(_bucket, chapter.buckets),
-            isOffline: chapter.isOffline,
-            onBack: () => leaveReader(
-              context,
-              sourceId: chapter.sourceId,
-              seriesKey: chapter.seriesKey,
-            ),
-            onPrevious: _previousKey == null
-                ? null
-                : () => _openChapter(_previousKey!),
-            onNext: _nextKey == null ? null : () => _openChapter(_nextKey!),
-            onBookmark: _bookmarkPending ? null : _handleBookmark,
-            onType: () => NovelTypePanel.show(
-              context,
-              seriesPrefsKey: prefsKey,
+          // Only the percent depends on the bucket, so only this subtree
+          // rebuilds when it moves — the paragraph list underneath does not.
+          ValueListenableBuilder<int>(
+            valueListenable: _bucket,
+            builder: (context, bucket, _) => NovelReaderChrome(
+              visible: _chromeVisible,
               surface: surface,
+              title: chapter.title,
+              percent: chapterPercent(bucket, chapter.buckets),
+              isOffline: chapter.isOffline,
+              onBack: () => leaveReader(
+                context,
+                sourceId: chapter.sourceId,
+                seriesKey: chapter.seriesKey,
+              ),
+              onPrevious: _previousKey == null
+                  ? null
+                  : () => _openChapter(_previousKey!),
+              onNext: _nextKey == null ? null : () => _openChapter(_nextKey!),
+              onBookmark: _bookmarkPending ? null : _handleBookmark,
+              onType: () => NovelTypePanel.show(
+                context,
+                seriesPrefsKey: prefsKey,
+                surface: surface,
+              ),
             ),
           ),
         ],

@@ -55,15 +55,25 @@ List<InlineSpan> _spans(WidgetTester tester) => tester
     .whereType<InlineSpan>()
     .toList();
 
-/// Whether a paragraph carries the first-line indent spacer.
-bool _isIndented(InlineSpan span) {
-  var indented = false;
+/// The first-line indent a paragraph carries, in logical pixels; 0 when flush.
+///
+/// Reads the ADVANCE, not the mechanism. The indent used to be a WidgetSpan
+/// holding a SizedBox, which made RenderParagraph lay every paragraph out
+/// twice; it is now a zero-width space carrying the advance as letterSpacing.
+/// Asserting the width rather than the widget type is what lets the mechanism
+/// change without the guarantee changing.
+double _indentOf(InlineSpan span) {
+  var indent = 0.0;
   span.visitChildren((child) {
-    if (child is WidgetSpan) indented = true;
+    if (child is TextSpan && child.text == '\u200B') {
+      indent = child.style?.letterSpacing ?? 0;
+    }
     return true;
   });
-  return indented;
+  return indent;
 }
+
+bool _isIndented(InlineSpan span) => _indentOf(span) > 0;
 
 void main() {
   group('paragraphs are indented, not spaced', () {
@@ -87,13 +97,10 @@ void main() {
         const [_prose, _second],
         preferences: const NovelPreferences(fontSize: 24),
       );
-      final indent = tester
-          .widgetList<SizedBox>(find.byType(SizedBox))
-          .map((box) => box.width)
-          .whereType<double>()
-          .where((w) => w > 1)
-          .first;
-      expect(indent, closeTo(24 * kNovelParagraphIndentEm, 0.01));
+      expect(
+        _indentOf(_spans(tester)[1]),
+        closeTo(24 * kNovelParagraphIndentEm, 0.01),
+      );
     });
   });
 
