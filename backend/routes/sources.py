@@ -10,7 +10,9 @@ from sqlalchemy.orm import Session
 
 from core.rate_limit import limiter, sources_limit
 from database.session import get_db
+from connectors.registry import list_installed_connectors
 from services.browse_service import BrowseService, get_browse_service
+from services.search_tiers import tier_one_source_ids
 from services.reader_service import ReaderService, get_reader_service
 from services.image_resize import (
     COVER_WIDTHS,
@@ -160,9 +162,20 @@ async def federated_search(
     request: Request,
     response: Response,
     service: BrowseDep,
+    db: DbDep,
     q: str = Query("", description="Search query"),
     page: int = Query(1, ge=1),
     per_page: int = Query(40, ge=1, le=200),
+    tier: int | None = Query(
+        None,
+        ge=1,
+        le=2,
+        description=(
+            "1 asks only the sources you pin or follow and returns as soon as "
+            "they answer; 2 asks everything else. Omit for the old behaviour: "
+            "one request to every source."
+        ),
+    ),
 ) -> dict[str, object]:
     """Search every browsable source in parallel.
 
@@ -173,12 +186,31 @@ async def federated_search(
     Source-native: there is no local catalog to search — the library is the
     per-profile ``followed_series`` set, searched via ``GET /library/search``.
     """
+    # Resolved here, where the caller's identity lives, and passed down — the
+    # split must be IDENTICAL across the two requests of one search, so both
+    # tiers compute it from the same rows rather than each guessing.
+    tier_ids: list[str] | None = None
+    if tier is not None:
+        tier_ids = tier_one_source_ids(
+            db,
+            user_id=service._user_id,
+            profile_id=service._profile_id,
+            visible_ids={
+                d.source_type
+                for d in list_installed_connectors(
+                    browsable_only=True, include_mature=service._gate_open()
+                )
+            },
+        )
+
     return await service.federated_search(
         q.strip(),
         page=page,
         per_page=per_page,
         include_mature=service._gate_open(),
         base_url=str(request.base_url),
+        tier=tier,
+        tier_ids=tier_ids,
     )
 
 

@@ -54,7 +54,9 @@ export const sourcesApi = {
   listSources: () => http.get<SourceSummary[]>("/sources"),
 
   // Federated search across the local library AND every enabled remote source.
-  federatedSearch: (params: { q: string; page?: number; per_page?: number }) =>
+  federatedSearch: (
+    params: { q: string; page?: number; per_page?: number; tier?: 1 | 2 },
+  ) =>
     http.get<GlobalSearchResponse>("/sources/search", { query: params }),
 
   listPins: () => http.get<SourcePin[]>("/sources/pins"),

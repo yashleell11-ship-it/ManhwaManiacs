@@ -134,6 +134,18 @@ class Changelog(BaseModel):
 # consume the exact same source of truth.
 _RELEASE_NOTES: list[ChangelogEntry] = [
     ChangelogEntry(
+        version="2.7.8",
+        build=48,
+        date="September 2026",
+        highlights=[
+            "Search shows your own sources first instead of making you wait "
+            "for all ninety. It used to ask every single site before showing "
+            "you anything, which took about ten seconds every time; now the "
+            "handful you follow or have pinned come back in about two, and the "
+            "rest fill in underneath while you are already reading the results",
+        ],
+    ),
+    ChangelogEntry(
         version="2.7.7",
         build=47,
         date="September 2026",

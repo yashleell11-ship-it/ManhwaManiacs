@@ -987,6 +987,8 @@ class BrowseService:
         local_items: list[dict[str, object]] | None = None,
         local_has_more: bool = False,
         base_url: str = "",
+        tier: int | None = None,
+        tier_ids: list[str] | None = None,
     ) -> dict[str, object]:
         """Search the local library AND every browsable source in parallel.
 
@@ -1011,7 +1013,21 @@ class BrowseService:
             browsable_only=True,
             include_mature=include_mature,
         )
+        # Split AFTER the gate, never instead of it. `descriptors` is the
+        # source-level 18+ decision; restricting it can only ever shrink what a
+        # caller sees, never widen it — which is why tier_ids is intersected
+        # here rather than used to build the set.
+        visible_total = len(descriptors)
+        if tier_ids is not None:
+            wanted = set(tier_ids)
+            if tier == 2:
+                descriptors = [
+                    d for d in descriptors if d.source_type not in wanted
+                ]
+            else:
+                descriptors = [d for d in descriptors if d.source_type in wanted]
         sources_queried = len(descriptors)
+        sources_deferred = visible_total - sources_queried
 
         outcomes: dict[str, PaginatedSeriesList | BaseException] = {}
         if normalized_query and descriptors:
@@ -1134,6 +1150,14 @@ class BrowseService:
             # failure streak. Distinct from sources_failed, which counts only
             # this search's misses.
             "sources_demoted": sources_demoted,
+            # What this tier did NOT ask, so a client can keep the footer
+            # honest on a partial answer instead of reporting 4 of 91 as the
+            # whole search.
+            "sources_deferred": sources_deferred,
+            "tier": tier,
+            #: Non-null means "there is more to fetch"; the client asks again
+            #: with this tier. Null means this response is the whole search.
+            "next_tier": 2 if (tier == 1 and sources_deferred > 0) else None,
             "page": page,
             "has_more": has_more,
         }

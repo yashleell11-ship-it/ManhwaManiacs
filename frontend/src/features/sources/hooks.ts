@@ -108,8 +108,45 @@ export interface FederatedSearchParams {
   per_page?: number;
 }
 
-export function federatedSearchQueryKey(params: FederatedSearchParams) {
-  return [...SOURCES_KEY, "search", params] as const;
+export function federatedSearchQueryKey(
+  params: FederatedSearchParams,
+  tier?: 1 | 2,
+) {
+  return [...SOURCES_KEY, "search", params, tier ?? null] as const;
+}
+
+/**
+ * Fold tier 2 into tier 1.
+ *
+ * Both tiers emit the local-library group, because `groups[0] is the local
+ * library` is a contract the clients rely on — so the merge dedupes by source
+ * and keeps the first occurrence. The counts SUM: a footer that reported tier
+ * 1's four sources as the whole search would be worse than the ten-second wait
+ * this replaces.
+ */
+export function mergeSearchTiers(
+  first: GlobalSearchResponse,
+  second: GlobalSearchResponse | undefined,
+): GlobalSearchResponse {
+  if (!second) return first;
+  // string | null: the LOCAL group carries a null source, and it is emitted on
+  // both tiers, so it is precisely the entry this dedupe exists to catch.
+  const seen = new Set<string | null>();
+  const groups = [...first.groups, ...second.groups].filter((group) => {
+    if (seen.has(group.source)) return false;
+    seen.add(group.source);
+    return true;
+  });
+  return {
+    ...first,
+    groups,
+    items: [...first.items, ...second.items],
+    sources_queried: first.sources_queried + second.sources_queried,
+    sources_failed: first.sources_failed + second.sources_failed,
+    sources_deferred: second.sources_deferred ?? 0,
+    next_tier: second.next_tier ?? null,
+    has_more: first.has_more || second.has_more,
+  };
 }
 
 /**
@@ -119,13 +156,39 @@ export function federatedSearchQueryKey(params: FederatedSearchParams) {
  * short staleTime as the global default so repeated searches stay cached.
  */
 export function useFederatedSearch(params: FederatedSearchParams) {
-  return useQuery({
-    queryKey: federatedSearchQueryKey(params),
-    queryFn: () => sourcesApi.federatedSearch(params),
+  // Two requests, not one. The fan-out asks every installed source at once
+  // under a 12s budget measured at 10.8s, and nearly every hit the reader
+  // wants comes from the few sources they pin or follow — which answer in
+  // under two seconds. Tier 1 is those; tier 2 is everything else and arrives
+  // behind it, so the screen fills immediately instead of after ten seconds.
+  const first = useQuery({
+    queryKey: federatedSearchQueryKey(params, 1),
+    queryFn: () => sourcesApi.federatedSearch({ ...params, tier: 1 }),
     enabled: params.q.length > 0,
     placeholderData: (previous) => previous,
     staleTime: SEARCH_STALE_MS,
   });
+
+  // Only once tier 1 has said there IS more. A server that does not know the
+  // parameter returns the whole search with next_tier undefined, and this
+  // second request never fires — which is what keeps an older backend working.
+  const rest = useQuery({
+    queryKey: federatedSearchQueryKey(params, 2),
+    queryFn: () => sourcesApi.federatedSearch({ ...params, tier: 2 }),
+    enabled: params.q.length > 0 && first.data?.next_tier === 2,
+    placeholderData: (previous) => previous,
+    staleTime: SEARCH_STALE_MS,
+  });
+
+  const data = first.data ? mergeSearchTiers(first.data, rest.data) : undefined;
+
+  return {
+    ...first,
+    data,
+    // True while the rest is still arriving, so a caller can say "searching
+    // 87 more sources" rather than pretending the answer is complete.
+    isLoadingRest: first.data?.next_tier === 2 && rest.isPending,
+  };
 }
 
 /**
@@ -140,7 +203,12 @@ export function useFederatedSearch(params: FederatedSearchParams) {
  */
 export function useRetrySearchSource(params: FederatedSearchParams) {
   const queryClient = useQueryClient();
-  const key = federatedSearchQueryKey(params);
+  // Both tiers, because the group being retried may sit in either and the
+  // patch below no-ops when it is not there.
+  const keys = [
+    federatedSearchQueryKey(params, 1),
+    federatedSearchQueryKey(params, 2),
+  ];
 
   const patch = (
     sourceId: string,
@@ -149,13 +217,16 @@ export function useRetrySearchSource(params: FederatedSearchParams) {
       group: GlobalSearchResponse["groups"][number],
     ) => GlobalSearchResponse,
   ) => {
-    queryClient.setQueryData<GlobalSearchResponse>(key, (previous) => {
-      if (!previous) return previous;
-      const group = previous.groups.find((entry) => entry.source === sourceId);
-      // A newer query already replaced these results; the retry answer is stale.
-      if (!group) return previous;
-      return rebuild(previous, group);
-    });
+    for (const key of keys) {
+      queryClient.setQueryData<GlobalSearchResponse>(key, (previous) => {
+        if (!previous) return previous;
+        const group = previous.groups.find((entry) => entry.source === sourceId);
+        // A newer query already replaced these results, or this tier never held
+        // the source; either way the retry answer does not belong here.
+        if (!group) return previous;
+        return rebuild(previous, group);
+      });
+    }
   };
 
   return useMutation({

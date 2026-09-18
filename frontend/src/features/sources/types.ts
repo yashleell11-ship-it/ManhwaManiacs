@@ -187,6 +187,11 @@ export interface GlobalSearchResponse {
   groups: GlobalSearchGroup[];
   sources_queried: number;
   sources_failed: number;
+  /** Sources this tier did not ask. Absent on an untiered response. */
+  sources_deferred?: number;
+  tier?: 1 | 2 | null;
+  /** Non-null means there is more to fetch; ask again with this tier. */
+  next_tier?: 2 | null;
   page: number;
   has_more: boolean;
 }
