@@ -70,7 +70,11 @@ abstract final class AppPresets {
     surfaces: const AppSurfaceStyle(
       treatment: SurfaceTreatment.glass,
       blurSigma: 16,
-      chromeBlurSigma: 18,
+      // 8, not 18: the nav bar floats over the list (extendBody), so its
+      // BackdropFilter is re-read and re-blurred every frame the content moves
+      // under it, and blur cost is superlinear in sigma. At 8 the float and the
+      // frosted look survive; at 18 scrolling paid for them continuously.
+      chromeBlurSigma: 8,
       panelOpacity: 0.7,
       // Stated as the exact 8-bit fraction the nav bar shipped with
       // (withAlpha(217)) so Signature stays byte-identical.
@@ -306,7 +310,8 @@ abstract final class AppPresets {
     surfaces: const AppSurfaceStyle(
       treatment: SurfaceTreatment.glass,
       blurSigma: 12,
-      chromeBlurSigma: 14,
+      // Same reason as Signature: a live backdrop under a scrolling list.
+      chromeBlurSigma: 8,
       panelOpacity: 0.5,
       chromeOpacity: 0.62,
       cardOpacity: 1,

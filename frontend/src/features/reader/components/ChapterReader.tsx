@@ -898,19 +898,86 @@ export function ChapterReader({
   );
 
   // Same wheel contract as the paged stage: ctrl/⌘+wheel zooms, a plain wheel
-  // scrolls. Non-passive so the browser's own page zoom can be cancelled.
+  // scrolls.
+  //
+  // PASSIVE by default, which is the whole point. `scrollElement` is <main> —
+  // the app's only scroller — and a scroll-blocking wheel listener on the
+  // scroll target means the browser cannot apply a wheel scroll on the
+  // compositor thread at all: every tick has to reach the main thread and wait
+  // for this handler to return. The handler is cheap, but the round trip is
+  // not, so any frame busy with an image decode or a React commit delayed the
+  // scroll ITSELF. That is the "input is a beat behind" feel rather than
+  // dropped frames, and it cost every wheel gesture in the strip to keep a
+  // preventDefault available for the rare zoom.
+  //
+  // So: the passive listener does the zoom and also ARMS a second, non-passive
+  // one the moment it sees a modifier. A mouse-wheel zoom arms on the
+  // Control/Meta keydown before the first tick; a trackpad pinch synthesises
+  // ctrlKey with no keydown, so it arms on the first tick and loses only that
+  // one to the browser's own zoom. It disarms when the modifier lifts.
   useEffect(() => {
     if (!scrollElement || !continuous) return;
 
-    const handleWheel = (event: WheelEvent) => {
+    let armed = false;
+    let disarmTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const zoomFrom = (event: WheelEvent) => {
       const steps = wheelZoomSteps(event);
-      if (steps === 0) return;
-      event.preventDefault();
-      zoomSteps(steps);
+      if (steps !== 0) zoomSteps(steps);
+      return steps !== 0;
     };
 
-    scrollElement.addEventListener("wheel", handleWheel, { passive: false });
-    return () => scrollElement.removeEventListener("wheel", handleWheel);
+    // Non-passive: the only listener allowed to cancel the browser's zoom, and
+    // only attached while a modifier is actually down.
+    const blocking = (event: WheelEvent) => {
+      if (!zoomFrom(event)) return;
+      event.preventDefault();
+    };
+
+    const arm = () => {
+      if (armed) return;
+      armed = true;
+      scrollElement.addEventListener("wheel", blocking, { passive: false });
+    };
+
+    const disarm = () => {
+      if (!armed) return;
+      armed = false;
+      scrollElement.removeEventListener("wheel", blocking);
+    };
+
+    const passive = (event: WheelEvent) => {
+      if (!(event.ctrlKey || event.metaKey)) return;
+      // A pinch arrives with no keydown to arm us, so arm here and keep the
+      // gesture alive on a short idle timer. This tick itself is NOT zoomed:
+      // once armed, `blocking` handles every subsequent tick and zooming here
+      // too would double-apply it. Losing the first tick of a pinch is the
+      // price of not blocking every ordinary scroll in the reader.
+      arm();
+      clearTimeout(disarmTimer);
+      disarmTimer = setTimeout(disarm, 500);
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Control" || event.key === "Meta") arm();
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (event.key === "Control" || event.key === "Meta") disarm();
+    };
+
+    scrollElement.addEventListener("wheel", passive, { passive: true });
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", disarm);
+
+    return () => {
+      clearTimeout(disarmTimer);
+      scrollElement.removeEventListener("wheel", passive);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", disarm);
+      disarm();
+    };
   }, [continuous, scrollElement, zoomSteps]);
 
   /**
@@ -1111,8 +1178,15 @@ export function ChapterReader({
       {warmth > 0 ? (
         <div
           aria-hidden
-          className="pointer-events-none fixed inset-0 z-10 bg-primary mix-blend-multiply"
-          style={{ opacity: warmth }}
+          // A flat wash, NOT mix-blend-multiply. A blend mode over a
+          // viewport-sized fixed layer forces the whole stacking context
+          // beneath it to stay readable as a backdrop and re-blends the entire
+          // viewport on every frame the backdrop moves — which, during a
+          // scroll, is every frame. It also defeats opaque-overlap culling.
+          // The dimmer directly above composites normally for the same reason.
+          // Warmth is a low-opacity tint either way; the wash reads the same.
+          className="pointer-events-none fixed inset-0 z-10 bg-primary"
+          style={{ opacity: warmth * 0.55 }}
         />
       ) : null}
 

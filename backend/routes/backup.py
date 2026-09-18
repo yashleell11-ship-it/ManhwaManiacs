@@ -29,6 +29,7 @@ from services.backup_service import (
     backup_filename,
     clear_pending_restore,
     create_backup_snapshot,
+    nightly_status,
     spool_dir,
     stage_restore,
 )
@@ -36,8 +37,22 @@ from services.backup_service import (
 router = APIRouter(prefix="/backup", tags=["backup"])
 
 
+class NightlyBackup(BaseModel):
+    """What the nightly job last reported. Absent means it never has."""
+
+    ok: bool
+    finished_at: str | None = None
+    #: Where the run got to. "done" is clean; anything else names the step that
+    #: failed, which separates "backups are broken" from "the disk filled up".
+    phase: str | None = None
+    bytes: int | None = None
+
+
 class BackupStatus(BaseModel):
     restore_pending: bool
+    #: None means UNKNOWN -- never treat it as healthy. A screen that looked
+    #: fine while backups were failing is the thing this field exists to end.
+    nightly: NightlyBackup | None = None
 
 
 class RestoreStaged(BaseModel):
@@ -67,7 +82,11 @@ def export_backup(include_cache: bool = False) -> FileResponse:
 
 @router.get("/status", response_model=BackupStatus)
 def backup_status() -> BackupStatus:
-    return BackupStatus(restore_pending=has_pending_restore())
+    raw = nightly_status()
+    return BackupStatus(
+        restore_pending=has_pending_restore(),
+        nightly=NightlyBackup(**raw) if raw else None,
+    )
 
 
 @router.post("/import", response_model=RestoreStaged, dependencies=[Depends(require_admin_user)])

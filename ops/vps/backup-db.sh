@@ -55,6 +55,27 @@ ROOT="${MM_BACKUP_ROOT:-/srv/manhwamaniacs/backups}"
 # rotated -- it is a few hundred bytes of current configuration, and having it
 # at all matters far more than having last Tuesday's.
 SETTINGS="${MM_SETTINGS_PATH:-/srv/manhwamaniacs/data/settings.json}"
+# The job's own verdict, written where the BACKEND can already see it.
+#
+# Deliberately in the data directory, not the backup tree: the container mounts
+# /srv/manhwamaniacs/data as /data and resolves it from MM_DB_PATH, so this
+# needs no compose edit, no container recreate, and it behaves the same on a
+# laptop. Mounting the backup tree would hand the backend a directory of
+# database dumps just to serve a timestamp.
+STATUS_JSON="${MM_BACKUP_STATUS_JSON:-$(dirname "$DB")/backup-status.json}"
+STATUS_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/backup-status.py"
+
+# Record the outcome for /backup/status. Called from the single EXIT/INT/TERM
+# trap, so a run that dies still leaves a verdict -- silence was the whole
+# problem: every failure path here just exited 1, the unit had no OnFailure, and
+# the one screen the owner would look at kept saying nothing at all.
+write_status(){
+  local rc="$1" phase="$2" tmp="$STATUS_JSON.tmp"
+  [ -r "$STATUS_PY" ] || return 0
+  "$PY" "$STATUS_PY" "$tmp" "$rc" "$phase" "${STATUS_BYTES:-0}" >/dev/null 2>&1 || return 0
+  mv -f "$tmp" "$STATUS_JSON" 2>/dev/null || true
+  chown 1000:1000 "$STATUS_JSON" 2>/dev/null || true
+}
 KEEP_DAILY="${MM_BACKUP_KEEP_DAILY:-7}"
 KEEP_WEEKLY="${MM_BACKUP_KEEP_WEEKLY:-4}"
 WEEKLY_DOW="${MM_BACKUP_WEEKLY_DOW:-7}"      # ISO weekday, 7 = Sunday
@@ -173,10 +194,26 @@ PY
 
 cmd_run(){
   need zstd; need flock; need "$PY"
-  [ -r "$DB" ] || { err "database not readable: $DB"; exit 1; }
   mkdir -p "$ROOT/daily" "$ROOT/weekly"
+
+  # Set BEFORE any guard that can exit -- the free-space guard and the lock
+  # contention check are both below, and they are the likeliest failures, so a
+  # trap installed after them would miss exactly the runs worth reporting.
+  #
+  # ONE trap, covering INT/TERM as well as EXIT. Two reasons this is not the
+  # obvious `trap ... EXIT`: a later `trap` in this file REPLACES an earlier one
+  # rather than adding to it, and bash does not run an EXIT trap when the shell
+  # dies from an untrapped SIGTERM -- exactly what systemd sends on
+  # TimeoutStartSec. Without INT/TERM a timed-out run leaves no verdict, which
+  # is the failure this whole thing exists to make visible.
+  PHASE=starting
+  trap 'rc=$?; rm -f "${tmp_db:-}" "${tmp_zst:-}"; write_status "$rc" "${PHASE:-unknown}"' EXIT INT TERM
+
+  # After the trap on purpose: an unreadable database is a failure worth
+  # reporting, and reporting it is the entire point of the trap.
+  [ -r "$DB" ] || { err "database not readable: $DB"; PHASE=unreadable-db; exit 1; }
   exec 9>"$ROOT/.lock"
-  flock -n 9 || { err "another backup run holds $ROOT/.lock"; exit 1; }
+  flock -n 9 || { err "another backup run holds $ROOT/.lock"; PHASE=locked; exit 1; }
 
   # Refuse rather than fill the disk: need room for the uncompressed copy plus
   # the compressed one, with a margin. On the current 21 MB DB this is ~100 MB.
@@ -185,6 +222,7 @@ cmd_run(){
   avail_bytes=$(df --output=avail -B1 "$ROOT" | tail -1)
   if [ "$avail_bytes" -lt "$need_bytes" ]; then
     log "FAIL free-space guard: need $need_bytes B, have $avail_bytes B on $ROOT"
+    PHASE=free-space
     exit 1
   fi
 
@@ -197,13 +235,14 @@ cmd_run(){
   tmp_zst="$ROOT/daily/.$base.zst.tmp"
   final="$ROOT/daily/$base.zst"
   t0=$(date +%s)
-  trap 'rm -f "${tmp_db:-}" "${tmp_zst:-}"' EXIT
 
+  PHASE=snapshot
   if ! info="$(snapshot "$DB" "$tmp_db")"; then
     log "FAIL snapshot/integrity: ${info:-no output}"
     exit 1
   fi
 
+  PHASE=compress
   zstd -q -T0 "-$ZSTD_LEVEL" "$tmp_db" -o "$tmp_zst"
   rm -f "$tmp_db"
   mv -f "$tmp_zst" "$final"            # same directory: atomic rename
@@ -234,8 +273,10 @@ cmd_run(){
     fi
   fi
 
+  PHASE=done
   local zst_bytes total_bytes
   zst_bytes=$(stat -c %s "$final")
+  STATUS_BYTES="$zst_bytes"
   total_bytes=$(du -sb "$ROOT" | cut -f1)
   log "OK $final zst_bytes=$zst_bytes elapsed_s=$(( $(date +%s) - t0 )) backups_total_bytes=$total_bytes settings=$settings_state info=$info"
 }

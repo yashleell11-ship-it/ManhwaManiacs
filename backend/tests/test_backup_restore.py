@@ -212,7 +212,7 @@ def test_export_streams_a_downloadable_sqlite_file(client, real_db_path):
 def test_status_reports_no_pending_restore_initially(client):
     response = client.get("/backup/status")
     assert response.status_code == 200
-    assert response.json() == {"restore_pending": False}
+    assert response.json()["restore_pending"] is False
 
 
 def test_import_stages_a_valid_uploaded_backup(client, tmp_path):
@@ -256,7 +256,7 @@ def test_cancel_pending_restore_clears_the_staged_file(client, tmp_path):
 
     response = client.delete("/backup/pending")
     assert response.status_code == 200
-    assert response.json() == {"restore_pending": False}
+    assert response.json()["restore_pending"] is False
 
 
 # Admin gating for the backup routes now goes through the session-based

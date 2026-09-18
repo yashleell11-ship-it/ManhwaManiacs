@@ -134,6 +134,26 @@ class Changelog(BaseModel):
 # consume the exact same source of truth.
 _RELEASE_NOTES: list[ChangelogEntry] = [
     ChangelogEntry(
+        version="2.7.7",
+        build=47,
+        date="September 2026",
+        highlights=[
+            "Scrolling is smoother in a few more places. The bar at the bottom "
+            "of the phone frosts what is behind it, and every frame you "
+            "scrolled it had to redo that blur — it is lighter now, and still "
+            "floats",
+            "On the website, scrolling in the reader no longer waits on the "
+            "page. Holding a key to zoom needs the browser to ask first, and "
+            "the reader was asking on every single scroll instead of only "
+            "while you were actually zooming",
+            "The night-reading warmth tint stopped repainting the whole screen "
+            "as you scroll. It looks the same",
+            "The app can tell you whether last night's backup worked. It has "
+            "been running every night and had no way to say so — a failure "
+            "looked exactly like a success from inside the app",
+        ],
+    ),
+    ChangelogEntry(
         version="2.7.6",
         build=46,
         date="September 2026",

@@ -666,10 +666,29 @@ Group=ubuntu
 Environment=MM_DB_PATH=$DATA_ROOT/data/manhwamaniacs.db
 Environment=MM_BACKUP_ROOT=$DATA_ROOT/backups
 ExecStart=$backup run
-# A 21 MB database snapshots in ~0.1s; this only guards against a hung disk.
+# The snapshot itself takes about a second; this only guards a hung disk.
 TimeoutStartSec=300
 Nice=10
 IOSchedulingClass=idle
+# The script's own trap records a verdict for /backup/status on every exit
+# path, INT and TERM included. This covers the two it CANNOT: SIGKILL, and a
+# failure to exec the script at all. Without it those show only as "stale" once
+# the timestamp ages out.
+OnFailure=mm-db-backup-failed.service
+EOF
+
+  # Records "the backup unit failed" for /backup/status when the script never
+  # got the chance to say so itself.
+  sudo tee /etc/systemd/system/mm-db-backup-failed.service >/dev/null <<EOF
+[Unit]
+Description=Record that the ManhwaManiacs backup run failed
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+ExecStart=/usr/bin/env python3 $(dirname "$backup")/backup-status.py $DATA_ROOT/data/backup-status.json.tmp 1 unit-failed 0
+ExecStartPost=/bin/mv -f $DATA_ROOT/data/backup-status.json.tmp $DATA_ROOT/data/backup-status.json
 EOF
 
   sudo tee /etc/systemd/system/mm-db-backup.timer >/dev/null <<'EOF'

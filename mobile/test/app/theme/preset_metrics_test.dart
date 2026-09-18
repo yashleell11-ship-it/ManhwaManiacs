@@ -241,7 +241,11 @@ void main() {
       expect(s.surfaces.treatment, SurfaceTreatment.glass);
       expect(s.surfaces.isGlass, isTrue);
       expect(s.surfaces.blurSigma, 16);
-      expect(s.surfaces.chromeBlurSigma, 18);
+      // 8, lowered from 18 for scrolling: the nav bar floats over the list
+      // (extendBody), so its BackdropFilter is re-read and re-blurred on every
+      // frame the content moves under it, and blur cost is superlinear in
+      // sigma. The float and the frosted look survive at 8.
+      expect(s.surfaces.chromeBlurSigma, 8);
       expect(s.surfaces.panelOpacity, 0.7);
       // The shipped 8-bit alphas, exactly: withAlpha(217) on the nav bar
       // and withAlpha(184) on the reader's.

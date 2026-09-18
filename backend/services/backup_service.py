@@ -15,6 +15,7 @@ starts, before anything opens the database.
 
 from __future__ import annotations
 
+import json
 import shutil
 import sqlite3
 import tempfile
@@ -46,6 +47,38 @@ _REQUIRED_TABLES = {"users", "followed_series", "chapter_progress", "alembic_ver
 # it runs under the VPS's system python with no virtualenv. See
 # core/cache_tables for why one tuple, and for what the drift cost.
 _CACHE_TABLES = CACHE_TABLES
+
+
+def nightly_status() -> dict[str, object] | None:
+    """The nightly job's own verdict, or None when it has never reported.
+
+    ``ops/vps/backup-db.sh`` writes ``backup-status.json`` beside the database —
+    a directory the container already mounts — from a trap that also fires on
+    INT/TERM, so a run killed by systemd still leaves one.
+
+    Degrades to None on anything unexpected: missing, unreadable, malformed, or
+    not an object. None means "unknown", which the clients must show as unknown.
+    It must never read as healthy, because the failure this exists to surface is
+    precisely a screen that looked fine while backups were broken.
+    """
+    path = spool_dir() / "backup-status.json"
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    # Whitelisted, and no path: /backup/status is the one backup endpoint any
+    # signed-in account may call, so it must not disclose the host's layout.
+    finished = raw.get("finished_at")
+    phase = raw.get("phase")
+    size = raw.get("bytes")
+    return {
+        "ok": bool(raw.get("ok")),
+        "finished_at": finished if isinstance(finished, str) else None,
+        "phase": phase if isinstance(phase, str) else None,
+        "bytes": size if isinstance(size, int) else None,
+    }
 
 
 def spool_dir() -> Path:
