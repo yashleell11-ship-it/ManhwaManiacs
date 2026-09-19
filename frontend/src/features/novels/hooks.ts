@@ -75,6 +75,35 @@ export function useNovelAttribution(ref: ChapterId | null) {
   });
 }
 
+/**
+ * Whether this chapter has audio, and the map to follow along with.
+ *
+ * Separate from both the text and the attribution, and for the same reason:
+ * almost nothing in the library is rendered, so a reader must never wait on a
+ * lookup that usually answers "no". It does not retry — audio is an addition
+ * to the page, and a failed lookup has to leave exactly the reading experience
+ * that shipped before any of this existed.
+ */
+export function novelAudioQueryKey(ref: ChapterId) {
+  return [
+    ...NOVELS_KEY,
+    "audio",
+    ref.sourceId,
+    ref.seriesKey,
+    ref.chapterKey,
+  ] as const;
+}
+
+export function useNovelAudio(ref: ChapterId | null) {
+  return useQuery({
+    queryKey: ref ? novelAudioQueryKey(ref) : [...NOVELS_KEY, "audio", "none"],
+    queryFn: () => novelsApi.audio(ref!),
+    enabled: ref !== null,
+    staleTime: NOVEL_CHAPTER_STALE_MS,
+    retry: false,
+  });
+}
+
 export function prefetchNovelChapter(queryClient: QueryClient, ref: ChapterId) {
   void queryClient.prefetchQuery({
     queryKey: novelChapterQueryKey(ref),

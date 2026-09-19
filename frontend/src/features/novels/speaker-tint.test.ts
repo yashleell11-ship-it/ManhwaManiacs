@@ -140,3 +140,28 @@ describe("speakerHues", () => {
     expect(speakerHues(many).size).toBe(30);
   });
 });
+
+
+describe("tintParagraph carries segment ids", () => {
+  it("passes an audio segment index through to its run", () => {
+    // When a chapter is rendered, the timing map is the better source: its
+    // segments are sentences, cover narration too, and already name the
+    // speaker — so one element can both carry the colour and be the thing the
+    // playhead lights up.
+    const runs = tintParagraph(P, [{ ...at(FIRST, "Arthur"), segment: 7 }]);
+
+    expect(runs!.find((r) => r.text === FIRST)!.segment).toBe(7);
+  });
+
+  it("leaves narration without a segment id", () => {
+    const runs = tintParagraph(P, [{ ...at(FIRST, "Arthur"), segment: 7 }]);
+
+    expect(runs![0].segment).toBeUndefined();
+  });
+
+  it("still works for spans that carry none", () => {
+    const runs = tintParagraph(P, [at(FIRST, "Arthur")]);
+
+    expect(runs!.find((r) => r.text === FIRST)!.segment).toBeUndefined();
+  });
+});

@@ -106,3 +106,24 @@ export type NovelAttributionPayload = {
   /** Ordered by how much each speaks, which is the order colours are assigned. */
   cast: { name: string; gender: string; voice_id: string | null }[];
 };
+
+
+/** One rendered sentence, as `GET /novels/audio` sends it. */
+export type NovelAudioSegmentPayload = {
+  i: number;
+  start_ms: number;
+  end_ms: number;
+  p: number;
+  s: number;
+  e: number;
+  voice: string;
+  speaker: string | null;
+  speech: boolean;
+};
+
+export type NovelAudioPayload = {
+  available: boolean;
+  bytes: number;
+  total_ms: number;
+  segments: NovelAudioSegmentPayload[];
+};

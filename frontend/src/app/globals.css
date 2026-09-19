@@ -1007,3 +1007,25 @@ main {
 .reader-page-transition-enter {
   animation: reader-page-transition-in calc(220ms * var(--shape-motion)) ease-out both;
 }
+
+/*
+ * The sentence being spoken, while a chapter's audio plays.
+ *
+ * A background wash rather than a colour change: the speaker's own tint may
+ * already be on this element, and two colours fighting over the same words is
+ * harder to read than either. `box-decoration-break` keeps the wash continuous
+ * when a sentence wraps across lines, which most of them do.
+ */
+.novel-speaking {
+  background-color: color-mix(in oklab, currentColor 14%, transparent);
+  border-radius: 3px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  transition: background-color 120ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .novel-speaking {
+    transition: none;
+  }
+}

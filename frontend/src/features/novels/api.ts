@@ -4,6 +4,7 @@ import { bucketCount } from "./progress";
 import { countWords } from "./reading-time";
 import type {
   NovelAttributionPayload,
+  NovelAudioPayload,
   NovelChapterContent,
   NovelChapterPayload,
   NovelChapterWindowPayload,
@@ -67,6 +68,18 @@ export const novelsApi = {
    */
   attribution: (ref: ChapterId) =>
     http.get<NovelAttributionPayload>("/novels/attribution", {
+      query: sourceChapterQuery(ref),
+    }),
+
+  /**
+   * Whether a chapter has been rendered, and where each sentence sits in it.
+   *
+   * The timings are MEASURED — each segment was rendered on its own, so its
+   * duration is the length of the samples that came back. That is what the
+   * follow-along highlight reads.
+   */
+  audio: (ref: ChapterId) =>
+    http.get<NovelAudioPayload>("/novels/audio", {
       query: sourceChapterQuery(ref),
     }),
 

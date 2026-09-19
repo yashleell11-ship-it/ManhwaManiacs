@@ -28,7 +28,10 @@ import { BookmarkNotice } from "@/features/bookmarks";
 import { setReaderScrollTop } from "@/features/reader/scroll-preparation";
 import { tintParagraph, type SpeakerSpan, type TintedRun } from "@/features/novels/speaker-tint";
 import { speakerHues } from "@/features/novels/speaker-tint";
-import { useNovelAttribution } from "@/features/novels/hooks";
+import { useNovelAttribution, useNovelAudio } from "@/features/novels/hooks";
+import { NovelAudioPlayer } from "@/features/novels/components/NovelAudioPlayer";
+import { createHighlighter } from "@/features/novels/audio-highlight";
+import { segmentAt, timingMatchesText } from "@/features/novels/audio-follow";
 import { useScrollContainer } from "@/lib/scroll-container";
 import { apiErrorMessage, resolveViewState } from "@/lib/view-state";
 import { isSceneBreak, splitDropCap, tocEntry } from "../book";
@@ -148,10 +151,39 @@ export function NovelChapterView({
         : null,
     [chapter],
   );
+  const paragraphs = useMemo(() => chapter?.paragraphs ?? [], [chapter]);
+  const paragraphCount = paragraphs.length;
+
   const { data: attribution } = useNovelAttribution(attributionRef);
+  const { data: audio } = useNovelAudio(attributionRef);
+
+  // Only trust a timing map that still describes the text on screen. The
+  // chapter cache refetches, so a map will eventually point at words that have
+  // moved — and a highlight on the wrong words is worse than no highlight.
+  const timing = useMemo(() => {
+    const segments = audio?.available ? audio.segments : [];
+    return segments.length && timingMatchesText(segments, paragraphs)
+      ? segments
+      : null;
+  }, [audio, paragraphs]);
 
   const spansByParagraph = useMemo(() => {
     const byParagraph = new Map<number, SpeakerSpan[]>();
+    // When the chapter has been rendered, the TIMING MAP is the better source:
+    // its segments are sentences, cover the narration too, and already name
+    // the speaker. One element then carries both the speaker's colour and the
+    // playhead's highlight, instead of two overlapping sets of spans.
+    if (timing) {
+      for (const seg of timing) {
+        const span: SpeakerSpan = {
+          s: seg.s, e: seg.e, head: "", speaker: seg.speaker, segment: seg.i,
+        };
+        const list = byParagraph.get(seg.p);
+        if (list) list.push(span);
+        else byParagraph.set(seg.p, [span]);
+      }
+      return byParagraph;
+    }
     if (!attribution?.attributed) return byParagraph;
     for (const span of attribution.spans) {
       const list = byParagraph.get(span.p);
@@ -159,7 +191,34 @@ export function NovelChapterView({
       else byParagraph.set(span.p, [span]);
     }
     return byParagraph;
-  }, [attribution]);
+  }, [attribution, timing]);
+
+  // Imperative on purpose: `timeupdate` fires about four times a second, and
+  // re-rendering a page of prose that often is exactly the scroll jank this
+  // reader already had to be fixed for once.
+  const highlighterRef = useRef<ReturnType<typeof createHighlighter> | null>(null);
+  useEffect(() => {
+    const handle = createHighlighter(() => articleRef.current, { scroll: true });
+    highlighterRef.current = handle;
+    return () => {
+      handle.dispose();
+      highlighterRef.current = null;
+    };
+  }, [timing]);
+
+  const onAudioTime = useCallback(
+    (ms: number | null) => {
+      const handle = highlighterRef.current;
+      if (!handle) return;
+      if (ms === null || !timing) {
+        handle.set(null);
+        return;
+      }
+      const index = segmentAt(timing, ms);
+      handle.set(index < 0 ? null : timing[index].i);
+    },
+    [timing],
+  );
 
   // Cast order is speaking order, so the two busiest characters in a scene get
   // the furthest-apart hues rather than whatever a hash happened to pick.
@@ -188,8 +247,6 @@ export function NovelChapterView({
   /** The bookmark this chapter opened from pointed past the end of the text. */
   const [anchorMoved, setAnchorMoved] = useState(false);
 
-  const paragraphs = useMemo(() => chapter?.paragraphs ?? [], [chapter]);
-  const paragraphCount = paragraphs.length;
   const paragraphNodes = useRef<(HTMLParagraphElement | null)[]>([]);
   // Stable for the life of the chapter, which is what lets `ChapterBody` hold
   // one unchanging ref callback per paragraph (`paragraph-refs.ts`).
@@ -554,6 +611,15 @@ export function NovelChapterView({
             hues={hues}
           />
 
+          {audio?.available && attributionRef ? (
+            <NovelAudioPlayer
+              chapter={attributionRef}
+              totalMs={audio.total_ms}
+              onTimeMs={onAudioTime}
+              surface={surface}
+            />
+          ) : null}
+
           <footer className="mt-16">
             <div
               className="mx-auto h-px w-24"
@@ -838,7 +904,15 @@ function SpeechRun({
   run: TintedRun;
   hue: number | undefined;
 }) {
-  if (run.speaker === null || hue === undefined) return <>{run.text}</>;
+  if (run.speaker === null || hue === undefined) {
+    // Narration still needs to be addressable when it has a segment, because
+    // the playhead moves through narration too — most of a chapter is it.
+    return run.segment === undefined ? (
+      <>{run.text}</>
+    ) : (
+      <span data-segment={run.segment}>{run.text}</span>
+    );
+  }
   return (
     <span
       // Tint only — the ink stays the reader's own, so a speaker colour can
@@ -849,6 +923,7 @@ function SpeechRun({
         borderRadius: "2px",
       }}
       data-speaker={run.speaker}
+      data-segment={run.segment}
     >
       {run.text}
     </span>

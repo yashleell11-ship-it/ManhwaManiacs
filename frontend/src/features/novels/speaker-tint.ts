@@ -32,6 +32,15 @@ export type SpeakerSpan = {
   head: string;
   /** The speaker's label, or null when the line stays with the narrator. */
   speaker: string | null;
+  /**
+   * Audio segment index, when these spans came from a timing map.
+   *
+   * A rendered chapter's segments are SENTENCES and cover the narration too,
+   * while attribution spans are quoted runs only — so when audio exists it is
+   * the better source for both jobs: the same element can carry the speaker's
+   * colour and be the thing the playhead lights up.
+   */
+  segment?: number;
 };
 
 /** A run of text, with the speaker it belongs to. */
@@ -39,6 +48,8 @@ export type TintedRun = {
   text: string;
   /** null for narration, and for quoted speech nobody could be named for. */
   speaker: string | null;
+  /** Audio segment index, when one covers this run. */
+  segment?: number;
 };
 
 /**
@@ -72,7 +83,7 @@ export function tintParagraph(
     if (span.s > cursor) {
       runs.push({ text: paragraph.slice(cursor, span.s), speaker: null });
     }
-    runs.push({ text, speaker: span.speaker });
+    runs.push({ text, speaker: span.speaker, segment: span.segment });
     cursor = span.e;
   }
 
