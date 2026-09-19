@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from core.config import get_settings
 from database.session import SessionLocal
 from services.source_cache_service import sweep_cache_retention
+from services.source_probe_service import reprobe_sources
 from services.update_service import UpdateService, run_check_in_new_session
 
 logger = logging.getLogger(__name__)
@@ -168,8 +169,41 @@ class UpdateSchedulerManager:
         disk fill.
         """
         self._maybe_sweep_caches()
+        self._maybe_reprobe_sources()
         if self._scheduled_checks_enabled():
             self.trigger_check(trigger="scheduled")
+
+    def _maybe_reprobe_sources(self) -> None:
+        """Re-check a few sources nobody follows, so a dead one can recover.
+
+        On the scheduler thread for the same reasons the cache sweep is: no
+        request is waiting on it, and it must not take a worker or queue behind
+        the single-check lock.
+
+        There is no in-memory "last run" timer here on purpose. The cache sweep
+        can use time.monotonic() because main's lifespan sweeps at boot and a
+        restart therefore loses nothing; there is no boot counterpart for this,
+        so a monotonic clock would re-probe on every container start — and this
+        box redeploys several times a day. `source_health.last_checked_at` is
+        already a persistent per-source clock, so selection reads that instead
+        and a restart changes nothing.
+
+        Obeys the same switch as the update sweep: "updates off" has to mean
+        this process does not contact upstreams, and a background probe is
+        exactly the kind of traffic someone turning that off means to stop.
+        """
+        if not self._scheduled_checks_enabled():
+            return
+        db = SessionLocal()
+        try:
+            probed = reprobe_sources(db)
+            if probed:
+                logger.info("re-probed %d source(s) for health", len(probed))
+        except Exception:
+            db.rollback()
+            logger.exception("Source re-probe failed")
+        finally:
+            db.close()
 
     def _maybe_sweep_caches(self) -> None:
         """Run the cache retention sweep at most once a day.
