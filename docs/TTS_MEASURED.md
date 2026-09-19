@@ -199,3 +199,48 @@ Spans keep whatever label the model gave, because it is true. But
 `is_voice_candidate()` stops a group or a description ever becoming a cast
 member: those lines are narrated. A line shared by three people reads correctly
 in the narrator's voice and absurdly in anyone else's.
+
+
+---
+
+# The local model: measured, and what it cost
+
+`qwen3:8b` (Q4_K_M, 5.2 GB) pulled to the desktop via ollama, tested against the
+same chapters DeepSeek attributed.
+
+## It killed a training run
+
+Given the GPU, ollama reported **22.8 GiB "available"** on a card with ~11 GiB
+actually free — the WDDM overcommit again, from a different runtime — loaded
+against that figure, and took the card out from under a LoRA training run that
+was **8,150 steps in**. Bounding context and `OLLAMA_MAX_LOADED_MODELS` did not
+prevent it: the problem is not how much the client asks for, it is that the
+server's own accounting cannot see another process.
+
+`services/local_llm_client.py` therefore pins `num_gpu: 0`. The cost is latency
+nobody waits on; the benefit is that the GPU stays entirely for TTS, which at
+RTF 1.82 is the real bottleneck and is the one job that cannot run anywhere
+else. Attribution can run anywhere — spending VRAM on it was spending the
+scarce resource on the fungible task.
+
+## The quality is not there yet
+
+Chapter 123, where DeepSeek gives `Windsom 13, Arthur 9, Myre 8`:
+
+| | qwen3:8b |
+|---|---|
+| usable labels | `I` ×9, `Windsom` ×5, `Myre` ×4, `She`, `His`, `As the asura` |
+| dropped by `is_voice_candidate` | `he` ×2, `The asura`, `A deep, bass voice`, `A firm, deep voice` |
+
+Nine spans answered `I` — it does not resolve first person to a name, which is
+precisely the failure that made a chapter read entirely in one wrong voice
+before. Pronouns and voice-descriptions account for most of the rest. A prompt
+explicitly forbidding pronouns and descriptions did not change it.
+
+108s per chapter on CPU, so ~16 hours for the series — free, but producing
+attributions that would need discarding.
+
+**Where this leaves it:** the local path is built, safe, and selected first
+when a server is up (`choose_completer`), with the paid API as the fallback. It
+is not yet accurate enough to use. A 14B is the obvious next try and fits the
+card when nothing else holds it.

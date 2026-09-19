@@ -39,6 +39,12 @@ from typing import Any
 import httpx
 
 from core.config import SETTINGS_PATH
+from services.llm import (
+    Completion,
+    LLMBudgetExhausted,
+    LLMError,
+    LLMNotConfigured,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,16 +78,12 @@ DAILY_REQUEST_CEILING = 500
 _BUDGET_PATH = SETTINGS_PATH.parent / "deepseek-usage.json"
 
 
-class DeepSeekError(RuntimeError):
-    """Any failure to get a usable answer from the API."""
-
-
-class DeepSeekNotConfigured(DeepSeekError):
-    """No API key in the environment."""
-
-
-class DeepSeekBudgetExhausted(DeepSeekError):
-    """The daily request ceiling has been reached."""
+# The shared shape lives in ``services.llm`` because a local model answers the
+# same question and attribution takes whichever is available; these names stay
+# so existing callers and tests read unchanged.
+DeepSeekError = LLMError
+DeepSeekNotConfigured = LLMNotConfigured
+DeepSeekBudgetExhausted = LLMBudgetExhausted
 
 
 def api_key() -> str | None:
@@ -134,31 +136,6 @@ def _record_request(path: Path) -> None:
         # Losing a tick of the counter is survivable; failing the call that was
         # already paid for is not.
         logger.warning("could not record DeepSeek usage to %s", path)
-
-
-@dataclass(frozen=True)
-class Completion:
-    """One answered request."""
-
-    content: str
-    prompt_tokens: int
-    completion_tokens: int
-    #: What actually served the request, as the API reports it -- not what was
-    #: asked for. These differ whenever an id is an alias, and the stored
-    #: attribution is only auditable if it names the model that really ran.
-    model: str = ""
-
-    def json(self) -> Any:
-        """The parsed body. Raises DeepSeekError if it is not JSON.
-
-        JSON mode makes this very unlikely, not impossible -- a truncated answer
-        (hitting max_tokens mid-object) is still well-formed as far as the API
-        is concerned and unparseable here.
-        """
-        try:
-            return json.loads(self.content)
-        except ValueError as exc:
-            raise DeepSeekError(f"model returned unparseable JSON: {exc}") from exc
 
 
 def complete_json(

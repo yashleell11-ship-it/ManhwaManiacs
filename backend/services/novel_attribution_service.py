@@ -34,7 +34,8 @@ from database.models import (
     NovelSeriesCast,
     NovelSeriesCastState,
 )
-from services import deepseek_client
+from services import deepseek_client, local_llm_client
+from services.llm import LLMError
 from services.novel_attribution import (
     DEFAULT_CONFIDENCE_GATE,
     SpanAttribution,
@@ -70,6 +71,29 @@ STATUS_UNATTRIBUTABLE = "unattributable"
 STATUS_FAILED = "failed"
 
 Completer = Callable[..., deepseek_client.Completion]
+
+
+def choose_completer() -> tuple[Completer, str]:
+    """The local model when it is there, the paid API when it is not.
+
+    Returns the callable and a word for which one it is, so a caller can say
+    what it used rather than guess.
+
+    Local first because it is free, and the API kept as a fallback rather than
+    replaced because a local server is a machine: it can be asleep, rebooting,
+    or busy rendering audio on the same GPU. "The desktop is off" should cost a
+    few tenths of a cent, not turn the feature off.
+
+    Availability is checked per call, not cached: the desktop's state is
+    exactly the thing that changes underneath a long bulk pass.
+    """
+    if local_llm_client.is_available():
+        return local_llm_client.complete_json, "local"
+    if deepseek_client.is_configured():
+        return deepseek_client.complete_json, "api"
+    raise deepseek_client.DeepSeekNotConfigured(
+        "no local model is running and DEEPSEEK_API_KEY is not set"
+    )
 
 
 def chapter_fingerprint(paragraphs: Sequence[str]) -> str:
@@ -304,13 +328,16 @@ def attribute_chapter(
         known_cast=_known_cast(db, source_id, series_key),
         series_pov=known_pov,
     )
-    caller = complete or deepseek_client.complete_json
+    if complete is not None:
+        caller = complete
+    else:
+        caller, _which = choose_completer()
 
     try:
         answer = caller(
             prompt, system=SYSTEM_PROMPT, max_tokens=MAX_OUTPUT_TOKENS
         )
-    except deepseek_client.DeepSeekError as exc:
+    except LLMError as exc:
         logger.warning(
             "attribution failed for %s/%s: %s", source_id, chapter_key, exc
         )

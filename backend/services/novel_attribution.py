@@ -174,6 +174,17 @@ def build_prompt(
         "text spells it, or null if the text does not say who is speaking. Do "
         "not guess, and do not name a character the text does not name."
     )
+    # Spelled out because a smaller model does not infer it. Asked only for
+    # "the speaker", an 8B answered "I" nine times, plus "She", "he", "His",
+    # "the familiar voice" and "A deep, bass voice" -- every one of which is
+    # unusable: a pronoun names nobody consistently, and a description cannot
+    # be matched to a cast member across chapters.
+    lines.append(
+        "Answer with a PROPER NAME, never a pronoun (I, he, she, they) and "
+        "never a description (the asura, a deep voice, the crowd). If the "
+        "speaker is the person narrating, give that person's name. If two or "
+        "more people speak the line together, answer null."
+    )
     lines.append("")
 
     for index, span in enumerate(asked):
