@@ -70,3 +70,91 @@ for the speaker prompt.
 (117–155 Hz) and 6 female (186–226 Hz), 6.0–11.5 s, 24 kHz mono, every clip
 carrying a non-nullable `license` field. Built by `tools/tts/build_voice_pack.py`
 from 37 candidate speakers.
+
+---
+
+# Attribution: what the model actually does
+
+Measured on 2026-09-19 over nine real cached chapters of *The Beginning After
+The End* (603 quoted spans), using `deepseek-flash`.
+
+## DeepSeek has no non-reasoning model any more
+
+`/models` lists exactly `deepseek-flash` and `deepseek-v4-pro`. `deepseek-chat`
+is gone; a request for it still answers but comes back stamped `deepseek-flash`.
+Both models reason before replying and bill that reasoning as OUTPUT tokens.
+
+Measured output per request (reasoning included):
+
+| spans asked | reasoning | total out |
+|---|---|---|
+| 8 | 11,062 | 11,177 |
+| 26 | 20,567 | 21,089 |
+| 26 (v4-pro) | 12,070 | 12,618 |
+| 97 | ~21,600 | 21,593 |
+
+Roughly **10k fixed per request plus ~0.4k per span**. The fixed part is the
+argument against batching a chapter: two half-chapters cost more than one whole
+one. `max_tokens` is set to 48,000 and covers the busiest chapter seen.
+
+JSON mode and the system prompt are both load-bearing. Dropping either made the
+reasoning fail to terminate at all (16,000 tokens, `finish_reason: length`,
+empty content) in two separate runs.
+
+The plan's "~6,400 in / ~900 out, $0.003/chapter" is wrong by more than an
+order of magnitude on output. Cost per chapter needs re-deriving from these
+numbers against current pricing before any bulk run.
+
+## Coverage
+
+| set | chapters | spans | attributed | distinct speakers |
+|---|---|---|---|---|
+| two-handers (118-123) | 6 | 266 | 202 (75%) | 4 |
+| crowd scenes (371, 435, 498) | 3 | 337 | 301 (89%) | 41 |
+
+Crowd scenes do **better**, not worse: a scene with eight people in it carries
+explicit speech tags, while a two-hander leans on alternation and expects the
+reader to keep track.
+
+## The failure that mattered
+
+Where the model did not establish a first-person narrator it gave **every**
+confident line to the one other character named in the text — 29 of 29 in one
+chapter, 19 of 19 in another. The cause is structural: a first-person narrator
+is almost never named inside his own chapter, so there is nobody for his
+dialogue to be assigned to.
+
+Fixed by carrying the series' known narrator into the prompt and by asking every
+request who narrates *this* chapter, so the series learns it from the first
+chapter that makes it obvious. Verified from an empty database, in order:
+chapter 121 established "Arthur"; chapter 122 went from 19-of-19 wrong to a
+correct Myre 12 / Arthur 8; a second pass over 120 went from 29 Myre / 0 Arthur
+to 30 Myre / 12 Arthur.
+
+## Adversarial verification
+
+50 spans stratified across rules 1-3 and four speakers, judged twice — once by a
+pass told to refute the claim, once blind. **50/50 correct, no disagreement.**
+
+Carried caveats from that review, which are not resolved:
+
+* 0/50 bounds the true error rate at roughly **6%** (rule of three, 95%), not at
+  zero. At 6% a listener hears a wrong voice about once every 17 lines.
+* Both passes come from the same model family and share reasoning habits, so
+  agreement is weaker evidence than two genuinely independent samples.
+* 8-10 of the 50 had no inline tag and were resolved by inference.
+
+That pass also found a real extractor bug, since fixed: a scare-quoted phrase
+was being read as dialogue.
+
+## Speaker labels are not all characters
+
+Observed verbatim: `"Wren Kain, Lyra, and Mordain"`, `"Linden, Brion, and
+Pascal"`, `"the voice"` (8 lines), `"the unseen announcer"` (3), `"the
+announcer"` (1) — three labels for one entity — `"the crowd"`, `"a middle-aged
+woman"`. Also `"Wren"` and `"Wren Kain"` for one character across chapters.
+
+Spans keep whatever label the model gave, because it is true. But
+`is_voice_candidate()` stops a group or a description ever becoming a cast
+member: those lines are narrated. A line shared by three people reads correctly
+in the narrator's voice and absurdly in anyone else's.

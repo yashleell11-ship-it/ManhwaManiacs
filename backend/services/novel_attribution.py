@@ -314,6 +314,41 @@ MAIN_MIN_CHAPTERS = 3
 MAX_VOICES = 12
 
 
+#: Labels a model returns that name something other than one character.
+#: Observed verbatim on real chapters: "the voice", "the unseen announcer",
+#: "the announcer" (three labels for ONE entity), "the crowd", "a middle-aged
+#: woman", and group labels like "Wren Kain, Lyra, and Mordain".
+_GROUP_MARKERS = (",", " and ", " & ")
+_DESCRIPTIVE_PREFIXES = ("the ", "a ", "an ", "some ", "several ", "both ")
+
+
+def is_voice_candidate(name: str) -> bool:
+    """Whether a speaker label names ONE character who could own a voice.
+
+    Stored spans keep whatever the model said -- "the crowd" really is who
+    spoke that line, and throwing the label away loses information. But a label
+    like that must never be promoted to a cast member, because the product
+    promise is that a character voice is never confidently wrong: a line shared
+    by three people, or spoken by an unseen announcer, is narration. It reads
+    correctly in the narrator's voice and absurdly in anyone else's.
+
+    Rejecting groups also protects the alias table, whose primary key assumes
+    one label means one character. "Wren Kain, Lyra, and Mordain" would
+    otherwise become a cast member competing with all three real ones.
+    """
+    text = name.strip()
+    if not text:
+        return False
+    if any(marker in text for marker in _GROUP_MARKERS):
+        return False
+    lowered = text.lower()
+    if any(lowered.startswith(prefix) for prefix in _DESCRIPTIVE_PREFIXES):
+        return False
+    # A real name is capitalised. A bare lowercase label is a description the
+    # model wrote itself, not something lifted from the text.
+    return text[0].isupper()
+
+
 @dataclass(frozen=True)
 class CastCandidate:
     name: str
@@ -340,10 +375,11 @@ def select_mains(
     Ties break on the name so two runs over the same series never disagree
     about who made the cut.
     """
-    pov = [c for c in candidates if c.is_pov]
+    eligible = [c for c in candidates if is_voice_candidate(c.name)]
+    pov = [c for c in eligible if c.is_pov]
     rest = [
         c
-        for c in candidates
+        for c in eligible
         if not c.is_pov and c.lines >= min_lines and c.chapters >= min_chapters
     ]
     ordered = sorted(pov, key=lambda c: (-c.lines, normalize_name(c.name))) + sorted(

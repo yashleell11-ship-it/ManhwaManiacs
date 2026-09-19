@@ -21,6 +21,7 @@ from services.novel_attribution import (
     askable_spans,
     build_prompt,
     infer_gender,
+    is_voice_candidate,
     parse_response,
     pronoun_counts,
     select_mains,
@@ -338,3 +339,68 @@ class TestNarratorParsing:
 
         assert answer.narrator is None
         assert all(a.rule == 7 for a in answer.lines)
+
+
+class TestVoiceCandidates:
+    """Which speaker labels may own a voice. Every case here was observed
+    verbatim on real chapters of the owner's own library.
+
+    Stored spans keep whatever the model said -- "the crowd" really is who
+    spoke that line. But promoting such a label to a cast member breaks the
+    product's one hard promise, that a character voice is never confidently
+    wrong: a line shared by three people, or spoken by an unseen announcer,
+    reads correctly in the narrator's voice and absurdly in anyone else's.
+    """
+
+    def test_a_plain_name_can_own_a_voice(self):
+        assert is_voice_candidate("Tessia") is True
+        assert is_voice_candidate("Wren Kain") is True
+
+    def test_a_title_or_relation_still_counts(self):
+        # "Mother" and "Professor Grey" are consistent referents for one
+        # person; the alias table is what merges them with a real name later.
+        assert is_voice_candidate("Mother") is True
+        assert is_voice_candidate("Professor Grey") is True
+
+    def test_a_group_never_becomes_a_character(self):
+        # Also protects the alias table, whose primary key assumes one label
+        # means one character.
+        assert is_voice_candidate("Wren Kain, Lyra, and Mordain") is False
+        assert is_voice_candidate("Linden, Brion, and Pascal") is False
+
+    def test_a_description_is_narration_not_a_cast_member(self):
+        for label in ("the voice", "the unseen announcer", "the announcer",
+                      "the crowd", "a middle-aged woman"):
+            assert is_voice_candidate(label) is False, label
+
+    def test_three_labels_for_one_unseen_entity_take_no_voice_slots(self):
+        # "the voice", "the unseen announcer" and "the announcer" appeared in
+        # ONE chapter for what is plainly one speaker. Admitting them would
+        # spend three of twelve voices on the same unseen person.
+        crowd = [
+            CastCandidate("the voice", lines=80, chapters=9),
+            CastCandidate("the unseen announcer", lines=60, chapters=9),
+            CastCandidate("the announcer", lines=40, chapters=9),
+            CastCandidate("Seth", lines=30, chapters=9),
+        ]
+
+        assert select_mains(crowd) == ("Seth",)
+
+    def test_a_group_label_cannot_outrank_a_real_character(self):
+        mains = select_mains([
+            CastCandidate("Linden, Brion, and Pascal", lines=900, chapters=40),
+            CastCandidate("Linden", lines=30, chapters=5),
+        ])
+
+        assert mains == ("Linden",)
+
+    def test_a_pov_label_still_has_to_be_a_name(self):
+        # POV promotion bypasses the line/chapter bars; it must not bypass this.
+        assert select_mains([CastCandidate("the voice", lines=5, chapters=1, is_pov=True)]) == ()
+
+    def test_a_lowercase_label_is_the_models_own_words(self):
+        assert is_voice_candidate("someone shouting") is False
+
+    def test_an_empty_label_owns_nothing(self):
+        assert is_voice_candidate("") is False
+        assert is_voice_candidate("   ") is False
