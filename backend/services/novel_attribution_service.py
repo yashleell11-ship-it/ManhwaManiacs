@@ -180,7 +180,32 @@ def series_pov(db: Session, source_id: str, series_key: str) -> str | None:
     in one, 19 of 19 in another, while the chapters that did establish a
     narrator split correctly across three.
     """
-    row = db.execute(
+    # Whoever narrates the MOST CHAPTERS, not whoever speaks the most lines.
+    # In a book that rotates POV those are different people: measured over
+    # eighteen chapters, the character with the most lines narrated six of them
+    # while the series' actual narrator had fewer lines and narrated ten. Line
+    # count picked the wrong one, so any chapter without a header of its own
+    # fell back to a narrator who does not narrate it.
+    narrated: dict[str, int] = {}
+    for row in db.execute(
+        select(NovelChapterAttribution.pov).where(
+            NovelChapterAttribution.source_id == source_id,
+            NovelChapterAttribution.series_key == series_key,
+            NovelChapterAttribution.pov.is_not(None),
+        )
+    ).scalars():
+        try:
+            names = json.loads(row) or []
+        except ValueError:
+            continue
+        if names:
+            narrated[names[0]] = narrated.get(names[0], 0) + 1
+    if narrated:
+        # Ties break on the name, so two runs never disagree.
+        return max(sorted(narrated), key=lambda n: narrated[n])
+
+    # Nothing attributed yet: fall back to a flagged cast row.
+    return db.execute(
         select(NovelSeriesCast.display_name)
         .where(
             NovelSeriesCast.source_id == source_id,
@@ -190,7 +215,6 @@ def series_pov(db: Session, source_id: str, series_key: str) -> str | None:
         .order_by(NovelSeriesCast.line_count.desc())
         .limit(1)
     ).scalar_one_or_none()
-    return row
 
 
 def record_narrator(

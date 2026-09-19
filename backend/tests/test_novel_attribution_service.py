@@ -568,3 +568,65 @@ class TestNarratorGender:
         cast = svc.build_series_cast(db_session, SOURCE, SERIES)
 
         assert cast[0].gender == "female"
+
+
+class TestSeriesPovInARotatingBook:
+    """Who narrates the SERIES, when several characters narrate chapters.
+
+    Measured over eighteen real chapters: the character with the most lines
+    narrated six of them, while the series' actual narrator had fewer lines and
+    narrated ten. Ranking by line count therefore picked the wrong one, and any
+    chapter without a header of its own fell back to a narrator who does not
+    narrate it — a man's chapter read in a woman's voice.
+    """
+
+    def _narrated(self, db, key, who, lines=1):
+        from database.models import NovelChapterAttribution
+
+        db.add(NovelChapterAttribution(
+            source_id=SOURCE, series_key=SERIES, chapter_key=key,
+            text_fingerprint=key, paragraph_count=1, style="quoted",
+            spans=json.dumps([{"p": 0, "s": 0, "e": 5, "ord": 0, "head": "x",
+                               "cont": False, "speaker": who, "rule": 1}] * lines),
+            pov=json.dumps([who]), status=svc.STATUS_OK,
+        ))
+        db.flush()
+
+    def test_the_most_chapters_wins_not_the_most_lines(self, db_session):
+        # Tessia speaks far more, Arthur narrates far more.
+        for i in range(6):
+            self._narrated(db_session, f"t{i}", "Tessia", lines=30)
+        for i in range(10):
+            self._narrated(db_session, f"a{i}", "Arthur", lines=2)
+
+        assert svc.series_pov(db_session, SOURCE, SERIES) == "Arthur"
+
+    def test_a_single_narrator_series_is_unchanged(self, db_session):
+        for i in range(3):
+            self._narrated(db_session, f"a{i}", "Arthur")
+
+        assert svc.series_pov(db_session, SOURCE, SERIES) == "Arthur"
+
+    def test_it_is_deterministic_on_a_tie(self, db_session):
+        self._narrated(db_session, "a0", "Arthur")
+        self._narrated(db_session, "t0", "Tessia")
+
+        first = svc.series_pov(db_session, SOURCE, SERIES)
+        assert first == svc.series_pov(db_session, SOURCE, SERIES)
+
+    def test_it_falls_back_to_the_cast_before_anything_is_attributed(self, db_session):
+        svc.record_narrator(db_session, SOURCE, SERIES, "Arthur", "male")
+
+        assert svc.series_pov(db_session, SOURCE, SERIES) == "Arthur"
+
+    def test_a_corrupt_pov_blob_does_not_break_the_lookup(self, db_session):
+        from database.models import NovelChapterAttribution
+
+        db_session.add(NovelChapterAttribution(
+            source_id=SOURCE, series_key=SERIES, chapter_key="bad",
+            text_fingerprint="bad", paragraph_count=1, style="quoted",
+            spans="[]", pov="{not json", status=svc.STATUS_OK,
+        ))
+        self._narrated(db_session, "a0", "Arthur")
+
+        assert svc.series_pov(db_session, SOURCE, SERIES) == "Arthur"
