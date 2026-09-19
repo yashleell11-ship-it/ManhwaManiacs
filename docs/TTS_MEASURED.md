@@ -310,3 +310,45 @@ highlight cannot drift from the audio.
 Arthur is read by the narrator and has no voice of his own, which is correct
 rather than a gap: he is the first-person POV, so he and the narrator are the
 same person.
+
+
+---
+
+# Six chapters, end to end, for nothing
+
+TBATE 118-123, attributed by the local 14B and rendered on the 3090 Ti.
+
+| chapter | minutes | segments | voices | contiguous | drift |
+|---|---|---|---|---|---|
+| 118 | 12.6 | 146 | 2 | yes | 0.01 s |
+| 119 | 12.3 | 138 | 2 | yes | 0.01 s |
+| 120 | 13.9 | 152 | 2 | yes | 0.01 s |
+| 121 | 11.3 | 126 | 3 | yes | 0.01 s |
+| 122 | 16.0 | 222 | 3 | yes | 0.01 s |
+| 123 | 14.9 | 172 | 3 | yes | 0.01 s |
+
+**956 segments, 81 minutes, 14.1 MB, $0.** Every timing map is contiguous and
+monotonic, and each one lands within 0.01 s of its Opus file across a whole
+chapter.
+
+Cast across the six: the narrator reads Arthur (first-person POV), with Myre,
+Windsom and Wren each on their own clip.
+
+## Verified in a browser, not only in tests
+
+Chapter 119 opened in the reader with 138 segment nodes and 40 tinted spans —
+matching its timing map exactly. Playing it:
+
+| time | segment | highlighted |
+|---|---|---|
+| 7.9 s | 1 | "An indescribably chilling sensation burst out from within my mana core" |
+| 96.4 s | 14 | "Her soft purple eyes peered through me…" |
+| 301.4 s | 51 | "…she continued, smiling gently at me." |
+
+Exactly one element carries the highlight at any moment.
+
+That run also caught what unit tests could not: `<audio src={url}>` returns
+**401 in dev**, because `mm_session` is httpOnly and SameSite=lax and a
+browser-managed subresource request to another origin never carries it — the
+failure `services/http.ts` already records as having taken `next/image`'s
+optimizer out app-wide. The player goes through `requestBlob` instead.
