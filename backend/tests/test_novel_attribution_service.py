@@ -273,3 +273,71 @@ class TestServeTimeResolution:
         second = svc.bump_cast_version(db_session, SOURCE, SERIES)
 
         assert (first, second) == (1, 2)
+
+
+class TestNarratorLearning:
+    """How a series works out who narrates it, and why that matters most.
+
+    A first-person narrator is almost never named inside his own chapter. With
+    no POV established the model has nobody to assign his dialogue to, so it
+    gives every confident line to the one other character the text does name.
+    Measured on real chapters: 30 of 30 spans to the wrong speaker in one, 19
+    of 19 in another, while chapters that did establish a narrator split
+    correctly across three speakers.
+    """
+
+    def test_a_reported_narrator_becomes_the_series_pov(self, db_session):
+        spy = _Spy(json.dumps({
+            "narrator": "Arthur Leywin",
+            "lines": [{"i": 0, "speaker": "Tessia", "rule": 1},
+                      {"i": 1, "speaker": "Tessia", "rule": 1}],
+        }))
+
+        svc.attribute_chapter(db_session, SOURCE, SERIES, CHAPTER, QUOTED, complete=spy)
+
+        assert svc.series_pov(db_session, SOURCE, SERIES) == "Arthur Leywin"
+
+    def test_a_learned_pov_is_handed_to_the_next_chapter(self, db_session):
+        # The whole point: chapter N teaches chapter N+1, which names nobody.
+        svc.record_narrator(db_session, SOURCE, SERIES, "Arthur Leywin")
+        db_session.flush()
+        spy = _Spy(_answer(("Tessia", 1)))
+
+        svc.attribute_chapter(db_session, SOURCE, SERIES, "ch-999", QUOTED, complete=spy)
+
+        assert "Arthur Leywin" in spy.calls[0]
+
+    def test_no_narrator_reported_leaves_the_series_unchanged(self, db_session):
+        spy = _Spy(json.dumps({"narrator": None, "lines": []}))
+
+        svc.attribute_chapter(db_session, SOURCE, SERIES, CHAPTER, QUOTED, complete=spy)
+
+        assert svc.series_pov(db_session, SOURCE, SERIES) is None
+
+    def test_an_owner_correction_outranks_what_the_model_infers(self, db_session):
+        from database.models import NovelSeriesCast
+
+        locked = NovelSeriesCast(
+            source_id=SOURCE, series_key=SERIES, display_name="Grey",
+            normalized_name="grey", is_pov=True, locked=True,
+        )
+        db_session.add(locked)
+        db_session.flush()
+
+        svc.record_narrator(db_session, SOURCE, SERIES, "Grey")
+
+        # Still POV, and the locked row was not rewritten by an inference.
+        assert locked.is_pov is True and locked.locked is True
+
+    def test_learning_the_narrator_twice_does_not_split_the_cast(self, db_session):
+        from sqlalchemy import select
+        from database.models import NovelSeriesCast
+
+        svc.record_narrator(db_session, SOURCE, SERIES, "Arthur Leywin")
+        svc.record_narrator(db_session, SOURCE, SERIES, "ARTHUR LEYWIN")
+        db_session.flush()
+
+        rows = db_session.execute(
+            select(NovelSeriesCast).where(NovelSeriesCast.series_key == SERIES)
+        ).scalars().all()
+        assert len(rows) == 1

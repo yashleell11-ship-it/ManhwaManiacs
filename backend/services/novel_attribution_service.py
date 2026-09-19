@@ -41,7 +41,7 @@ from services.novel_attribution import (
     askable_spans,
     build_prompt,
     infer_gender,
-    parse_response,
+    parse_answer,
     pronoun_counts,
 )
 from services.novel_dialogue import normalize_name, segment
@@ -119,6 +119,65 @@ def _resolve_speakers(segments, attributions, gate: float) -> list[dict]:
             }
         )
     return rows
+
+
+def series_pov(db: Session, source_id: str, series_key: str) -> str | None:
+    """The series' established first-person narrator, if one is known.
+
+    This is the highest-value thing the prompt can carry. A first-person
+    narrator is usually never named inside his own chapter, so when the model
+    cannot work out who he is there is nobody for his dialogue to belong to --
+    and it assigns every confident line to the one other character the text
+    does name. Measured on real chapters: 30 of 30 spans to the wrong speaker
+    in one, 19 of 19 in another, while the chapters that did establish a
+    narrator split correctly across three.
+    """
+    row = db.execute(
+        select(NovelSeriesCast.display_name)
+        .where(
+            NovelSeriesCast.source_id == source_id,
+            NovelSeriesCast.series_key == series_key,
+            NovelSeriesCast.is_pov.is_(True),
+        )
+        .order_by(NovelSeriesCast.line_count.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    return row
+
+
+def record_narrator(
+    db: Session, source_id: str, series_key: str, name: str
+) -> NovelSeriesCast:
+    """Remember who narrates this series, learned from a chapter that showed it.
+
+    This is how the series bootstraps: the first chapter where the narrator is
+    identifiable teaches every later chapter that names nobody. A locked row is
+    never overwritten -- an owner correction outranks anything a model infers.
+    """
+    normalized = normalize_name(name)
+    row = db.execute(
+        select(NovelSeriesCast).where(
+            NovelSeriesCast.source_id == source_id,
+            NovelSeriesCast.series_key == series_key,
+            NovelSeriesCast.normalized_name == normalized,
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        row = NovelSeriesCast(
+            source_id=source_id, series_key=series_key,
+            display_name=name, normalized_name=normalized,
+        )
+        db.add(row)
+        db.flush()
+    if not row.locked:
+        row.is_pov = True
+        row.updated_at = utcnow()
+        # Flushed because the very next thing that happens is a SELECT for the
+        # series POV, and this factory does not autoflush -- an unflushed
+        # is_pov reads back as "no narrator known", which is the exact state
+        # this function exists to leave behind.
+        db.flush()
+    return row
 
 
 def _known_cast(db: Session, source_id: str, series_key: str) -> tuple[str, ...]:
@@ -215,7 +274,10 @@ def attribute_chapter(
         )
 
     prompt = build_prompt(
-        paragraphs, segments, known_cast=_known_cast(db, source_id, series_key)
+        paragraphs,
+        segments,
+        known_cast=_known_cast(db, source_id, series_key),
+        series_pov=series_pov(db, source_id, series_key),
     )
     caller = complete or deepseek_client.complete_json
 
@@ -233,8 +295,13 @@ def attribute_chapter(
             spans=[], status=STATUS_FAILED,
         )
 
-    attributions = parse_response(answer.content, expected=len(asked))
-    spans = _resolve_speakers(segments, attributions, gate)
+    parsed = parse_answer(answer.content, expected=len(asked))
+    spans = _resolve_speakers(segments, parsed.lines, gate)
+
+    # Learned, not assumed: whatever the model worked out about this chapter's
+    # narrator is what lets the NEXT chapter be attributed when it names nobody.
+    if parsed.narrator:
+        record_narrator(db, source_id, series_key, parsed.narrator)
 
     # Pronoun evidence is gathered per speaker from the paragraphs they speak
     # in, so gender accumulates across a series rather than being decided by

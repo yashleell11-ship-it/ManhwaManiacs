@@ -13,6 +13,7 @@ import json
 
 from services.novel_attribution import (
     DEFAULT_CONFIDENCE_GATE,
+    parse_answer,
     RULE_CONFIDENCE,
     RULES,
     CastCandidate,
@@ -101,6 +102,42 @@ class TestPrompt:
         assert "<<If only our responsibilities" in prompt
         # and the speech tag that identifies it survives in the context window
         assert "said Tessia" in prompt
+
+    def test_a_series_pov_is_offered_when_the_chapter_has_no_header(self):
+        # The measured failure: with no narrator established, the model gave
+        # EVERY confident line to the one other character named in the text --
+        # 30 of 30 in one real chapter, 19 of 19 in another, because a
+        # first-person narrator is never named inside his own chapter.
+        plain = ["Chapter 118", "“So it’s true.” I turned to see Myre."]
+        prompt = build_prompt(plain, segment(plain), series_pov="Arthur Leywin")
+
+        assert "Arthur Leywin" in prompt
+
+    def test_the_series_pov_is_offered_not_asserted(self):
+        # A series with rotating POV would otherwise have every chapter's
+        # dialogue reassigned to one person.
+        plain = ["Chapter 118", "“So it’s true.” I turned to see Myre."]
+        prompt = build_prompt(plain, segment(plain), series_pov="Arthur Leywin")
+
+        assert "unless" in prompt or "If this chapter" in prompt
+
+    def test_an_in_chapter_header_beats_the_series_default(self):
+        # The chapter's own header is evidence; the series default is a prior.
+        prompt = build_prompt(CHAPTER, segment(CHAPTER), series_pov="Someone Else")
+
+        assert "Arthur Leywin" in prompt
+        assert "Someone Else" not in prompt
+
+    def test_with_no_pov_at_all_it_asks_the_model_to_work_one_out(self):
+        plain = ["Chapter 118", "“So it’s true.” I turned to see Myre."]
+        prompt = build_prompt(plain, segment(plain))
+
+        assert "narrator" in prompt.lower()
+
+    def test_it_always_asks_who_narrates(self):
+        # How a series LEARNS its narrator: the first chapter that makes it
+        # obvious teaches every later chapter that names nobody.
+        assert '"narrator"' in build_prompt(CHAPTER, segment(CHAPTER))
 
     def test_the_known_cast_is_offered_but_not_forced(self):
         prompt = build_prompt(CHAPTER, segment(CHAPTER), known_cast=("Sylvie",))
@@ -268,3 +305,36 @@ class TestMains:
         crowd = [CastCandidate(f"N{i}", lines=50, chapters=5) for i in range(20)]
 
         assert select_mains(crowd) == select_mains(crowd)
+
+
+class TestNarratorParsing:
+    def test_the_narrator_is_read_back(self):
+        raw = json.dumps({"narrator": "Arthur Leywin", "lines": []})
+
+        assert parse_answer(raw, expected=0).narrator == "Arthur Leywin"
+
+    def test_a_null_narrator_is_none(self):
+        raw = json.dumps({"narrator": None, "lines": []})
+
+        assert parse_answer(raw, expected=0).narrator is None
+
+    def test_the_word_unknown_is_not_a_narrator(self):
+        # A model told to answer null sometimes answers "unknown" instead, and
+        # storing that would make "Unknown" the series' narrator forever.
+        for value in ("unknown", "null", "none", "  "):
+            raw = json.dumps({"narrator": value, "lines": []})
+            assert parse_answer(raw, expected=0).narrator is None, value
+
+    def test_a_missing_narrator_key_is_not_an_error(self):
+        raw = json.dumps({"lines": [{"i": 0, "speaker": "Tessia", "rule": 1}]})
+
+        answer = parse_answer(raw, expected=1)
+
+        assert answer.narrator is None
+        assert answer.lines[0].speaker == "Tessia"
+
+    def test_unparseable_json_yields_no_narrator_and_no_lines(self):
+        answer = parse_answer("not json", expected=2)
+
+        assert answer.narrator is None
+        assert all(a.rule == 7 for a in answer.lines)

@@ -102,6 +102,7 @@ def build_prompt(
     segments: ChapterSegments,
     *,
     known_cast: tuple[str, ...] = (),
+    series_pov: str | None = None,
     context_chars: int = CONTEXT_CHARS,
 ) -> str:
     """One request for a whole chapter.
@@ -118,12 +119,35 @@ def build_prompt(
     asked = [s for s in segments.spans if not s.continues]
 
     lines: list[str] = []
+    # Naming the narrator is the single highest-value thing in this prompt.
+    # Measured over six real chapters: where the model established a
+    # first-person narrator it attributed lines to three speakers correctly;
+    # where it did not, it gave EVERY line it was confident about to the one
+    # other character named in the text -- 30 of 30 in one chapter, 19 of 19 in
+    # another. The narrator is usually unnamed inside his own chapter, so
+    # without help there is nobody for his dialogue to be assigned to, and the
+    # model picks the only name it can see.
     if segments.pov:
         names = ", ".join(h.name for h in segments.pov)
-        lines.append(f'POV header(s) for this chapter: {names}')
+        lines.append(f"POV header(s) for this chapter: {names}")
         lines.append(
             'A first-person line ("I", "me", "my") in this chapter is spoken '
             "by the POV character unless the text says otherwise."
+        )
+    elif series_pov:
+        # No header in this chapter, but the series has a known narrator.
+        # Offered, not asserted: a series with rotating POV would otherwise
+        # have every chapter's dialogue reassigned to the wrong person.
+        lines.append(
+            f"This series is usually narrated in first person by {series_pov}. "
+            "If this chapter is first person and the text does not say "
+            f"otherwise, the narrator is {series_pov}, and lines spoken by the "
+            '"I" of the narration are his or hers.'
+        )
+    else:
+        lines.append(
+            "If this chapter is written in first person, work out who the "
+            'narrator is and attribute the "I" lines to them by name.'
         )
     if known_cast:
         lines.append("Characters already known in this series: " + ", ".join(known_cast))
@@ -154,8 +178,11 @@ def build_prompt(
 
     lines.append("")
     lines.append(
-        'Reply with JSON: {"lines": [{"i": 0, "speaker": "Name", "rule": 1}, ...]} '
-        f"with exactly {len(asked)} entries, one per numbered line, in order."
+        'Reply with JSON: {"narrator": "Name or null", '
+        '"lines": [{"i": 0, "speaker": "Name", "rule": 1}, ...]} '
+        f"with exactly {len(asked)} entries, one per numbered line, in order. "
+        '"narrator" is the first-person narrator of THIS chapter, or null if '
+        "it is not written in first person."
     )
     return "\n".join(lines)
 
@@ -163,6 +190,32 @@ def build_prompt(
 def askable_spans(segments: ChapterSegments) -> tuple[QuoteSpan, ...]:
     """The spans ``build_prompt`` numbers, in the same order."""
     return tuple(s for s in segments.spans if not s.continues)
+
+
+@dataclass(frozen=True)
+class ChapterAnswer:
+    """Everything one request came back with."""
+
+    lines: tuple[SpanAttribution, ...]
+    #: Who the model says narrates this chapter, if anyone. Worth storing even
+    #: when a POV was supplied: it is how a series LEARNS its narrator from the
+    #: first chapter that makes it obvious, so later chapters that name nobody
+    #: can still be attributed.
+    narrator: str | None = None
+
+
+def parse_answer(raw: str, expected: int) -> ChapterAnswer:
+    """Parse a whole reply: the narrator and the per-line attributions."""
+    narrator = None
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            value = data.get("narrator")
+            if isinstance(value, str) and value.strip().lower() not in ("", "null", "none", "unknown"):
+                narrator = value.strip()
+    except (ValueError, TypeError):
+        pass
+    return ChapterAnswer(lines=parse_response(raw, expected), narrator=narrator)
 
 
 def parse_response(raw: str, expected: int) -> tuple[SpanAttribution, ...]:
