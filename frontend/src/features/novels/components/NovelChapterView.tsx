@@ -26,6 +26,7 @@ import { BookmarkNotice } from "@/features/bookmarks";
 // The manga reader's own scroll writer, reused rather than re-derived: it
 // rounds, clamps at zero and skips a no-op write.
 import { setReaderScrollTop } from "@/features/reader/scroll-preparation";
+import { tintParagraph, type SpeakerSpan, type TintedRun } from "@/features/novels/speaker-tint";
 import { useScrollContainer } from "@/lib/scroll-container";
 import { apiErrorMessage, resolveViewState } from "@/lib/view-state";
 import { isSceneBreak, splitDropCap, tocEntry } from "../book";
@@ -783,14 +784,52 @@ function ProgressHairline({
  * nothing that happens in the head — the type panel opening, a bookmark being
  * saved, the reader arriving at the bottom — walks a page of prose again.
  */
+/**
+ * Quoted speech, tinted by who says it.
+ *
+ * A `<span>` INSIDE the paragraph, never instead of it: `measureOffsets` reads
+ * each `<p>`'s own rect through `registerParagraph`, and every saved reading
+ * position in the library is an index into that array. Replacing the paragraph
+ * element, or skipping its ref, would silently move every bookmark.
+ */
+function SpeechRun({
+  run,
+  hue,
+}: {
+  run: TintedRun;
+  hue: number | undefined;
+}) {
+  if (run.speaker === null || hue === undefined) return <>{run.text}</>;
+  return (
+    <span
+      // Tint only — the ink stays the reader's own, so a speaker colour can
+      // never make prose harder to read than the untinted page it replaces.
+      style={{
+        backgroundColor: `hsl(${hue} 70% 50% / 0.16)`,
+        boxShadow: `inset 0 -1px 0 hsl(${hue} 60% 45% / 0.55)`,
+        borderRadius: "2px",
+      }}
+      data-speaker={run.speaker}
+    >
+      {run.text}
+    </span>
+  );
+}
+
 const ChapterBody = memo(function ChapterBody({
   paragraphs,
   surface,
   registerParagraph,
+  spansByParagraph,
+  hues,
 }: {
   paragraphs: readonly string[];
   surface: ReturnType<typeof paletteSurface>;
   registerParagraph: (index: number, node: HTMLParagraphElement | null) => void;
+  /** Attributed speech per paragraph index, when the chapter has any. */
+  spansByParagraph?: ReadonlyMap<number, readonly SpeakerSpan[]>;
+  /** Speaker label to hue. A speaker with no hue renders as plain prose. */
+  hues?: ReadonlyMap<string, number>;
 }) {
   const dropCap = splitDropCap(paragraphs[0]);
   const paragraphRef = useMemo(
@@ -816,6 +855,10 @@ const ChapterBody = memo(function ChapterBody({
           );
         }
 
+        // The drop-cap paragraph is left untinted. The cap splits the first
+        // character into its own floated span, which would have to be
+        // reconciled with a span boundary landing in the same place; a chapter
+        // rarely opens mid-dialogue, so the reading affordance wins.
         if (index === 0 && dropCap) {
           return (
             <p key={index} ref={register} className="mt-0">
@@ -830,13 +873,28 @@ const ChapterBody = memo(function ChapterBody({
           );
         }
 
+        // Null whenever the offsets cannot be proved against this exact text
+        // — a refetched chapter, or an astral character shifting UTF-16
+        // indices — and then the paragraph renders exactly as it always did.
+        const runs = spansByParagraph?.size
+          ? tintParagraph(paragraph, spansByParagraph.get(index) ?? [])
+          : null;
+
         return (
           <p
             key={index}
             ref={register}
             className={index === 0 ? "mt-0" : "mt-[0.35em] indent-[1.3em]"}
           >
-            {paragraph}
+            {runs
+              ? runs.map((run, runIndex) => (
+                  <SpeechRun
+                    key={runIndex}
+                    run={run}
+                    hue={run.speaker ? hues?.get(run.speaker) : undefined}
+                  />
+                ))
+              : paragraph}
           </p>
         );
       })}

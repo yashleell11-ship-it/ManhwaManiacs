@@ -20,6 +20,7 @@ from services.novel_attribution import (
     SpanAttribution,
     askable_spans,
     build_prompt,
+    classify_span,
     infer_gender,
     is_voice_candidate,
     parse_response,
@@ -46,15 +47,21 @@ class TestRuleScale:
         assert set(RULE_CONFIDENCE) == set(RULES)
 
     def test_confidence_never_rises_as_evidence_weakens(self):
-        scores = [RULE_CONFIDENCE[r] for r in sorted(RULES)]
+        # Across the EVIDENCE tiers. Rule 6 is not weaker evidence — a
+        # continuation inherits the certainty of the line it continues — so it
+        # is not part of this ordering.
+        scores = [RULE_CONFIDENCE[r] for r in (1, 2, 3, 7)]
         assert scores == sorted(scores, reverse=True)
 
-    def test_alternation_ships_recorded_but_ignored(self):
-        # Rule 4 is right most of the time and wrong exactly where it matters:
-        # a third person entering a two-hander. Below the gate, so it is bought
-        # and stored; raising the gate later turns it on with no new spend.
-        assert RULE_CONFIDENCE[4] < DEFAULT_CONFIDENCE_GATE
-        assert SpanAttribution(0, "Arthur", 4).accepted() is False
+    def test_an_inferred_speaker_is_voiced_but_separable(self):
+        # Rule 3 is "the model named someone the text does not tag". It is
+        # voiced by default — 50 of 50 such spans survived adversarial review —
+        # but it is stored distinctly, so raising the gate to 0.8 voices only
+        # the lines whose speech tag the SERVER verified itself.
+        inferred = SpanAttribution(0, "Arthur", 3)
+
+        assert inferred.accepted() is True
+        assert inferred.accepted(gate=0.8) is False
 
     def test_a_tag_and_a_pov_line_are_accepted(self):
         assert SpanAttribution(0, "Tessia", 1).accepted() is True
@@ -65,10 +72,15 @@ class TestRuleScale:
         assert SpanAttribution(0, None, 7).accepted() is False
 
     def test_the_gate_is_switchable_without_touching_stored_answers(self):
-        stored = SpanAttribution(0, "Arthur", 4)
+        # The property the old design bought from the model by asking it to
+        # name a rule — now obtained locally, and for nothing.
+        stored = SpanAttribution(0, "Arthur", 3)
 
-        assert stored.accepted(gate=0.75) is False
         assert stored.accepted(gate=0.60) is True
+        assert stored.accepted(gate=0.80) is False
+
+    def test_a_verified_tag_survives_a_strict_gate(self):
+        assert SpanAttribution(0, "Arthur", 1).accepted(gate=0.9) is True
 
 
 class TestPrompt:
@@ -156,13 +168,15 @@ class TestPrompt:
 class TestParsing:
     def test_a_clean_answer_is_read(self):
         raw = json.dumps({"lines": [
-            {"i": 0, "speaker": "Arthur", "rule": 2},
-            {"i": 1, "speaker": "Tessia", "rule": 1},
+            {"i": 0, "speaker": "Arthur"},
+            {"i": 1, "speaker": "Tessia"},
         ]})
 
         out = parse_response(raw, expected=2)
 
-        assert [(a.speaker, a.rule) for a in out] == [("Arthur", 2), ("Tessia", 1)]
+        # Everything named arrives as "inferred"; the server promotes it only
+        # where it can verify the evidence itself.
+        assert [(a.speaker, a.rule) for a in out] == [("Arthur", 3), ("Tessia", 3)]
 
     def test_a_bare_list_works_too(self):
         raw = json.dumps([{"i": 0, "speaker": "Arthur", "rule": 1}])
@@ -207,17 +221,20 @@ class TestParsing:
 
         assert parse_response(raw, expected=1)[0].speaker == "Arthur"
 
-    def test_an_unknown_rule_number_is_treated_as_no_evidence(self):
-        raw = json.dumps({"lines": [{"i": 0, "speaker": "Arthur", "rule": 99}]})
+    def test_a_rule_the_model_volunteers_is_ignored(self):
+        # It is no longer asked for, and a model grading its own evidence is a
+        # model marking its own work. The server classifies from the text.
+        raw = json.dumps({"lines": [{"i": 0, "speaker": "Arthur", "rule": 1}]})
 
-        assert parse_response(raw, expected=1)[0].rule == 7
+        assert parse_response(raw, expected=1)[0].rule == 3
 
-    def test_rule_seven_with_a_name_attached_drops_the_name(self):
-        # A model told to answer "no evidence, no speaker" sometimes answers
-        # "no evidence, Unknown". The rule is authoritative.
-        raw = json.dumps({"lines": [{"i": 0, "speaker": "Unknown", "rule": 7}]})
-
-        assert parse_response(raw, expected=1)[0].speaker is None
+    def test_the_word_unknown_is_not_a_speaker(self):
+        # A model told to answer null sometimes answers "Unknown" instead, and
+        # storing that would put a character called Unknown in the cast.
+        for value in ("Unknown", "null", "none", "?"):
+            raw = json.dumps({"lines": [{"i": 0, "speaker": value}]})
+            out = parse_response(raw, expected=1)[0]
+            assert out.speaker is None and out.rule == 7, value
 
     def test_a_blank_speaker_is_no_speaker(self):
         raw = json.dumps({"lines": [{"i": 0, "speaker": "   ", "rule": 1}]})
@@ -404,3 +421,65 @@ class TestVoiceCandidates:
     def test_an_empty_label_owns_nothing(self):
         assert is_voice_candidate("") is False
         assert is_voice_candidate("   ") is False
+
+
+class TestLocalClassification:
+    """How much the SERVER believes a speaker, decided from the text.
+
+    Measured: asking the model to name its own rule cost two to four times as
+    much per chapter and returned byte-identical attributions on three real
+    chapters ($0.0063 / $0.0043 / $0.0023 for seven rules, three tiers, and
+    none). Self-assessment was expensive and was never evidence anyway — a
+    model grading its own work. An explicit speech tag is arithmetic, so it is
+    checked here, for free, and it is checkable by anyone.
+    """
+
+    def test_a_tag_naming_the_speaker_is_verified(self):
+        p = "He paused. \u201cThen we go,\u201d Arthur said, and left."
+
+        assert classify_span(p, 12, 23, "Arthur") == 1
+
+    def test_the_inverted_order_counts_too(self):
+        p = "\u201cGo.\u201d said Tessia, softly."
+
+        assert classify_span(p, 1, 4, "Tessia") == 1
+
+    def test_a_tag_naming_SOMEONE_ELSE_does_not_promote(self):
+        # The most important negative: "…," Arthur said' is not evidence that
+        # TESSIA spoke, and treating any nearby tag as proof would promote
+        # exactly the wrong attributions.
+        p = "He paused. \u201cThen we go,\u201d Arthur said, and left."
+
+        assert classify_span(p, 12, 23, "Tessia") == 3
+
+    def test_an_honorific_still_matches_the_same_person(self):
+        p = "\u201cCome.\u201d said Lord Arthur, turning."
+
+        assert classify_span(p, 1, 6, "Arthur") == 1
+
+    def test_a_tag_too_far_past_the_quote_is_not_its_tag(self):
+        p = "\u201cGo.\u201d " + "The wind moved through the grass for a while. " * 2 + "Arthur said so."
+
+        assert classify_span(p, 1, 4, "Arthur") == 3
+
+    def test_first_person_resolves_through_the_pov(self):
+        p = "\u201cI will not.\u201d I turned away from her."
+
+        assert classify_span(p, 1, 12, "Arthur", pov="Arthur") == 2
+
+    def test_first_person_does_not_promote_somebody_else(self):
+        p = "\u201cI will not.\u201d I turned away from her."
+
+        assert classify_span(p, 1, 12, "Tessia", pov="Arthur") == 3
+
+    def test_no_speaker_is_no_evidence(self):
+        p = "\u201cGo.\u201d He turned away."
+
+        assert classify_span(p, 1, 4, None) == 7
+
+    def test_an_unverifiable_span_keeps_its_speaker(self):
+        # Classification only decides how much a span is BELIEVED. It can never
+        # invent a speaker or take one away.
+        p = "\u201cGo.\u201d The room was silent afterwards."
+
+        assert classify_span(p, 1, 4, "Tessia") == 3

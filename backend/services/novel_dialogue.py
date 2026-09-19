@@ -43,12 +43,19 @@ _CLOSER_FOR = {pair[0]: pair[1] for pair in _QUOTE_PAIRS}
 
 #: Verbs that mark an attribution clause. Only used to protect a short quote
 #: from the scare-quote filter -- attribution itself is the model's job.
+#: Shared with ``novel_attribution``, which builds its own speech-tag patterns
+#: from the same list -- two copies of this would drift, and a verb present in
+#: one and missing from the other silently changes which spans get believed.
+SPEECH_VERBS: tuple[str, ...] = (
+    "said", "says", "asked", "asks", "replied", "replies", "answered",
+    "shouted", "yelled", "whispered", "murmured", "muttered", "growled",
+    "snapped", "sighed", "laughed", "called", "continued", "added",
+    "repeated", "began", "interrupted", "cried", "breathed", "demanded",
+    "offered", "observed", "remarked", "told", "spoke",
+)
+
 _SPEECH_VERB_RE = re.compile(
-    r"\b(said|says|asked|asks|replied|replies|answered|shouted|yelled|"
-    r"whispered|murmured|muttered|growled|snapped|sighed|laughed|called|"
-    r"continued|added|repeated|began|interrupted|cried|breathed|demanded|"
-    r"offered|observed|remarked|told|spoke)\b",
-    re.IGNORECASE,
+    r"\b(" + "|".join(SPEECH_VERBS) + r")\b", re.IGNORECASE
 )
 
 #: A quoted fragment this short, with no terminal punctuation and no speech verb

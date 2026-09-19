@@ -37,9 +37,11 @@ from database.models import (
 from services import deepseek_client
 from services.novel_attribution import (
     DEFAULT_CONFIDENCE_GATE,
+    SpanAttribution,
     SYSTEM_PROMPT,
     askable_spans,
     build_prompt,
+    classify_span,
     infer_gender,
     parse_answer,
     pronoun_counts,
@@ -84,7 +86,9 @@ def chapter_fingerprint(paragraphs: Sequence[str]) -> str:
     return digest.hexdigest()
 
 
-def _resolve_speakers(segments, attributions, gate: float) -> list[dict]:
+def _resolve_speakers(
+    segments, attributions, gate: float, paragraphs=None, pov: str | None = None
+) -> list[dict]:
     """Attach a speaker label to every span, including the ones never asked about.
 
     A ``continues`` span is the tail of a quote split by an attribution clause;
@@ -101,8 +105,20 @@ def _resolve_speakers(segments, attributions, gate: float) -> list[dict]:
     for span in segments.spans:
         answer = answer_for.get(id(span))
         if answer is not None:
-            speaker = answer.speaker if answer.accepted(gate) else None
-            rule = answer.rule
+            # The model named a speaker; the SERVER decides how much that is
+            # believed, by looking for evidence it can verify itself. The model
+            # is never asked to grade its own work -- and asking cost two to
+            # four times as much per chapter while changing no answer.
+            rule = (
+                classify_span(
+                    paragraphs[span.paragraph], span.start, span.end,
+                    answer.speaker, pov=pov,
+                )
+                if paragraphs is not None
+                else answer.rule
+            )
+            graded = SpanAttribution(answer.ordinal, answer.speaker, rule)
+            speaker = graded.speaker if graded.accepted(gate) else None
             last_speaker, last_rule = speaker, rule
         else:
             # Carried from the span it continues -- including its RULE, not a
@@ -281,11 +297,12 @@ def attribute_chapter(
             spans=[], status=STATUS_NO_DIALOGUE,
         )
 
+    known_pov = series_pov(db, source_id, series_key)
     prompt = build_prompt(
         paragraphs,
         segments,
         known_cast=_known_cast(db, source_id, series_key),
-        series_pov=series_pov(db, source_id, series_key),
+        series_pov=known_pov,
     )
     caller = complete or deepseek_client.complete_json
 
@@ -304,7 +321,12 @@ def attribute_chapter(
         )
 
     parsed = parse_answer(answer.content, expected=len(asked))
-    spans = _resolve_speakers(segments, parsed.lines, gate)
+    chapter_pov = (
+        segments.pov[0].name if segments.pov else (parsed.narrator or known_pov)
+    )
+    spans = _resolve_speakers(
+        segments, parsed.lines, gate, paragraphs=paragraphs, pov=chapter_pov
+    )
 
     # Learned, not assumed: whatever the model worked out about this chapter's
     # narrator is what lets the NEXT chapter be attributed when it names nobody.
@@ -332,6 +354,61 @@ def attribute_chapter(
         served_model=answer.model or deepseek_client.MODEL,
         prompt_tokens=answer.prompt_tokens, completion_tokens=answer.completion_tokens,
     )
+
+
+def read_attribution(
+    db: Session, source_id: str, series_key: str, chapter_key: str
+) -> dict[str, object]:
+    """What the reader needs to tint a chapter, or an honest nothing.
+
+    Strictly READ-ONLY, and that is the point: a reader opening a chapter must
+    never be able to start a paid API call. Attribution is bought deliberately
+    by a bulk pass, never as a side effect of somebody turning a page — the
+    alternative is a chapter list that silently costs money to scroll.
+
+    An unattributed chapter is not an error. It answers ``attributed: false``
+    and the client renders the prose exactly as it always did.
+    """
+    row = db.get(NovelChapterAttribution, (source_id, series_key, chapter_key))
+    if row is None or row.status != STATUS_OK:
+        return {"attributed": False, "spans": [], "cast": [], "text_fingerprint": None}
+
+    try:
+        spans = json.loads(row.spans)
+    except ValueError:
+        spans = []
+
+    # Only spans a reader can act on. A span with no speaker is narration, and
+    # sending it would make the client draw a box around ordinary prose.
+    visible = [
+        {"p": s["p"], "s": s["s"], "e": s["e"], "head": s.get("head", ""),
+         "speaker": s["speaker"]}
+        for s in spans
+        if s.get("speaker")
+    ]
+
+    cast = db.execute(
+        select(NovelSeriesCast)
+        .where(
+            NovelSeriesCast.source_id == source_id,
+            NovelSeriesCast.series_key == series_key,
+        )
+        .order_by(NovelSeriesCast.line_count.desc(), NovelSeriesCast.id)
+    ).scalars().all()
+
+    # Ordered by how much they speak, because the client assigns colours in
+    # this order and the two busiest speakers should be the furthest apart.
+    speaking = {s["speaker"] for s in visible}
+    return {
+        "attributed": True,
+        "text_fingerprint": row.text_fingerprint,
+        "spans": visible,
+        "cast": [
+            {"name": row.display_name, "gender": row.gender, "voice_id": row.voice_id}
+            for row in cast
+            if row.display_name in speaking
+        ],
+    }
 
 
 def resolve_voice_map(

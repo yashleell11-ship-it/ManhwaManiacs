@@ -101,9 +101,50 @@ JSON mode and the system prompt are both load-bearing. Dropping either made the
 reasoning fail to terminate at all (16,000 tokens, `finish_reason: length`,
 empty content) in two separate runs.
 
-The plan's "~6,400 in / ~900 out, $0.003/chapter" is wrong by more than an
-order of magnitude on output. Cost per chapter needs re-deriving from these
-numbers against current pricing before any bulk run.
+## Cost, derived from the nine real runs
+
+20,867 input and 206,522 output tokens over nine chapters, at `deepseek-flash`
+list price ($0.30/M input cache-miss, $0.006/M cache-hit, $1.20/M output;
+off-peak is half). About 85% of prompt tokens come back as cache hits after the
+first request.
+
+| | per chapter | TBATE, 532 ch | whole cache, 567 ch |
+|---|---|---|---|
+| peak | $0.0277 | $14.71 | $15.68 |
+| off-peak | $0.0138 | $7.36 | $7.84 |
+
+### …then cut by two thirds, by asking for less
+
+Asking the model to name the rule it applied is what made it expensive. A
+reasoning model thinks about the taxonomy as well as the text. Measured on
+three real chapters, three prompts — seven rules, three tiers, and nothing but
+"who speaks this line" — returned **byte-identical attributions**:
+
+| chapter | 7 rules | 3 tiers | speaker only |
+|---|---|---|---|
+| 120 | $0.0063 | $0.0043 | **$0.0023** |
+| 121 | — | $0.0066 | **$0.0031** |
+| 122 | — | $0.0073 | **$0.0019** |
+
+So the rule is no longer bought. It is assigned locally by `classify_span`,
+which looks for a speech tag naming that speaker beside the quote — arithmetic,
+the same argument that keeps offsets out of the model's hands, and checkable in
+a way a model's self-assessment never was.
+
+Cost after the change, off-peak: **$0.0024** for a typical chapter, $0.0084 for
+a crowd scene, blended **$0.0045**.
+
+| | off-peak |
+|---|---|
+| 1 chapter | $0.005 |
+| 10 chapters | $0.045 |
+| 100 chapters | $0.45 |
+| all 532 of TBATE | **$2.40** |
+
+The plan estimated $0.003/chapter. Output tokens are ~23x its "~900 out" figure,
+but output is cheap, so the COST is 4.6x off-peak and 9.2x at peak. A full-series
+bulk run is therefore a ~$7 decision off-peak, not a budget question. Off-peak
+is 14:30-21:30 and 00:00-05:30 IST.
 
 ## Coverage
 

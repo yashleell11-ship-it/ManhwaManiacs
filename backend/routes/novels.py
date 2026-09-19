@@ -16,11 +16,14 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request, Response
+from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from core.config import get_settings
 from core.rate_limit import bulk_limit, limiter, sources_limit
+from database.session import get_db
+from services.novel_attribution_service import read_attribution
 from services.novel_service import NovelService, get_novel_service
 
 
@@ -37,6 +40,7 @@ router = APIRouter(
 )
 
 NovelDep = Annotated[NovelService, Depends(get_novel_service)]
+DbDep = Annotated[Session, Depends(get_db)]
 
 
 @router.get("/chapter")
@@ -60,6 +64,36 @@ def get_novel_chapter(
     page scrape on the sync threadpool.
     """
     return service.get_chapter(source, series, chapter)
+
+
+@router.get("/attribution")
+@limiter.limit(sources_limit)
+def get_novel_attribution(
+    request: Request,
+    response: Response,  # slowapi injects X-RateLimit-* headers into this
+    db: DbDep,
+    source: str = Query(..., min_length=1, max_length=64),
+    series: str = Query(..., min_length=1, max_length=512),
+    chapter: str = Query(..., min_length=1, max_length=512),
+) -> dict[str, object]:
+    """Who speaks each quoted line of a chapter, when that is already known.
+
+    ``{attributed, text_fingerprint, spans: [{p, s, e, head, speaker}], cast}``.
+
+    READ-ONLY, deliberately. Attribution costs money per chapter, so it is
+    bought by an explicit bulk pass and never as a side effect of somebody
+    turning a page — otherwise scrolling a chapter list quietly spends.
+
+    An unattributed chapter answers ``attributed: false`` rather than 404: it
+    is an ordinary state for most of the library, not a missing resource, and a
+    client asking for every chapter should not be reading error paths.
+
+    ``text_fingerprint`` is what lets the client prove the offsets still
+    describe the text it is showing. The chapter cache refetches, so they will
+    eventually disagree, and tinting against moved offsets is worse than not
+    tinting at all.
+    """
+    return read_attribution(db, source, series, chapter)
 
 
 class BulkChapterRequest(BaseModel):

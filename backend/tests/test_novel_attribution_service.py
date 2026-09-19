@@ -52,8 +52,10 @@ class _Spy:
 
 
 def _answer(*pairs):
+    # The model is no longer asked for a rule; the second element is ignored
+    # and kept only so existing cases read the same.
     return json.dumps(
-        {"lines": [{"i": i, "speaker": s, "rule": r} for i, (s, r) in enumerate(pairs)]}
+        {"lines": [{"i": i, "speaker": s} for i, (s, _r) in enumerate(pairs)]}
     )
 
 
@@ -158,18 +160,20 @@ class TestStoring:
         head = [s for s in spans if not s["cont"] and s["speaker"] == tail[0]["speaker"]]
         assert head and tail[0]["rule"] == head[-1]["rule"]
 
-    def test_a_below_gate_answer_stores_no_speaker(self, db_session):
-        # Rule 4 is alternation: recorded, and ignored until the gate moves.
-        spy = _Spy(_answer(("Arthur", 4), ("Tessia", 4)))
+    def test_a_strict_gate_keeps_only_what_the_server_verified(self, db_session):
+        # At 0.8, an inferred speaker is narrated and only a locally-verified
+        # speech tag is voiced. Nothing is re-bought to change this.
+        spy = _Spy(_answer(("Arthur", 0), ("Tessia", 0)))
 
         row = svc.attribute_chapter(
-            db_session, SOURCE, SERIES, CHAPTER, QUOTED, complete=spy
+            db_session, SOURCE, SERIES, CHAPTER, QUOTED, complete=spy, gate=0.8
         )
 
         spans = json.loads(row.spans)
-        assert all(s["speaker"] is None for s in spans)
-        # but the rule survives, so lowering the gate later costs nothing
-        assert {s["rule"] for s in spans if not s["cont"]} == {4}
+        voiced = [s for s in spans if s["speaker"]]
+        # "said Tessia" is in the fixture, so that one survives; the
+        # first-person line has no tag naming Arthur.
+        assert all(s["rule"] in (1, 2, 6) for s in voiced)
 
     def test_the_pov_header_is_stored(self, db_session):
         spy = _Spy(_answer(("Arthur", 2), ("Tessia", 1)))
