@@ -35,9 +35,10 @@ EMDASH = [
 class _Spy:
     """A stand-in model that records whether it was asked anything."""
 
-    def __init__(self, content='{"lines": []}', raises=None):
+    def __init__(self, content='{"lines": []}', raises=None, model="deepseek-flash"):
         self.content = content
         self.raises = raises
+        self.model = model
         self.calls: list[str] = []
 
     def __call__(self, prompt, **kwargs):
@@ -45,7 +46,8 @@ class _Spy:
         if self.raises:
             raise self.raises
         return deepseek_client.Completion(
-            content=self.content, prompt_tokens=6400, completion_tokens=900
+            content=self.content, prompt_tokens=6400, completion_tokens=900,
+            model=self.model,
         )
 
 
@@ -159,6 +161,17 @@ class TestStoring:
         )
 
         assert json.loads(row.pov) == ["Arthur Leywin"]
+
+    def test_the_model_that_actually_ran_is_recorded(self, db_session):
+        # Not the one that was requested: the ids are aliased, so storing the
+        # request would name a model that never touched the chapter.
+        spy = _Spy(_answer(("Arthur", 2), ("Tessia", 1)), model="deepseek-v4-pro")
+
+        row = svc.attribute_chapter(
+            db_session, SOURCE, SERIES, CHAPTER, QUOTED, complete=spy
+        )
+
+        assert row.model == "deepseek-v4-pro"
 
     def test_token_usage_is_recorded(self, db_session):
         spy = _Spy(_answer(("Arthur", 2), ("Tessia", 1)))

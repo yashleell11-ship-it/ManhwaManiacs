@@ -28,10 +28,12 @@ def ledger(tmp_path):
     return tmp_path / "deepseek-usage.json"
 
 
-def _reply(content="{}", status=200, usage=None, headers=None):
+def _reply(content="{}", status=200, usage=None, headers=None, model="deepseek-flash",
+           finish="stop"):
     body = {
-        "choices": [{"message": {"content": content}}],
+        "choices": [{"message": {"content": content}, "finish_reason": finish}],
         "usage": usage or {"prompt_tokens": 6400, "completion_tokens": 900},
+        "model": model,
     }
     return httpx.Response(status, json=body, headers=headers or {})
 
@@ -95,6 +97,24 @@ class TestRequestShape:
 
         assert (out.prompt_tokens, out.completion_tokens) == (1, 2)
 
+    def test_it_records_what_served_the_request_not_what_was_asked(self, ledger):
+        # DeepSeek aliases ids: a request for one name comes back stamped with
+        # another. Storing the REQUESTED name would put a model in the database
+        # that never ran, and an attribution nobody can audit afterwards.
+        t = _transport(_reply("{}", model="deepseek-v9-surprise"))
+
+        out = ds.complete_json("p", budget_path=ledger, transport=t)
+
+        assert out.model == "deepseek-v9-surprise"
+        assert json.loads(t.seen[0].content)["model"] == ds.MODEL  # type: ignore[attr-defined]
+
+    def test_a_response_with_no_model_falls_back_to_the_requested_one(self, ledger):
+        t = _transport(httpx.Response(200, json={
+            "choices": [{"message": {"content": "{}"}}], "usage": {},
+        }))
+
+        assert ds.complete_json("p", budget_path=ledger, transport=t).model == ds.MODEL
+
     def test_the_body_is_parsed(self, ledger):
         t = _transport(_reply('{"spans": [{"rule": 1}]}'))
 
@@ -109,6 +129,58 @@ class TestRequestShape:
         out = ds.complete_json("p", budget_path=ledger, transport=t)
         with pytest.raises(ds.DeepSeekError):
             out.json()
+
+
+class TestTruncation:
+    """The failure that cost six real chapters and looked like success.
+
+    This model reasons before answering and bills the reasoning as output, so a
+    budget sized for the visible answer is spent entirely on thinking: content
+    comes back EMPTY with finish_reason "length". Parsed as an answer, an empty
+    object means "no speaker for any line" -- which is indistinguishable from a
+    chapter of pure narration, and was stored as a confident, paid-for,
+    completely wrong result.
+    """
+
+    def test_a_truncated_answer_is_an_error_not_an_empty_one(self, ledger):
+        t = _transport(_reply(
+            "", finish="length",
+            usage={"prompt_tokens": 1493, "completion_tokens": 2000,
+                   "completion_tokens_details": {"reasoning_tokens": 2000}},
+        ))
+
+        with pytest.raises(ds.DeepSeekError, match="truncated"):
+            ds.complete_json("p", budget_path=ledger, transport=t)
+
+    def test_the_error_says_where_the_budget_went(self, ledger):
+        # "Truncated" alone sends you looking at the prompt. The reasoning
+        # count is what points at max_tokens.
+        t = _transport(_reply(
+            "", finish="length",
+            usage={"prompt_tokens": 1, "completion_tokens": 16000,
+                   "completion_tokens_details": {"reasoning_tokens": 16000}},
+        ))
+
+        with pytest.raises(ds.DeepSeekError) as caught:
+            ds.complete_json("p", budget_path=ledger, transport=t)
+
+        assert "16000" in str(caught.value) and "reasoning" in str(caught.value)
+
+    def test_truncation_still_counts_against_the_daily_budget(self, ledger):
+        # It was served and billed. Failing to count it would let a
+        # misconfigured budget spend without bound.
+        t = _transport(_reply("", finish="length"))
+
+        with pytest.raises(ds.DeepSeekError):
+            ds.complete_json("p", budget_path=ledger, transport=t)
+
+        assert ds.spent_today(ledger) == 1
+
+    def test_an_empty_answer_that_did_not_truncate_is_also_an_error(self, ledger):
+        t = _transport(_reply("   ", finish="stop"))
+
+        with pytest.raises(ds.DeepSeekError, match="empty"):
+            ds.complete_json("p", budget_path=ledger, transport=t)
 
 
 class TestRetries:

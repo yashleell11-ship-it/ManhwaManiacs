@@ -48,9 +48,17 @@ from services.novel_dialogue import normalize_name, segment
 
 logger = logging.getLogger(__name__)
 
-#: Output budget. A 40-span chapter answers in ~900 tokens; this leaves room for
-#: a busy one without letting a confused model run away.
-MAX_OUTPUT_TOKENS = 2000
+#: Output budget, and it has to cover REASONING, which this model bills as
+#: output and spends far more of than it spends on the answer.
+#:
+#: Measured on real chapters: an 8-span slice needed ~11k reasoning tokens and
+#: a 26-span chapter ~20.5k, i.e. roughly 10k fixed plus ~0.4k per span. The
+#: busiest chapter in the sample has 58 asked spans, which projects to ~33k.
+#:
+#: That fixed ~10k is also the argument against splitting a chapter into
+#: batches: the overhead is per REQUEST, so two half-chapters cost more than
+#: one whole one. Ask once, and budget for thinking.
+MAX_OUTPUT_TOKENS = 48000
 
 #: Status values. ``ok`` means the model answered; the rest are reasons nothing
 #: was asked, each recorded so the next pass does not re-discover it.
@@ -137,6 +145,7 @@ def _store(
     segments,
     spans: list[dict],
     status: str,
+    served_model: str | None = None,
     pronouns: dict | None = None,
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
@@ -153,7 +162,10 @@ def _store(
     row.pov = json.dumps([h.name for h in segments.pov]) if segments.pov else None
     row.pronoun_counts = json.dumps(pronouns) if pronouns else None
     row.status = status
-    row.model = deepseek_client.MODEL if status == STATUS_OK else None
+    # What served it, not what was requested: the two differ whenever an id is
+    # an alias, and an attribution is only auditable if it names the model that
+    # actually ran.
+    row.model = served_model if status == STATUS_OK else None
     row.prompt_tokens = prompt_tokens
     row.completion_tokens = completion_tokens
     row.attributed_at = utcnow()
@@ -242,6 +254,7 @@ def attribute_chapter(
         db, source_id=source_id, series_key=series_key, chapter_key=chapter_key,
         fingerprint=fingerprint, paragraphs=paragraphs, segments=segments,
         spans=spans, status=STATUS_OK, pronouns=pronouns,
+        served_model=answer.model or deepseek_client.MODEL,
         prompt_tokens=answer.prompt_tokens, completion_tokens=answer.completion_tokens,
     )
 

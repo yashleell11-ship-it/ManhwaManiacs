@@ -47,15 +47,22 @@ logger = logging.getLogger(__name__)
 API_HOST = "api.deepseek.com"
 API_URL = f"https://{API_HOST}/chat/completions"
 
-#: `deepseek-chat` is the cheap non-reasoning model. Attribution is a reading
-#: task against rules supplied in the prompt, not a thinking task, and the
-#: reasoning model costs several times more for the same answer.
-MODEL = "deepseek-chat"
+#: The cheap non-reasoning model. Attribution is a reading task against rules
+#: supplied in the prompt, not a thinking task, and the reasoning model costs
+#: several times more for the same answer.
+#:
+#: Named `deepseek-flash` because that is what /models actually lists as of
+#: 2026-09-19; the older `deepseek-chat` id still answers but is an alias, and
+#: a request for it comes back stamped `deepseek-flash`. Which is why the
+#: RESPONSE's model is what gets recorded below -- pinning a name here and
+#: storing it as fact would put a model in the database that never ran.
+MODEL = "deepseek-flash"
 
-#: Generous: a chapter is ~6,400 tokens in and the model has to read all of it
-#: before the first output token. Short enough that a wedged connection cannot
-#: hold a worker for minutes.
-TIMEOUT_SECONDS = 120.0
+#: Generous: the model reasons for a minute or more on a full chapter before
+#: emitting its first visible token. Measured: 84s for a 26-span chapter, and
+#: reasoning scales with span count. Short enough that a wedged connection
+#: cannot hold a worker indefinitely.
+TIMEOUT_SECONDS = 600.0
 
 #: Requests per UTC day. ~$0.003 each, so this caps a runaway at roughly $1.50 —
 #: enough for four full 120-chapter validation passes in one day, and nowhere
@@ -136,6 +143,10 @@ class Completion:
     content: str
     prompt_tokens: int
     completion_tokens: int
+    #: What actually served the request, as the API reports it -- not what was
+    #: asked for. These differ whenever an id is an alias, and the stored
+    #: attribution is only auditable if it names the model that really ran.
+    model: str = ""
 
     def json(self) -> Any:
         """The parsed body. Raises DeepSeekError if it is not JSON.
@@ -257,13 +268,33 @@ def complete_json(
             body = response.json()
             choice = body["choices"][0]["message"]["content"]
             usage = body.get("usage") or {}
+            served_by = str(body.get("model") or MODEL)
+            finish = body["choices"][0].get("finish_reason")
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             raise DeepSeekError(f"unexpected DeepSeek response shape: {exc}") from exc
+
+        # A truncated answer is a FAILURE, not an answer. This model reasons
+        # before it replies and bills that reasoning as output, so a budget set
+        # for the visible answer alone is spent entirely on thinking and the
+        # content comes back EMPTY with finish_reason "length". Six chapters
+        # were attributed that way and every one was stored as a confident
+        # "nobody spoke" -- paid for, marked ok, and wrong. Parsing whatever
+        # arrives is exactly how that becomes invisible.
+        if finish == "length":
+            raise DeepSeekError(
+                "answer truncated at max_tokens "
+                f"({usage.get('completion_tokens', '?')} spent, "
+                f"{(usage.get('completion_tokens_details') or {}).get('reasoning_tokens', 0)}"
+                " of it on reasoning); raise max_tokens"
+            )
+        if not (choice or "").strip():
+            raise DeepSeekError("model returned an empty answer")
 
         return Completion(
             content=choice,
             prompt_tokens=int(usage.get("prompt_tokens", 0)),
             completion_tokens=int(usage.get("completion_tokens", 0)),
+            model=served_by,
         )
 
     raise last or DeepSeekError("DeepSeek request failed")
