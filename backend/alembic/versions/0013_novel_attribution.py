@@ -84,7 +84,7 @@ def upgrade() -> None:
         sa.Column("model", sa.String(length=64), nullable=True),
         sa.Column("prompt_tokens", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("completion_tokens", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("attributed_at", sa.DateTime(), nullable=True),
+        sa.Column("attributed_at", sa.DateTime(), nullable=False),
     )
     # The recast pass walks every attributed chapter of one series in order.
     op.create_index(
@@ -115,8 +115,8 @@ def upgrade() -> None:
         # must never overwrite its gender, voice or display name -- silently
         # reverting a correction is the failure this column exists to prevent.
         sa.Column("locked", sa.Boolean(), nullable=False, server_default="0"),
-        sa.Column("created_at", sa.DateTime(), nullable=True),
-        sa.Column("updated_at", sa.DateTime(), nullable=True),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), nullable=False),
         sa.UniqueConstraint(
             "source_id",
             "series_key",
@@ -146,7 +146,7 @@ def upgrade() -> None:
         ),
         # Owner-declared merges ("King Grey is Arthur") survive every recast.
         sa.Column("locked", sa.Boolean(), nullable=False, server_default="0"),
-        sa.Column("created_at", sa.DateTime(), nullable=True),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
     )
     op.create_index("ix_novel_alias_cast", "novel_series_alias", ["cast_id"])
 
@@ -162,7 +162,7 @@ def upgrade() -> None:
         # assignment it cached is stale without diffing the cast itself.
         sa.Column("cast_version", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("last_recast_at", sa.DateTime(), nullable=True),
-        sa.Column("updated_at", sa.DateTime(), nullable=True),
+        sa.Column("updated_at", sa.DateTime(), nullable=False),
     )
 
 

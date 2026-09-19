@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     DateTime,
     Float,
     ForeignKey,
@@ -931,6 +932,141 @@ class NovelChapterCache(Base):
     next_key: Mapped[str | None] = mapped_column(String(512))
     fetched_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     last_used_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class NovelChapterAttribution(Base):
+    """Who speaks each quoted line of one novel chapter (GLOBAL).
+
+    Keyed by the same identity triple as ``novel_chapter_cache``, so the
+    attribution for a chapter is found by the same key its text is.
+
+    NOT a cache table, despite sitting beside one. Its rows are re-BOUGHT from
+    a paid API rather than re-fetched from a source, so dropping them costs
+    money instead of bandwidth — which is why these tables are deliberately
+    absent from ``core.cache_tables.CACHE_TABLES``.
+
+    ``spans`` is a JSON array of ``{p, s, e, head, ord, cont, speaker, rule}``.
+    ``speaker`` is a LABEL, not a foreign key into ``novel_series_cast``:
+    resolution (label → alias → cast → voice) happens at serve time, so a
+    character who only becomes identifiable at chapter 800 retroactively gets
+    their voice at chapter 200 without a single row being rewritten.
+
+    ``text_fingerprint`` is load-bearing. ``novel_chapter_cache`` is a 7-day
+    LRU that REFETCHES, so the paragraphs these offsets index will eventually
+    be replaced by a re-scrape that may differ by a character. A client
+    compares the fingerprint and falls back to unhighlighted playback rather
+    than highlighting text it cannot prove the offsets came from.
+    """
+
+    __tablename__ = "novel_chapter_attribution"
+    __table_args__ = (
+        Index("ix_novel_attribution_series", "source_id", "series_key"),
+    )
+
+    source_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    series_key: Mapped[str] = mapped_column(String(512), primary_key=True)
+    chapter_key: Mapped[str] = mapped_column(String(512), primary_key=True)
+    text_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    paragraph_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    style: Mapped[str] = mapped_column(String(16), nullable=False, default="none")
+    spans: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    pov: Mapped[str | None] = mapped_column(Text)
+    pronoun_counts: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="ok")
+    model: Mapped[str | None] = mapped_column(String(64))
+    prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    attributed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class NovelSeriesCast(Base):
+    """One character who may get their own voice, in one series.
+
+    This table stores ONLY what picks a voice: a display name, a gender, a
+    voice id, and the counts that decide who is a main. ``frontend/AGENTS.md``
+    records that knowledge-graph / character / world / timeline extraction was
+    permanently abandoned and must never be reintroduced, and a "series cast"
+    is one column away from becoming exactly that. A column that would help a
+    reader understand the story rather than help a renderer choose a speaker
+    does not belong here.
+
+    ``gender`` comes from accumulated pronoun counts and NEVER from the name:
+    web-novel casts are transliterated, and a wrong guess is wrong in the
+    listener's ear on every line that character ever speaks. ``"unknown"`` is a
+    real value that routes to the narrator, not a missing one.
+
+    ``locked`` marks an owner correction. A recast may update counts on a
+    locked row but must never overwrite its gender, voice or display name.
+    """
+
+    __tablename__ = "novel_series_cast"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_id", "series_key", "normalized_name", name="uq_novel_cast_identity"
+        ),
+        Index("ix_novel_cast_series", "source_id", "series_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    series_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    normalized_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    gender: Mapped[str] = mapped_column(String(8), nullable=False, default="unknown")
+    voice_id: Mapped[str | None] = mapped_column(String(64))
+    line_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    chapter_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    is_pov: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class NovelSeriesAlias(Base):
+    """Another name the same character is called by, in one series.
+
+    The alias is part of the PRIMARY KEY on purpose. One alias cannot point at
+    two characters, and the DATABASE is what enforces it — so the failure where
+    a name silently splits one character's voice in two surfaces as a
+    constraint violation at write time instead of as a series that
+    mysteriously reads in two voices.
+
+    This is also what makes a correction cheap: ``"King Grey" is Arthur`` is a
+    single INSERT that fixes every chapter at once, because spans store labels
+    and resolve through here at serve time.
+    """
+
+    __tablename__ = "novel_series_alias"
+    __table_args__ = (Index("ix_novel_alias_cast", "cast_id"),)
+
+    source_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    series_key: Mapped[str] = mapped_column(String(512), primary_key=True)
+    alias_normalized: Mapped[str] = mapped_column(String(128), primary_key=True)
+    alias_display: Mapped[str] = mapped_column(String(128), nullable=False)
+    cast_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("novel_series_cast.id", ondelete="CASCADE"), nullable=False
+    )
+    locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class NovelSeriesCastState(Base):
+    """Per-series bookkeeping for the cast.
+
+    ``cast_version`` is bumped whenever the cast changes, so a client can tell
+    that a voice assignment it cached is stale without diffing the cast itself.
+    """
+
+    __tablename__ = "novel_series_cast_state"
+
+    source_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    series_key: Mapped[str] = mapped_column(String(512), primary_key=True)
+    chapters_attributed: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+    cast_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_recast_at: Mapped[datetime | None] = mapped_column(DateTime)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class SourceBrowseCache(Base):
