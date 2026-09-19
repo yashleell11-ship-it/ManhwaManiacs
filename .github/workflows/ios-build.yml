@@ -84,12 +84,26 @@ jobs:
         # which on a phone is nothing, and would allow a clear-text bearer token.
         # --build-name/--build-number land in the .app's Info.plist, which is what
         # SideStore reads back to decide whether an update is already installed.
-        run: >
-          flutter build ios --release --no-codesign
-          --build-name=${{ steps.ver.outputs.name }}
-          --build-number=${{ steps.ver.outputs.number }}
-          --dart-define=FLAVOR=prod
-          --dart-define=API_URL=https://app.manhwamaniacs.xyz
+        #
+        # The tail is echoed back as ::error:: annotations on purpose. There is
+        # no Mac in this project, and a job log on a public repo still needs an
+        # authenticated download — but annotations are anonymously readable. A
+        # bare `exit 1` here therefore says nothing diagnosable from the laptop;
+        # this is what makes an xcodebuild or `pod install` failure legible
+        # without a token. (Runner /bin/bash is 3.2 — no arrays, no `mapfile`.)
+        run: |
+          set -o pipefail
+          flutter build ios --release --no-codesign \
+            --build-name=${{ steps.ver.outputs.name }} \
+            --build-number=${{ steps.ver.outputs.number }} \
+            --dart-define=FLAVOR=prod \
+            --dart-define=API_URL=https://app.manhwamaniacs.xyz \
+            2>&1 | tee "$RUNNER_TEMP/ios-build.log" && exit 0
+          echo "::error::flutter build ios failed; last 40 lines follow"
+          tail -40 "$RUNNER_TEMP/ios-build.log" | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          exit 1
 
       - name: Inspect the built app
         # Nobody here owns a Mac, so this log is the only place the build is ever
