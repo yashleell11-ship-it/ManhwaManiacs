@@ -39,6 +39,13 @@ _SENTENCE_END = re.compile(r'([.!?…。！？]["\'”’]?)\s+(?=[\"\'“‘(\[
 #: the audio and a highlight that flickers past unreadably.
 MIN_SEGMENT_CHARS = 12
 
+#: Quote marks sit OUTSIDE a speech span, so they land at the edges of the
+#: narration either side of it: a run reads `" I turned my head to see Myre. "`.
+#: Nothing reads them aloud, but they are inside the range the playhead
+#: highlights, so the follow-along lights up a punctuation mark before it
+#: reaches the words.
+_EDGE_PUNCT = " \t\u201c\u201d\u2018\u2019\"'\u00ab\u00bb\u300c\u300d\u300e\u300f"
+
 #: Rendering is roughly linear in characters, and a very long sentence is also
 #: where a TTS model's prosody drifts. Split on a comma if one is near the
 #: middle; otherwise let it run rather than cutting mid-phrase.
@@ -222,10 +229,13 @@ def plan_chapter(
                 # assuming the split preserved lengths: a highlight that is off
                 # by the whitespace the splitter ate is a highlight on the
                 # wrong words.
-                found = paragraph.find(sentence.strip(), offset)
+                # Located AFTER trimming, so start/end still bracket exactly
+                # the characters that get spoken — the invariant the highlight
+                # depends on.
+                found = paragraph.find(sentence.strip(_EDGE_PUNCT), offset)
                 if found < 0:
                     found = offset
-                stripped = sentence.strip()
+                stripped = sentence.strip(_EDGE_PUNCT)
                 if not any(ch.isalnum() for ch in stripped):
                     offset = found + len(stripped)
                     continue

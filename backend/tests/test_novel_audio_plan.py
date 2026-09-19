@@ -175,6 +175,25 @@ class TestPlanning:
         keys = [(s.paragraph, s.start) for s in plan]
         assert keys == sorted(keys)
 
+    def test_a_narration_run_does_not_keep_the_quote_marks(self):
+        # They sit outside a speech span, so they land at the edges of the
+        # narration either side. Nothing reads them aloud, but they are inside
+        # the range the playhead highlights — so follow-along would light up a
+        # punctuation mark before reaching the words.
+        plan = plan_chapter(CHAPTER, spans_for(CHAPTER, ["Arthur", "Arthur", "Tessia", "Tessia"]), VOICES)
+
+        for seg in plan:
+            assert seg.text[0] not in "\u201c\u201d\"'"
+            assert seg.text[-1] not in "\u201c\u201d"
+
+    def test_trimming_keeps_the_offsets_honest(self):
+        # The trim must move the offsets, not desync them: start/end have to
+        # bracket exactly the characters that get spoken.
+        plan = plan_chapter(CHAPTER, spans_for(CHAPTER, ["Arthur", "Arthur", "Tessia", "Tessia"]), VOICES)
+
+        for seg in plan:
+            assert CHAPTER[seg.paragraph][seg.start : seg.end] == seg.text
+
     def test_a_run_of_pure_punctuation_is_never_rendered(self):
         # Paragraphs routinely leave a bare closing quote between spans;
         # rendering it is a clip of silence mid-sentence and a highlight that
