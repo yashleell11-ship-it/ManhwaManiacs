@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -23,6 +24,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from core.config import get_settings
 from core.rate_limit import bulk_limit, limiter, sources_limit
 from database.session import get_db
+from services.chapter_audio_store import chapter_paths, read_chapter_audio
 from services.novel_attribution_service import read_attribution
 from services.novel_service import NovelService, get_novel_service
 
@@ -94,6 +96,59 @@ def get_novel_attribution(
     tinting at all.
     """
     return read_attribution(db, source, series, chapter)
+
+
+@router.get("/audio")
+@limiter.limit(sources_limit)
+def get_novel_audio(
+    request: Request,
+    response: Response,  # slowapi injects X-RateLimit-* headers into this
+    source: str = Query(..., min_length=1, max_length=64),
+    series: str = Query(..., min_length=1, max_length=512),
+    chapter: str = Query(..., min_length=1, max_length=512),
+) -> dict[str, object]:
+    """Whether this chapter has been rendered, and where each sentence sits.
+
+    ``{available, bytes, total_ms, segments: [{i, start_ms, end_ms, p, s, e,
+    voice, speaker, speech}]}``.
+
+    The timings are MEASURED, not estimated: each segment was rendered on its
+    own, so its duration is the length of the samples that came back. That is
+    what a client follows along with.
+
+    Absence is not an error. Almost nothing in the library is rendered, and a
+    client asking about every chapter should not be reading error paths for the
+    ordinary case.
+    """
+    found = read_chapter_audio(source, series, chapter)
+    return {
+        "available": found.available,
+        "bytes": found.bytes,
+        "total_ms": found.total_ms,
+        "segments": list(found.segments),
+    }
+
+
+@router.get("/audio/file")
+@limiter.limit(sources_limit)
+def get_novel_audio_file(
+    request: Request,
+    response: Response,
+    source: str = Query(..., min_length=1, max_length=64),
+    series: str = Query(..., min_length=1, max_length=512),
+    chapter: str = Query(..., min_length=1, max_length=512),
+) -> FileResponse:
+    """The rendered Opus, as a file.
+
+    ``FileResponse`` and not a streamed body on purpose: it sets
+    ``Accept-Ranges`` and answers a ``Range`` with a 206, which was verified
+    against Starlette's source rather than assumed. Without that, every seek in
+    a player re-downloads the whole chapter.
+    """
+    audio, _timing = chapter_paths(source, series, chapter)
+    if not audio.is_file():
+        raise StarletteHTTPException(status_code=404, detail="Not Found")
+    return FileResponse(audio, media_type="audio/ogg")
 
 
 class BulkChapterRequest(BaseModel):

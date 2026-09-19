@@ -147,3 +147,89 @@ class TestFlag:
         response = fetch(novels_off)
 
         assert response.status_code == 404
+
+
+class TestAudioRoutes:
+    """`GET /novels/audio` and `/novels/audio/file`.
+
+    Absence is the ordinary state for almost the whole library, and the file
+    route has to support Range or every seek in a player re-downloads the
+    entire chapter.
+    """
+
+    def _render(self, tmp_path, monkeypatch, *, timing=True):
+        import json as _json
+
+        from services.chapter_audio_store import chapter_paths
+
+        monkeypatch.setenv("MM_AUDIO_DIR", str(tmp_path))
+        audio, timing_path = chapter_paths(STUB_SOURCE, SERIES, CHAPTER)
+        audio.parent.mkdir(parents=True, exist_ok=True)
+        audio.write_bytes(b"OggS" + bytes(range(256)) * 16)
+        if timing:
+            timing_path.write_text(_json.dumps({
+                "total_ms": 61000,
+                "segments": [{"i": 0, "start_ms": 0, "end_ms": 1200, "p": 1,
+                              "s": 0, "e": 9, "voice": "v1", "speech": True}],
+            }), encoding="utf-8")
+        return audio
+
+    def _meta(self, client):
+        return client.get("/novels/audio", params={
+            "source": STUB_SOURCE, "series": SERIES, "chapter": CHAPTER})
+
+    def _file(self, client, headers=None):
+        return client.get("/novels/audio/file", params={
+            "source": STUB_SOURCE, "series": SERIES, "chapter": CHAPTER},
+            headers=headers or {})
+
+    def test_an_unrendered_chapter_is_not_an_error(self, novels_on, tmp_path, monkeypatch):
+        monkeypatch.setenv("MM_AUDIO_DIR", str(tmp_path))
+
+        body = self._meta(novels_on).json()
+
+        assert body["available"] is False and body["segments"] == []
+
+    def test_a_rendered_chapter_reports_measured_timings(self, novels_on, tmp_path, monkeypatch):
+        # Measured, not estimated: each segment was rendered alone, so its
+        # duration is the length of the samples that came back.
+        self._render(tmp_path, monkeypatch)
+
+        body = self._meta(novels_on).json()
+
+        assert body["available"] is True
+        assert body["total_ms"] == 61000
+        assert body["segments"][0]["end_ms"] == 1200
+
+    def test_the_file_is_served(self, novels_on, tmp_path, monkeypatch):
+        self._render(tmp_path, monkeypatch)
+
+        response = self._file(novels_on)
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("audio/")
+
+    def test_a_range_request_gets_a_206(self, novels_on, tmp_path, monkeypatch):
+        # Without this every seek re-downloads the whole chapter. Verified
+        # against Starlette rather than assumed.
+        self._render(tmp_path, monkeypatch)
+
+        response = self._file(novels_on, {"Range": "bytes=0-99"})
+
+        assert response.status_code == 206
+        assert len(response.content) == 100
+
+    def test_it_advertises_range_support(self, novels_on, tmp_path, monkeypatch):
+        self._render(tmp_path, monkeypatch)
+
+        assert self._file(novels_on).headers.get("accept-ranges") == "bytes"
+
+    def test_a_missing_file_is_a_plain_404(self, novels_on, tmp_path, monkeypatch):
+        monkeypatch.setenv("MM_AUDIO_DIR", str(tmp_path))
+
+        assert self._file(novels_on).status_code == 404
+
+    def test_the_audio_routes_are_dark_when_novels_are_off(self, novels_off):
+        assert novels_off.get("/novels/audio", params={
+            "source": STUB_SOURCE, "series": SERIES, "chapter": CHAPTER,
+        }).status_code == 404
