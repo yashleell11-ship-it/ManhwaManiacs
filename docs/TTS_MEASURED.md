@@ -240,7 +240,39 @@ explicitly forbidding pronouns and descriptions did not change it.
 108s per chapter on CPU, so ~16 hours for the series — free, but producing
 attributions that would need discarding.
 
-**Where this leaves it:** the local path is built, safe, and selected first
-when a server is up (`choose_completer`), with the paid API as the fallback. It
-is not yet accurate enough to use. A 14B is the obvious next try and fits the
-card when nothing else holds it.
+**Where this leaves it:** the 8B is not accurate enough. The 14B is — see below.
+
+## qwen3:14b is good enough, and free
+
+With the card idle (23.3 GB free), `qwen3:14b` Q4_K_M runs fully on GPU at
+**12 s/chapter**. Measured against the DeepSeek attributions that survived
+adversarial review 50/50, over 429 spans across 8 chapters — five two-handers
+and three crowd scenes:
+
+| | spans |
+|---|---|
+| agree on the character | 269 |
+| **would produce a WRONG VOICE** | **13 (3.0%)** |
+| local said a description (→ narration, not a wrong voice) | 6 |
+| only local named a character | 49 |
+| only DeepSeek named one | 70 |
+| neither | 22 |
+
+Coverage: **local 78%, DeepSeek 83%.**
+
+Two things had to be fixed before this number meant anything. The first
+comparison matched on the first word of a name and reported 30 "conflicts" that
+were `Virion`/`Grandpa Virion` and `Mica`/`Lance Mica` — the same person. Those
+ranks and familial forms are now in `_HONORIFICS`, with a guard so a name that
+is ONLY a title ("The Lance") is not stripped to an empty key that every other
+title-only name would collide with.
+
+**11 of the 13 real conflicts are in one chapter.** Chapter 435 has no POV
+header, so it was given the series narrator as a hint, and the model applied it
+too widely — handing Arthur's mother's lines to Arthur. Outside that chapter the
+rate is 2 in 429 (0.5%). The narrator hint helping a strong model and misleading
+a weaker one is worth a follow-up: it should probably be withheld from a chapter
+whose own text names another speaker in the same paragraph.
+
+**Cost of attributing all 532 chapters:** ~107 minutes of otherwise-idle GPU,
+and **$0**.

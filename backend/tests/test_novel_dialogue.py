@@ -213,6 +213,20 @@ class TestNormalizeName:
     def test_a_leading_the_is_stripped(self):
         assert normalize_name("The Lance") == "lance"
 
+    def test_a_rank_in_front_of_a_name_is_stripped(self):
+        # Observed as the difference between two models naming the SAME
+        # character on real chapters: "Virion" vs "Grandpa Virion", "Mica" vs
+        # "Lance Mica". Left unnormalised, the alias table holds two rows for
+        # one person and two of twelve voice slots go to the same character.
+        assert normalize_name("Grandpa Virion") == normalize_name("Virion")
+        assert normalize_name("Lance Mica") == normalize_name("Mica")
+
+    def test_a_title_that_IS_the_name_survives(self):
+        # Stripping the only word leaves an empty key, and every title-only
+        # name would then collide into one voice.
+        assert normalize_name("Lance") == "lance"
+        assert normalize_name("Sovereign") == "sovereign"
+
     def test_case_and_width_are_normalised(self):
         # One function, so the cast digest sent to the model and the merge of a
         # name it proposes can never disagree about what is the same name.

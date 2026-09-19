@@ -312,6 +312,15 @@ _HONORIFICS = frozenset(
         "mr", "mrs", "miss", "ms", "dr", "sir", "lady", "lord", "king", "queen",
         "prince", "princess", "master", "elder", "senior", "captain", "general",
         "professor", "father", "mother", "uncle", "aunt", "saint", "st",
+        # Familial address and in-world ranks, both observed on real chapters
+        # as the difference between two models naming the SAME character:
+        # "Virion" vs "Grandpa Virion", "Mica" vs "Lance Mica". Without these
+        # the alias table would hold two rows for one person, and the twelve
+        # voice slots would be spent twice on them.
+        "grandpa", "grandfather", "grandma", "grandmother", "granddad",
+        "lance", "scythe", "sovereign", "highlord", "commander", "councilor",
+        "councillor", "director", "headmaster", "instructor", "duke",
+        "duchess", "earl", "count", "countess", "baron", "baroness",
     }
 )
 
@@ -332,6 +341,10 @@ def normalize_name(raw: str) -> str:
             text = text[: -len(suffix)]
     text = re.sub(r"^(the)\s+", "", text, flags=re.IGNORECASE)
     words = [w for w in re.split(r"\s+", text) if w]
-    while words and words[0].strip(".").lower() in _HONORIFICS:
+    # Never strip a name away entirely. "The Lance" IS what a character is
+    # called; stripping its only word leaves an empty key that every other
+    # title-only name would collide with, merging unrelated characters into
+    # one voice.
+    while len(words) > 1 and words[0].strip(".").lower() in _HONORIFICS:
         words.pop(0)
     return " ".join(words).casefold().strip()
