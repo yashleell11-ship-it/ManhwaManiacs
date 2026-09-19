@@ -47,11 +47,21 @@ gpt_gen 7.65s · s2mel 2.43s · bigvgan 0.36s · total 11.14s · RTF 1.82
 peak allocated 5.47 GB
 ```
 
-**RTF 1.82 means slower than real time under contention** — roughly 1.8 minutes
-of compute per minute of audio. A 20-minute chapter is therefore ~36 minutes of
-GPU, not the "render a series overnight" the plan implies. Model load is a
-further one-off per process, so the worker must be long-lived and batch chapters
-rather than start per chapter.
+**RTF 1.82 under contention** — 1.8 minutes of compute per minute of audio,
+while the trainer held the card.
+
+**RTF 0.63 on a free card.** Measured later on a full chapter (TBATE 119, 138
+segments): 12.3 minutes of audio in 7.7 minutes of wall time, faster than real
+time. Contention was costing roughly 3x. So the figure to plan against depends
+entirely on whether the GPU is shared:
+
+| | RTF | a 12-minute chapter | all 532 chapters |
+|---|---|---|---|
+| card shared with the trainer | 1.82 | ~22 min | ~200 h |
+| card free | 0.63 | ~7.7 min | ~68 h |
+
+Model load is a one-off per process either way, so the worker must be
+long-lived and render whole chapters rather than starting per chapter.
 
 ## Output is 22,050 Hz, not 24,000
 
@@ -276,3 +286,27 @@ whose own text names another speaker in the same paragraph.
 
 **Cost of attributing all 532 chapters:** ~107 minutes of otherwise-idle GPU,
 and **$0**.
+
+
+---
+
+# One chapter of audio, end to end
+
+TBATE chapter 119, rendered from a locally-attributed plan. Nothing paid for.
+
+| | |
+|---|---|
+| segments | 138 (59 speech, 79 narration) |
+| audio | 12.3 min, 2.2 MB |
+| container | Opus, mono, 24,224 bps, 48 kHz |
+| voices | narrator `libritts-2428` (98 segments), Myre `libritts-3853` (40) |
+| render | 7.7 min wall, **RTF 0.63** |
+
+**The timing map is contiguous — maximum gap between segments 0 ms, and
+monotonic.** That is the whole payoff of rendering a sentence at a time: each
+duration is `len(samples)/sample_rate`, measured rather than estimated, so the
+highlight cannot drift from the audio.
+
+Arthur is read by the narrator and has no voice of his own, which is correct
+rather than a gap: he is the first-person POV, so he and the narrator are the
+same person.
