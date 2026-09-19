@@ -103,6 +103,29 @@ class TestVoiceAssignment:
 
         assert got == {}
 
+    def test_the_narrator_s_voice_is_never_given_to_a_character(self):
+        # It is picked from the same pack, so this is an easy mistake: on real
+        # plans the flattest male clip became the narrator AND was handed to
+        # two characters, who would then be indistinguishable from the
+        # narration — the exact thing per-character voices exist to avoid.
+        got = assign_voices(
+            [("Windsom", "male")],
+            [("m1", "male"), ("m2", "male")],
+            narrator_voice="m1",
+        )
+
+        assert got == {"windsom": "m2"}
+
+    def test_a_character_reads_as_narrator_rather_than_stealing_that_voice(self):
+        # When the narrator's voice is the only one of that gender, the
+        # character is narrated. Sounding like the narrator by accident is
+        # worse than being narrated on purpose.
+        got = assign_voices(
+            [("Windsom", "male")], [("m1", "male")], narrator_voice="m1"
+        )
+
+        assert got == {}
+
     def test_the_twelve_voice_ceiling_holds(self):
         cast = [(f"N{i}", "male") for i in range(30)]
         pack = [(f"m{i}", "male") for i in range(30)]

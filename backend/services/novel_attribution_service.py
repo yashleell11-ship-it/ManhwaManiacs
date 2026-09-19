@@ -438,6 +438,92 @@ def read_attribution(
     }
 
 
+def build_series_cast(
+    db: Session, source_id: str, series_key: str
+) -> list[NovelSeriesCast]:
+    """Accumulate every attributed chapter into one cast, and decide gender ONCE.
+
+    Gender has to be decided at the SERIES level, not per chapter, and that is
+    not a refinement — per chapter it is simply wrong. The evidence threshold
+    exists because a handful of pronouns is noise, but a single chapter rarely
+    clears it: measured on real chapters, a character with she=21 in one
+    chapter had she=4 in another and came out "unknown" there, losing her voice
+    for that chapter alone. A character who changes voice between chapters is a
+    worse artefact than one who never had a distinct voice at all.
+
+    Summing is also why ``pronoun_counts`` is stored per chapter rather than
+    thrown away after use.
+
+    A ``locked`` row is an owner correction and is never overwritten — only its
+    counts are refreshed, so a recast can still tell who is a main without
+    undoing a human decision.
+    """
+    rows = db.execute(
+        select(NovelChapterAttribution).where(
+            NovelChapterAttribution.source_id == source_id,
+            NovelChapterAttribution.series_key == series_key,
+            NovelChapterAttribution.status == STATUS_OK,
+        )
+    ).scalars().all()
+
+    pronouns: dict[str, list[int]] = {}
+    lines: dict[str, int] = {}
+    chapters: dict[str, set[str]] = {}
+    display: dict[str, str] = {}
+    for row in rows:
+        try:
+            spans = json.loads(row.spans)
+        except ValueError:
+            continue
+        for span in spans:
+            name = span.get("speaker")
+            if not name:
+                continue
+            key = normalize_name(name)
+            if not key:
+                continue
+            # Longest spelling wins as the display name: "Wren Kain" reads
+            # better in a cast list than "Wren", and both normalise the same.
+            if len(name) > len(display.get(key, "")):
+                display[key] = name
+            lines[key] = lines.get(key, 0) + 1
+            chapters.setdefault(key, set()).add(row.chapter_key)
+        try:
+            for key, (he, she) in (json.loads(row.pronoun_counts or "{}")).items():
+                tally = pronouns.setdefault(normalize_name(key), [0, 0])
+                tally[0] += int(he)
+                tally[1] += int(she)
+        except (ValueError, TypeError, AttributeError):
+            continue
+
+    out: list[NovelSeriesCast] = []
+    for key, name in display.items():
+        he, she = pronouns.get(key, (0, 0))
+        cast = db.execute(
+            select(NovelSeriesCast).where(
+                NovelSeriesCast.source_id == source_id,
+                NovelSeriesCast.series_key == series_key,
+                NovelSeriesCast.normalized_name == key,
+            )
+        ).scalar_one_or_none()
+        if cast is None:
+            cast = NovelSeriesCast(
+                source_id=source_id, series_key=series_key,
+                display_name=name, normalized_name=key,
+            )
+            db.add(cast)
+        cast.line_count = lines.get(key, 0)
+        cast.chapter_count = len(chapters.get(key, ()))
+        cast.updated_at = utcnow()
+        if not cast.locked:
+            cast.display_name = name
+            cast.gender = infer_gender(he, she)
+        out.append(cast)
+    db.flush()
+    out.sort(key=lambda c: (-c.line_count, c.normalized_name))
+    return out
+
+
 def resolve_voice_map(
     db: Session, source_id: str, series_key: str
 ) -> dict[str, str | None]:

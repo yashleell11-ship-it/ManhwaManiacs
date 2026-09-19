@@ -363,3 +363,137 @@ class TestNarratorLearning:
             select(NovelSeriesCast).where(NovelSeriesCast.series_key == SERIES)
         ).scalars().all()
         assert len(rows) == 1
+
+
+class TestSeriesCast:
+    """Gender is decided once per SERIES, never per chapter.
+
+    Per chapter it is simply wrong. The evidence threshold exists because a
+    handful of pronouns is noise, but one chapter rarely clears it: measured on
+    real chapters, a character with she=21 in one came out "unknown" in another
+    on she=4 and lost her voice for that chapter alone. A character whose voice
+    changes between chapters is a worse artefact than one who never had a
+    distinct voice.
+    """
+
+    def _chapter(self, db, key, spans, pronouns):
+        from database.models import NovelChapterAttribution
+
+        db.add(NovelChapterAttribution(
+            source_id=SOURCE, series_key=SERIES, chapter_key=key,
+            text_fingerprint=key, paragraph_count=5, style="quoted",
+            spans=json.dumps(spans), pronoun_counts=json.dumps(pronouns),
+            status=svc.STATUS_OK, model="qwen3:14b",
+        ))
+        db.flush()
+
+    def _span(self, speaker):
+        return {"p": 0, "s": 0, "e": 5, "ord": 0, "head": "x",
+                "cont": False, "speaker": speaker, "rule": 1}
+
+    def test_evidence_too_thin_in_one_chapter_adds_up_across_several(self, db_session):
+        # she=4 three times is nowhere near the bar alone, and decisive summed.
+        for i in range(3):
+            self._chapter(db_session, f"c{i}", [self._span("Myre")], {"myre": [0, 4]})
+
+        cast = svc.build_series_cast(db_session, SOURCE, SERIES)
+
+        assert [(c.display_name, c.gender) for c in cast] == [("Myre", "female")]
+
+    def test_genuinely_thin_evidence_still_says_unknown(self, db_session):
+        # Summing must not become "eventually guess". Unknown routes to the
+        # narrator, which is a real answer.
+        self._chapter(db_session, "c0", [self._span("Ghost")], {"ghost": [1, 1]})
+
+        cast = svc.build_series_cast(db_session, SOURCE, SERIES)
+
+        assert cast[0].gender == "unknown"
+
+    def test_lines_and_chapters_accumulate(self, db_session):
+        self._chapter(db_session, "c0", [self._span("Myre"), self._span("Myre")], {})
+        self._chapter(db_session, "c1", [self._span("Myre")], {})
+
+        cast = svc.build_series_cast(db_session, SOURCE, SERIES)
+
+        assert (cast[0].line_count, cast[0].chapter_count) == (3, 2)
+
+    def test_a_rank_does_not_split_a_character_in_two(self):
+        # What normalisation DOES merge: "Lance Mica" and "Mica" are one row,
+        # because a rank in front of a name is not a different person.
+        from services.novel_dialogue import normalize_name
+
+        assert normalize_name("Lance Mica") == normalize_name("Mica")
+
+    def test_a_bare_first_name_is_NOT_merged_automatically(self, db_session):
+        # "Wren" and "Wren Kain" really are one character here, and they still
+        # get two rows. That is deliberate. Merging on a shared first name
+        # would fuse two characters who happen to share one, and a merged
+        # wrong character is confidently wrong on every line it speaks, while
+        # a split one is merely bland. The alias table exists to join these on
+        # purpose — one INSERT, applied at serve time to every chapter at once.
+        self._chapter(db_session, "c0", [self._span("Wren")], {})
+        self._chapter(db_session, "c1", [self._span("Wren Kain")], {})
+
+        cast = svc.build_series_cast(db_session, SOURCE, SERIES)
+
+        assert sorted(c.display_name for c in cast) == ["Wren", "Wren Kain"]
+
+    def test_the_fuller_spelling_wins_when_they_DO_normalise_together(self, db_session):
+        # "Mica" reads worse in a cast list than "Lance Mica", and both
+        # normalise to the same key.
+        self._chapter(db_session, "c0", [self._span("Mica")], {})
+        self._chapter(db_session, "c1", [self._span("Lance Mica")], {})
+
+        cast = svc.build_series_cast(db_session, SOURCE, SERIES)
+
+        assert len(cast) == 1 and cast[0].display_name == "Lance Mica"
+
+    def test_a_failed_chapter_contributes_nothing(self, db_session):
+        from database.models import NovelChapterAttribution
+
+        db_session.add(NovelChapterAttribution(
+            source_id=SOURCE, series_key=SERIES, chapter_key="bad",
+            text_fingerprint="bad", paragraph_count=1, style="quoted",
+            spans=json.dumps([self._span("Phantom")]), status=svc.STATUS_FAILED,
+        ))
+        db_session.flush()
+
+        assert svc.build_series_cast(db_session, SOURCE, SERIES) == []
+
+    def test_an_owner_correction_is_never_overwritten(self, db_session):
+        from database.models import NovelSeriesCast
+
+        locked = NovelSeriesCast(
+            source_id=SOURCE, series_key=SERIES, display_name="Myre",
+            normalized_name="myre", gender="male", locked=True,
+        )
+        db_session.add(locked)
+        db_session.flush()
+        self._chapter(db_session, "c0", [self._span("Myre")], {"myre": [0, 40]})
+
+        cast = svc.build_series_cast(db_session, SOURCE, SERIES)
+
+        # Counts refresh so a recast can still tell who is a main; the human
+        # decision stands.
+        assert cast[0].gender == "male" and cast[0].line_count == 1
+
+    def test_the_busiest_character_sorts_first(self, db_session):
+        self._chapter(db_session, "c0",
+                      [self._span("Quiet"), self._span("Busy"), self._span("Busy")], {})
+
+        assert svc.build_series_cast(db_session, SOURCE, SERIES)[0].display_name == "Busy"
+
+    def test_a_corrupt_pronoun_blob_does_not_lose_the_chapter(self, db_session):
+        from database.models import NovelChapterAttribution
+
+        db_session.add(NovelChapterAttribution(
+            source_id=SOURCE, series_key=SERIES, chapter_key="c0",
+            text_fingerprint="c0", paragraph_count=1, style="quoted",
+            spans=json.dumps([self._span("Myre")]), pronoun_counts="{not json",
+            status=svc.STATUS_OK,
+        ))
+        db_session.flush()
+
+        cast = svc.build_series_cast(db_session, SOURCE, SERIES)
+
+        assert len(cast) == 1 and cast[0].gender == "unknown"

@@ -73,6 +73,7 @@ def assign_voices(
     voices: Sequence[tuple[str, str]],
     *,
     pov: str | None = None,
+    narrator_voice: str | None = None,
     ceiling: int = 12,
 ) -> dict[str, str]:
     """Map character -> voice id, matching gender and never running out.
@@ -101,8 +102,15 @@ def assign_voices(
     the right outcome reached by a broken route, which would stop being right
     the moment the chapter was third person.
     """
+    # The narrator's voice is RESERVED. Handing it to a character makes that
+    # character indistinguishable from the narration — the one thing the
+    # feature exists to avoid — and it is an easy mistake because the narrator
+    # is picked from the same pack. Observed on real plans: the flattest male
+    # clip was chosen as narrator and then handed to Windsom and to Wren.
     pools: dict[str, list[str]] = {}
     for voice_id, gender in voices:
+        if narrator_voice and voice_id == narrator_voice:
+            continue
         pools.setdefault(gender, []).append(voice_id)
 
     pov_key = normalize_name(pov) if pov else None
