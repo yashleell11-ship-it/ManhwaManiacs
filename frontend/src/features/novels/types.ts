@@ -79,3 +79,30 @@ export interface NovelChapterContent {
   buckets: number;
   cache: SourceBrowseCache | null;
 }
+
+
+/** One attributed stretch of speech, as `GET /novels/attribution` sends it. */
+export type NovelSpeakerSpanPayload = {
+  /** Paragraph index into the chapter's `paragraphs`. */
+  p: number;
+  /** Start offset within that paragraph. */
+  s: number;
+  /** End offset, exclusive. */
+  e: number;
+  /** First characters of the attributed text, for proving the offsets. */
+  head: string;
+  speaker: string;
+};
+
+export type NovelAttributionPayload = {
+  attributed: boolean;
+  /**
+   * Identity of the exact text the offsets were computed against. The chapter
+   * cache refetches, so this will eventually disagree with what is on screen —
+   * which is the whole reason each span also carries a `head`.
+   */
+  text_fingerprint: string | null;
+  spans: NovelSpeakerSpanPayload[];
+  /** Ordered by how much each speaks, which is the order colours are assigned. */
+  cast: { name: string; gender: string; voice_id: string | null }[];
+};

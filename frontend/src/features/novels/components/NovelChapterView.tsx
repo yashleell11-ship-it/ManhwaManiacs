@@ -27,6 +27,8 @@ import { BookmarkNotice } from "@/features/bookmarks";
 // rounds, clamps at zero and skips a no-op write.
 import { setReaderScrollTop } from "@/features/reader/scroll-preparation";
 import { tintParagraph, type SpeakerSpan, type TintedRun } from "@/features/novels/speaker-tint";
+import { speakerHues } from "@/features/novels/speaker-tint";
+import { useNovelAttribution } from "@/features/novels/hooks";
 import { useScrollContainer } from "@/lib/scroll-container";
 import { apiErrorMessage, resolveViewState } from "@/lib/view-state";
 import { isSceneBreak, splitDropCap, tocEntry } from "../book";
@@ -130,6 +132,41 @@ export function NovelChapterView({
 }: NovelChapterViewProps) {
   const router = useRouter();
   const scrollElement = useScrollContainer();
+
+  // Who speaks each line, when the server already knows. A separate query from
+  // the text because attribution exists for a fraction of the library and is
+  // decoration: it must never make the prose wait, and a failure here renders
+  // exactly the page that shipped before any of this existed.
+  const attributionRef = useMemo(
+    () =>
+      chapter
+        ? {
+            sourceId: chapter.sourceId,
+            seriesKey: chapter.seriesKey,
+            chapterKey: chapter.chapterKey,
+          }
+        : null,
+    [chapter],
+  );
+  const { data: attribution } = useNovelAttribution(attributionRef);
+
+  const spansByParagraph = useMemo(() => {
+    const byParagraph = new Map<number, SpeakerSpan[]>();
+    if (!attribution?.attributed) return byParagraph;
+    for (const span of attribution.spans) {
+      const list = byParagraph.get(span.p);
+      if (list) list.push(span);
+      else byParagraph.set(span.p, [span]);
+    }
+    return byParagraph;
+  }, [attribution]);
+
+  // Cast order is speaking order, so the two busiest characters in a scene get
+  // the furthest-apart hues rather than whatever a hash happened to pick.
+  const hues = useMemo(
+    () => speakerHues((attribution?.cast ?? []).map((member) => member.name)),
+    [attribution],
+  );
   const { palette, choice, siteScheme, siteThemeLabel, setChoice } = useNovelPalette();
   const {
     fontSize,
@@ -513,6 +550,8 @@ export function NovelChapterView({
             paragraphs={paragraphs}
             surface={surface}
             registerParagraph={registerParagraph}
+            spansByParagraph={spansByParagraph}
+            hues={hues}
           />
 
           <footer className="mt-16">

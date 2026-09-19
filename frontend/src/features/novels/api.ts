@@ -3,6 +3,7 @@ import type { ChapterId, SeriesId } from "@/types/api";
 import { bucketCount } from "./progress";
 import { countWords } from "./reading-time";
 import type {
+  NovelAttributionPayload,
   NovelChapterContent,
   NovelChapterPayload,
   NovelChapterWindowPayload,
@@ -52,6 +53,20 @@ export const novelsApi = {
    */
   chapter: (ref: ChapterId) =>
     http.get<NovelChapterPayload>("/novels/chapter", {
+      query: sourceChapterQuery(ref),
+    }),
+
+  /**
+   * Who speaks each quoted line, when that is already known.
+   *
+   * Read-only on the server: attribution costs money per chapter and is bought
+   * by a deliberate pass, never by somebody opening a chapter. An unattributed
+   * chapter answers `attributed: false` rather than 404, because that is the
+   * ordinary state for most of the library and a reader should not be walking
+   * error paths for it.
+   */
+  attribution: (ref: ChapterId) =>
+    http.get<NovelAttributionPayload>("/novels/attribution", {
       query: sourceChapterQuery(ref),
     }),
 

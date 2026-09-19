@@ -38,6 +38,43 @@ export function useNovelChapter(ref: ChapterId | null) {
   });
 }
 
+/**
+ * Who speaks each line, when the server already knows.
+ *
+ * Deliberately a SEPARATE query from the chapter text rather than part of its
+ * payload. Attribution exists for a fraction of the library and is decoration:
+ * folding it into the chapter response would make every reader wait on a join
+ * that usually returns nothing, and would invalidate cached chapter text every
+ * time a cast correction landed.
+ *
+ * Long stale time because an attribution only changes when somebody
+ * deliberately re-attributes; nothing a reader does moves it.
+ */
+export function novelAttributionQueryKey(ref: ChapterId) {
+  return [
+    ...NOVELS_KEY,
+    "attribution",
+    ref.sourceId,
+    ref.seriesKey,
+    ref.chapterKey,
+  ] as const;
+}
+
+export function useNovelAttribution(ref: ChapterId | null) {
+  return useQuery({
+    queryKey: ref
+      ? novelAttributionQueryKey(ref)
+      : [...NOVELS_KEY, "attribution", "none"],
+    queryFn: () => novelsApi.attribution(ref!),
+    enabled: ref !== null,
+    staleTime: NOVEL_CHAPTER_STALE_MS,
+    // Tinting is decoration. A failure here must never surface as a broken
+    // chapter, so it resolves to "no tinting" and the prose renders as it
+    // always did.
+    retry: false,
+  });
+}
+
 export function prefetchNovelChapter(queryClient: QueryClient, ref: ChapterId) {
   void queryClient.prefetchQuery({
     queryKey: novelChapterQueryKey(ref),
