@@ -74,3 +74,25 @@ def test_a_missing_list_keeps_the_cache_rather_than_failing():
     assert "return ()" in script and "os.path.exists(path)" in script, (
         "backup-db.sh must degrade to keeping the cache when the list is gone"
     )
+
+
+def test_attribution_and_cast_are_never_treated_as_cache():
+    # These look like cache and are not. Attribution is re-BOUGHT from a paid
+    # API rather than re-fetched from a source, so dropping it costs money
+    # instead of bandwidth -- and the cast carries the owner's own corrections,
+    # which exist nowhere else and cannot be regenerated at any price.
+    #
+    # The temptation is real: novel_chapter_cache IS a cache table and sits
+    # right next to these in the schema, so "novel_* is cache" is an easy and
+    # expensive wrong generalisation for the next person to make.
+    for table in (
+        "novel_chapter_attribution",
+        "novel_series_cast",
+        "novel_series_alias",
+        "novel_series_cast_state",
+    ):
+        assert table not in CACHE_TABLES, (
+            f"{table} is in CACHE_TABLES, so every backup drops it; "
+            "attribution costs money to rebuild and owner corrections cannot "
+            "be rebuilt at all"
+        )

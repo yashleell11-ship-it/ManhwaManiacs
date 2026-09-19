@@ -1,0 +1,310 @@
+"""Ask a model WHO said each line, and decide how much to believe the answer.
+
+Pure: builds a prompt, parses an answer, scores it. The HTTP call lives in
+``deepseek_client`` and the span offsets come from ``novel_dialogue``, so this
+module can be tested exhaustively without a key or a network.
+
+**The model returns a RULE NUMBER, never a confidence score.** This is the
+single decision the rest of the design leans on. A model asked for a float
+produces a confident-looking number with no calibration behind it -- 0.9 means
+"this looked easy", not "nine times in ten". A model asked *which rule it
+applied* is answering a question about the text, which is the thing it is
+actually good at. The server owns the mapping from rule to confidence, in one
+dict below, so re-tuning the gate is a code change that costs nothing: no
+re-attribution, no API calls, no rows rewritten.
+
+That is what makes rule 4 safe to ship. Anchored alternation ("they were
+trading lines, so this one is his") is right most of the time and wrong in
+exactly the places that matter -- a third person entering a two-hander. It sits
+at 0.65, just under the default 0.75 gate, so it is recorded and ignored. If it
+turns out to be good, raising the gate turns 120 chapters' worth of already-paid
+answers on at once.
+
+Gender comes from pronoun counts and NEVER from names: transliterated web-novel
+names carry no signal a heuristic can read, and a wrong guess assigns a voice
+that is wrong on every line the character ever speaks.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+
+from services.novel_dialogue import ChapterSegments, QuoteSpan, normalize_name
+
+#: The ranked evidence a speaker can be identified by, strongest first. The
+#: wording is what the model is shown, so it is phrased as an instruction.
+RULES: dict[int, str] = {
+    1: "an explicit speech tag naming the speaker in the same paragraph "
+       '(“...” he said / said Arthur)',
+    2: "the line is first person and the chapter's POV header names whose "
+       '"I" this is',
+    3: "an action beat in the same paragraph performed by a named character "
+       '(“...” Arthur set down the cup)',
+    4: "two established speakers were alternating and this line continues "
+       "the alternation",
+    5: "the previous speaker addressed this character by name, and this is "
+       "the reply",
+    6: "the paragraph already contains an attributed line by the same speaker",
+    7: "no evidence in the text -- do not guess",
+}
+
+#: Rule -> how much the server believes it. Monotonic with the ranking, and
+#: owned HERE rather than by the model. Changing these numbers re-gates every
+#: answer ever bought without spending anything.
+RULE_CONFIDENCE: dict[int, float] = {
+    1: 0.97,
+    2: 0.90,
+    3: 0.82,
+    4: 0.65,
+    5: 0.55,
+    6: 0.45,
+    7: 0.00,
+}
+
+#: Below this, a span is narrated. Deliberately above rule 4: a bland narrator
+#: line is a far cheaper mistake than a character voice confidently attached to
+#: the wrong person, which is wrong in the listener's ear every single time.
+DEFAULT_CONFIDENCE_GATE = 0.75
+
+#: Characters of context shown either side of a span. Enough to carry a speech
+#: tag and an action beat; short enough that a 40-span chapter still fits one
+#: request.
+CONTEXT_CHARS = 220
+
+SYSTEM_PROMPT = (
+    "You identify who is speaking each line of dialogue in a novel chapter. "
+    "You answer only with JSON. You never invent a character who is not named "
+    "in the text you are given, and when the text does not say who is "
+    "speaking you say so instead of guessing."
+)
+
+
+@dataclass(frozen=True)
+class SpanAttribution:
+    """The model's answer for one span, plus what the server makes of it."""
+
+    ordinal: int
+    speaker: str | None
+    rule: int
+
+    @property
+    def confidence(self) -> float:
+        return RULE_CONFIDENCE.get(self.rule, 0.0)
+
+    def accepted(self, gate: float = DEFAULT_CONFIDENCE_GATE) -> bool:
+        return self.speaker is not None and self.confidence >= gate
+
+
+def build_prompt(
+    paragraphs: list[str] | tuple[str, ...],
+    segments: ChapterSegments,
+    *,
+    known_cast: tuple[str, ...] = (),
+    context_chars: int = CONTEXT_CHARS,
+) -> str:
+    """One request for a whole chapter.
+
+    Numbered spans with local context rather than the raw chapter: the model
+    needs the words around a line to find its speech tag, but it must not be
+    asked to re-derive offsets it would get wrong. It answers about span 7; the
+    server already knows where span 7 is.
+
+    Spans marked ``continues`` are NOT included -- they share the speaker of the
+    span before them by construction, so asking about them is one more chance to
+    be confidently wrong at no benefit.
+    """
+    asked = [s for s in segments.spans if not s.continues]
+
+    lines: list[str] = []
+    if segments.pov:
+        names = ", ".join(h.name for h in segments.pov)
+        lines.append(f'POV header(s) for this chapter: {names}')
+        lines.append(
+            'A first-person line ("I", "me", "my") in this chapter is spoken '
+            "by the POV character unless the text says otherwise."
+        )
+    if known_cast:
+        lines.append("Characters already known in this series: " + ", ".join(known_cast))
+        lines.append(
+            "Prefer one of these names when the text supports it; add a new "
+            "name only when the text names someone new."
+        )
+
+    lines.append("")
+    lines.append("Rules, strongest first. Use the LOWEST-numbered rule that applies:")
+    for number, text in RULES.items():
+        lines.append(f"  {number}. {text}")
+
+    lines.append("")
+    lines.append(
+        "For each numbered line below, reply with the speaker's name exactly as "
+        "the text spells it, and the rule number that let you identify them. "
+        "If no rule but 7 applies, use rule 7 and a null speaker."
+    )
+    lines.append("")
+
+    for index, span in enumerate(asked):
+        paragraph = paragraphs[span.paragraph]
+        before = paragraph[max(0, span.start - 1 - context_chars) : max(0, span.start - 1)]
+        quote = paragraph[span.start : span.end]
+        after = paragraph[span.end + 1 : span.end + 1 + context_chars]
+        lines.append(f"[{index}] ...{before}  <<{quote}>>  {after}...")
+
+    lines.append("")
+    lines.append(
+        'Reply with JSON: {"lines": [{"i": 0, "speaker": "Name", "rule": 1}, ...]} '
+        f"with exactly {len(asked)} entries, one per numbered line, in order."
+    )
+    return "\n".join(lines)
+
+
+def askable_spans(segments: ChapterSegments) -> tuple[QuoteSpan, ...]:
+    """The spans ``build_prompt`` numbers, in the same order."""
+    return tuple(s for s in segments.spans if not s.continues)
+
+
+def parse_response(raw: str, expected: int) -> tuple[SpanAttribution, ...]:
+    """Turn the model's JSON into attributions, distrusting all of it.
+
+    Anything malformed becomes rule 7 (no evidence) for that span rather than an
+    exception: one bad entry in a forty-span chapter should cost that line its
+    voice, not the chapter its attribution. A missing entry is the same -- the
+    result always has exactly ``expected`` items, so the caller can zip it
+    against the spans without checking lengths.
+    """
+    try:
+        data = json.loads(raw)
+        rows = data["lines"] if isinstance(data, dict) else data
+        if not isinstance(rows, list):
+            rows = []
+    except (ValueError, KeyError, TypeError):
+        rows = []
+
+    by_index: dict[int, tuple[str | None, int]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            index = int(row.get("i"))
+        except (TypeError, ValueError):
+            continue
+        if not 0 <= index < expected or index in by_index:
+            continue
+        rule = row.get("rule")
+        rule = rule if isinstance(rule, int) and rule in RULES else 7
+        speaker = row.get("speaker")
+        if not isinstance(speaker, str) or not speaker.strip():
+            speaker, rule = None, 7
+        else:
+            speaker = speaker.strip()
+            # A model told to answer "rule 7, no speaker" sometimes answers
+            # "rule 7, Unknown". Treat the rule as authoritative.
+            if rule == 7:
+                speaker = None
+        by_index[index] = (speaker, rule)
+
+    return tuple(
+        SpanAttribution(ordinal=i, speaker=by_index.get(i, (None, 7))[0],
+                        rule=by_index.get(i, (None, 7))[1])
+        for i in range(expected)
+    )
+
+
+# --- gender, from pronouns only --------------------------------------------
+
+_HE = re.compile(r"\b(he|him|his|himself)\b", re.IGNORECASE)
+_SHE = re.compile(r"\b(she|her|hers|herself)\b", re.IGNORECASE)
+
+#: Enough sightings to mean something. Below this the answer is "unknown",
+#: which routes to the narrator rather than to a coin flip.
+MIN_PRONOUN_EVIDENCE = 5
+
+#: How lopsided the count must be. A character referred to by both pronouns is
+#: usually two characters that were merged, or a narrator talking about someone
+#: else in the same sentence -- either way, not a voice decision to make.
+PRONOUN_DOMINANCE = 4
+
+
+def pronoun_counts(texts: list[str] | tuple[str, ...]) -> tuple[int, int]:
+    """(he-ish, she-ish) counts across the passages a character appears in."""
+    joined = "\n".join(texts)
+    return len(_HE.findall(joined)), len(_SHE.findall(joined))
+
+
+def infer_gender(he: int, she: int) -> str:
+    """``"male"``, ``"female"`` or ``"unknown"``.
+
+    Never from the name. Web-novel casts are transliterated from Korean,
+    Japanese and Chinese, and a heuristic that reads "-ko is female, -ro is
+    male" is wrong often enough to matter -- and a wrong gender is wrong in the
+    listener's ear on every line that character ever speaks. Unknown is a real
+    answer here, not a failure to produce one.
+    """
+    if he >= MIN_PRONOUN_EVIDENCE and he >= PRONOUN_DOMINANCE * she:
+        return "male"
+    if she >= MIN_PRONOUN_EVIDENCE and she >= PRONOUN_DOMINANCE * he:
+        return "female"
+    return "unknown"
+
+
+# --- who gets a voice ------------------------------------------------------
+
+#: A character has to earn a voice: enough lines to be recognisable, across
+#: enough chapters to not be a one-scene walk-on.
+MAIN_MIN_LINES = 25
+MAIN_MIN_CHAPTERS = 3
+
+#: Hard ceiling. Past a dozen, voices stop being distinguishable by ear and
+#: every extra one is another chance at a wrong-sounding character.
+MAX_VOICES = 12
+
+
+@dataclass(frozen=True)
+class CastCandidate:
+    name: str
+    lines: int
+    chapters: int
+    is_pov: bool = False
+
+
+def select_mains(
+    candidates: list[CastCandidate] | tuple[CastCandidate, ...],
+    *,
+    min_lines: int = MAIN_MIN_LINES,
+    min_chapters: int = MAIN_MIN_CHAPTERS,
+    ceiling: int = MAX_VOICES,
+) -> tuple[str, ...]:
+    """Which characters get their own voice.
+
+    A POV character is promoted on sight: they are the "I" of the chapter, they
+    carry the most lines of anyone, and waiting for a line threshold to notice
+    that is pure latency. Everyone else must clear both bars -- lines alone
+    promotes a single talkative scene, chapters alone promotes a recurring
+    doorman.
+
+    Ties break on the name so two runs over the same series never disagree
+    about who made the cut.
+    """
+    pov = [c for c in candidates if c.is_pov]
+    rest = [
+        c
+        for c in candidates
+        if not c.is_pov and c.lines >= min_lines and c.chapters >= min_chapters
+    ]
+    ordered = sorted(pov, key=lambda c: (-c.lines, normalize_name(c.name))) + sorted(
+        rest, key=lambda c: (-c.lines, -c.chapters, normalize_name(c.name))
+    )
+
+    chosen: list[str] = []
+    seen: set[str] = set()
+    for candidate in ordered:
+        key = normalize_name(candidate.name)
+        if key in seen:
+            continue
+        seen.add(key)
+        chosen.append(candidate.name)
+        if len(chosen) >= ceiling:
+            break
+    return tuple(chosen)
