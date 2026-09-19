@@ -38,6 +38,7 @@ from services import deepseek_client, local_llm_client
 from services.llm import LLMError
 from services.novel_attribution import (
     DEFAULT_CONFIDENCE_GATE,
+    is_voice_candidate,
     SpanAttribution,
     SYSTEM_PROMPT,
     askable_spans,
@@ -449,13 +450,22 @@ def read_attribution(
     except ValueError:
         spans = []
 
-    # Only spans a reader can act on. A span with no speaker is narration, and
-    # sending it would make the client draw a box around ordinary prose.
+    # Only spans a reader can act on, and only speakers that can own a voice.
+    #
+    # A span with no speaker is narration; sending it would make the client
+    # draw a box around ordinary prose. And a label like "the crowd" or
+    # "Wren Kain, Lyra, and Mordain" is not a character: the client assigns a
+    # colour per cast name, so serving those would tint a crowd as though it
+    # were one person, in a colour no character owns. Measured on three real
+    # chapters, seventeen spans would have been tinted that way.
+    #
+    # This is the same rule the RENDERER applies, and they have to agree:
+    # otherwise the page shows a character where the audio reads narration.
     visible = [
         {"p": s["p"], "s": s["s"], "e": s["e"], "head": s.get("head", ""),
          "speaker": s["speaker"]}
         for s in spans
-        if s.get("speaker")
+        if s.get("speaker") and is_voice_candidate(s["speaker"])
     ]
 
     cast = db.execute(
@@ -577,6 +587,106 @@ def build_series_cast(
     db.flush()
     out.sort(key=lambda c: (-c.line_count, c.normalized_name))
     return out
+
+
+def correct_cast_member(
+    db: Session,
+    source_id: str,
+    series_key: str,
+    name: str,
+    *,
+    gender: str | None = None,
+    voice_id: str | None = None,
+) -> NovelSeriesCast:
+    """Set a character's gender or voice by hand, and hold it there.
+
+    Marks the row ``locked``, which is what stops the next recast quietly
+    reverting it: gender is otherwise recomputed from pronouns on every pass,
+    and a human who has listened to the book knows things the counts do not.
+
+    Raises for a gender that is not one of the three the renderer understands,
+    rather than storing a value that would silently route to the narrator.
+    """
+    if gender is not None and gender not in ("male", "female", "unknown"):
+        raise ValueError(f"unknown gender: {gender!r}")
+
+    key = normalize_name(name)
+    if not key:
+        raise ValueError("a character needs a name")
+
+    row = db.execute(
+        select(NovelSeriesCast).where(
+            NovelSeriesCast.source_id == source_id,
+            NovelSeriesCast.series_key == series_key,
+            NovelSeriesCast.normalized_name == key,
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        row = NovelSeriesCast(
+            source_id=source_id, series_key=series_key,
+            display_name=name, normalized_name=key,
+        )
+        db.add(row)
+    if gender is not None:
+        row.gender = gender
+    if voice_id is not None:
+        row.voice_id = voice_id or None
+    row.locked = True
+    row.updated_at = utcnow()
+    db.flush()
+    bump_cast_version(db, source_id, series_key)
+    return row
+
+
+def merge_alias(
+    db: Session, source_id: str, series_key: str, alias: str, canonical: str
+) -> NovelSeriesAlias:
+    """Declare that one name is another character.
+
+    This is the affordance the whole storage design exists for. Spans hold a
+    LABEL rather than a foreign key, and resolution happens at serve time, so
+    ``"King Grey" is Arthur`` is a single row that corrects every chapter ever
+    attributed — including ones bought months ago — without re-attributing or
+    rewriting anything.
+
+    Refuses to merge a name into itself, and refuses to point an alias at a
+    character that does not exist: both would produce a row that resolves to
+    nothing, which is harder to notice than an error.
+    """
+    alias_key = normalize_name(alias)
+    target_key = normalize_name(canonical)
+    if not alias_key or not target_key:
+        raise ValueError("both names are required")
+    if alias_key == target_key:
+        raise ValueError("a name cannot be an alias of itself")
+
+    target = db.execute(
+        select(NovelSeriesCast).where(
+            NovelSeriesCast.source_id == source_id,
+            NovelSeriesCast.series_key == series_key,
+            NovelSeriesCast.normalized_name == target_key,
+        )
+    ).scalar_one_or_none()
+    if target is None:
+        raise LookupError(f"no character named {canonical!r} in this series")
+
+    row = db.get(NovelSeriesAlias, (source_id, series_key, alias_key))
+    if row is None:
+        row = NovelSeriesAlias(
+            source_id=source_id, series_key=series_key,
+            alias_normalized=alias_key, alias_display=alias, cast_id=target.id,
+        )
+        db.add(row)
+    else:
+        # Re-pointing an existing alias is a correction of a correction, which
+        # is ordinary. The primary key is what guarantees it still names one
+        # character afterwards.
+        row.alias_display = alias
+        row.cast_id = target.id
+    row.locked = True
+    db.flush()
+    bump_cast_version(db, source_id, series_key)
+    return row
 
 
 def resolve_voice_map(

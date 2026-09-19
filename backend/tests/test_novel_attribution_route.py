@@ -77,6 +77,27 @@ class TestReading:
 
         assert all(s["speaker"] for s in fetch(novels_on).json()["spans"])
 
+    def test_a_description_is_never_served_as_a_character(self, novels_on, db_session):
+        # The client assigns a colour per cast name, so serving "the crowd" or
+        # "Wren Kain, Lyra, and Mordain" would tint a crowd as though it were
+        # one person. Measured on three real chapters, seventeen spans would
+        # have been tinted that way. It is also the rule the RENDERER applies,
+        # and they must agree — otherwise the page shows a character where the
+        # audio reads narration.
+        seed(db_session, spans=[
+            {"p": 1, "s": 1, "e": 12, "ord": 0, "head": "Then we go,",
+             "cont": False, "speaker": "Arthur", "rule": 1},
+            {"p": 2, "s": 1, "e": 9, "ord": 0, "head": "Run!",
+             "cont": False, "speaker": "the crowd", "rule": 1},
+            {"p": 3, "s": 1, "e": 9, "ord": 0, "head": "Now!",
+             "cont": False, "speaker": "Wren Kain, Lyra, and Mordain", "rule": 1},
+        ])
+
+        body = fetch(novels_on).json()
+
+        assert [s["speaker"] for s in body["spans"]] == ["Arthur"]
+        assert [c["name"] for c in body["cast"]] == ["Arthur"]
+
     def test_the_head_travels_with_each_span(self, novels_on, db_session):
         # It is what lets the client prove the offsets still describe the text
         # it is showing; the chapter cache refetches, so they will disagree.
@@ -248,4 +269,96 @@ class TestAudioRoutes:
     def test_the_audio_routes_are_dark_when_novels_are_off(self, novels_off):
         assert novels_off.get("/novels/audio", params={
             "source": STUB_SOURCE, "series": SERIES, "chapter": CHAPTER,
+        }).status_code == 404
+
+
+class TestCastCorrections:
+    """Pinning a voice by hand, and declaring one name another character."""
+
+    def _seed_cast(self, db, name="Arthur", gender="unknown"):
+        from database.models import NovelSeriesCast
+
+        row = NovelSeriesCast(
+            source_id=STUB_SOURCE, series_key=SERIES, display_name=name,
+            normalized_name=name.casefold(), gender=gender,
+        )
+        db.add(row)
+        db.flush()
+        return row
+
+    def _correct(self, client, **over):
+        body = {"source_id": STUB_SOURCE, "series_key": SERIES, "name": "Arthur"}
+        body.update(over)
+        return client.post("/novels/cast", json=body)
+
+    def test_a_gender_can_be_pinned(self, novels_on, db_session):
+        self._seed_cast(db_session)
+
+        body = self._correct(novels_on, gender="male").json()
+
+        assert body["gender"] == "male" and body["locked"] is True
+
+    def test_a_voice_can_be_pinned(self, novels_on, db_session):
+        self._seed_cast(db_session)
+
+        assert self._correct(novels_on, voice_id="libritts-251").json()["voice_id"] == "libritts-251"
+
+    def test_a_nonsense_gender_is_rejected_at_the_edge(self, novels_on, db_session):
+        # Stored, it would silently route the character to the narrator.
+        self._seed_cast(db_session)
+
+        assert self._correct(novels_on, gender="woman").status_code == 422
+
+    def test_an_alias_can_be_declared(self, novels_on, db_session):
+        self._seed_cast(db_session)
+
+        response = novels_on.post("/novels/cast/alias", json={
+            "source_id": STUB_SOURCE, "series_key": SERIES,
+            "alias": "King Grey", "canonical": "Arthur",
+        })
+
+        assert response.status_code == 200
+        assert response.json()["resolves_to"] == "Arthur"
+
+    def test_one_alias_corrects_every_chapter_at_once(self, novels_on, db_session):
+        # The whole reason spans store a label instead of a foreign key. No
+        # chapter is re-attributed and no span is rewritten.
+        from services import novel_attribution_service as svc
+        from services.novel_dialogue import normalize_name
+
+        cast = self._seed_cast(db_session)
+        cast.voice_id = "voice-m1"
+        db_session.flush()
+
+        novels_on.post("/novels/cast/alias", json={
+            "source_id": STUB_SOURCE, "series_key": SERIES,
+            "alias": "King Grey", "canonical": "Arthur",
+        })
+
+        mapping = svc.resolve_voice_map(db_session, STUB_SOURCE, SERIES)
+        assert mapping[normalize_name("King Grey")] == "voice-m1"
+
+    def test_an_alias_to_an_unknown_character_is_a_404(self, novels_on):
+        # An alias pointing at nobody resolves to nothing, which is harder to
+        # notice than an error.
+        response = novels_on.post("/novels/cast/alias", json={
+            "source_id": STUB_SOURCE, "series_key": SERIES,
+            "alias": "King Grey", "canonical": "Nobody At All",
+        })
+
+        assert response.status_code == 404
+
+    def test_a_name_cannot_alias_itself(self, novels_on, db_session):
+        self._seed_cast(db_session)
+
+        response = novels_on.post("/novels/cast/alias", json={
+            "source_id": STUB_SOURCE, "series_key": SERIES,
+            "alias": "Arthur", "canonical": "Arthur",
+        })
+
+        assert response.status_code == 400
+
+    def test_the_cast_routes_are_dark_when_novels_are_off(self, novels_off):
+        assert novels_off.post("/novels/cast", json={
+            "source_id": STUB_SOURCE, "series_key": SERIES, "name": "Arthur",
         }).status_code == 404

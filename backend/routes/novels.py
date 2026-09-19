@@ -15,7 +15,14 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+)
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
@@ -25,7 +32,11 @@ from core.config import get_settings
 from core.rate_limit import bulk_limit, limiter, sources_limit
 from database.session import get_db
 from services.chapter_audio_store import chapter_paths, read_chapter_audio
-from services.novel_attribution_service import read_attribution
+from services.novel_attribution_service import (
+    correct_cast_member,
+    merge_alias,
+    read_attribution,
+)
 from services.novel_service import NovelService, get_novel_service
 
 
@@ -149,6 +160,83 @@ def get_novel_audio_file(
     if not audio.is_file():
         raise StarletteHTTPException(status_code=404, detail="Not Found")
     return FileResponse(audio, media_type="audio/ogg")
+
+
+class CastCorrection(BaseModel):
+    """Set a character's gender or voice by hand."""
+
+    source_id: str = Field(min_length=1, max_length=64)
+    series_key: str = Field(min_length=1, max_length=512)
+    name: str = Field(min_length=1, max_length=128)
+    gender: str | None = Field(default=None, pattern="^(male|female|unknown)$")
+    voice_id: str | None = Field(default=None, max_length=64)
+
+
+class AliasMerge(BaseModel):
+    """Declare that one name is another character."""
+
+    source_id: str = Field(min_length=1, max_length=64)
+    series_key: str = Field(min_length=1, max_length=512)
+    alias: str = Field(min_length=1, max_length=128)
+    canonical: str = Field(min_length=1, max_length=128)
+
+
+@router.post("/cast")
+@limiter.limit(sources_limit)
+def correct_cast(
+    request: Request,
+    response: Response,
+    body: CastCorrection,
+    db: DbDep,
+) -> dict[str, object]:
+    """Pin a character's gender or voice.
+
+    Marks the row ``locked``, which is the point: gender is otherwise
+    recomputed from pronoun counts on every recast, and somebody who has
+    listened to the book knows things the counts do not.
+    """
+    try:
+        row = correct_cast_member(
+            db, body.source_id, body.series_key, body.name,
+            gender=body.gender, voice_id=body.voice_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.commit()
+    return {
+        "name": row.display_name, "gender": row.gender,
+        "voice_id": row.voice_id, "locked": row.locked,
+    }
+
+
+@router.post("/cast/alias")
+@limiter.limit(sources_limit)
+def merge_cast_alias(
+    request: Request,
+    response: Response,
+    body: AliasMerge,
+    db: DbDep,
+) -> dict[str, object]:
+    """Declare that one name is another character.
+
+    The affordance the storage design exists for: spans hold a LABEL rather
+    than a foreign key and resolve at serve time, so this single row corrects
+    every chapter ever attributed — including ones bought months ago — without
+    re-attributing or rewriting anything.
+
+    404 when the target character is unknown, because an alias pointing at
+    nobody resolves to nothing and is harder to notice than an error.
+    """
+    try:
+        row = merge_alias(
+            db, body.source_id, body.series_key, body.alias, body.canonical
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    db.commit()
+    return {"alias": row.alias_display, "resolves_to": body.canonical}
 
 
 class BulkChapterRequest(BaseModel):

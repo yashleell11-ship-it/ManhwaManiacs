@@ -13,6 +13,7 @@ import pytest
 from database.models import NovelSeriesAlias, NovelSeriesCast
 from services import deepseek_client
 from services import novel_attribution_service as svc
+from services.novel_dialogue import normalize_name
 
 SOURCE, SERIES, CHAPTER = "novelarchive", "tbate", "ch-463"
 
@@ -630,3 +631,139 @@ class TestSeriesPovInARotatingBook:
         self._narrated(db_session, "a0", "Arthur")
 
         assert svc.series_pov(db_session, SOURCE, SERIES) == "Arthur"
+
+
+class TestOwnerCorrections:
+    """Setting a character's voice by hand, and declaring one name another.
+
+    The alias half is the affordance the whole storage design exists for: spans
+    hold a LABEL rather than a foreign key and resolve at serve time, so one
+    row corrects every chapter ever attributed — including ones bought months
+    ago — without re-attributing or rewriting anything.
+    """
+
+    def _cast(self, db, name, gender="unknown"):
+        from database.models import NovelSeriesCast
+
+        row = NovelSeriesCast(
+            source_id=SOURCE, series_key=SERIES, display_name=name,
+            normalized_name=name.casefold(), gender=gender,
+        )
+        db.add(row)
+        db.flush()
+        return row
+
+    def test_a_correction_sets_the_gender_and_holds_it(self, db_session):
+        self._cast(db_session, "myre")
+
+        row = svc.correct_cast_member(
+            db_session, SOURCE, SERIES, "Myre", gender="female"
+        )
+
+        assert row.gender == "female" and row.locked is True
+
+    def test_a_recast_cannot_revert_it(self, db_session):
+        # Gender is recomputed from pronouns on every pass. A human who has
+        # listened to the book knows things the counts do not.
+        from database.models import NovelChapterAttribution
+
+        svc.correct_cast_member(db_session, SOURCE, SERIES, "Myre", gender="female")
+        db_session.add(NovelChapterAttribution(
+            source_id=SOURCE, series_key=SERIES, chapter_key="c0",
+            text_fingerprint="c0", paragraph_count=1, style="quoted",
+            spans=json.dumps([{"p": 0, "s": 0, "e": 5, "ord": 0, "head": "x",
+                               "cont": False, "speaker": "Myre", "rule": 1}]),
+            pronoun_counts=json.dumps({"myre": [40, 0]}),
+            status=svc.STATUS_OK,
+        ))
+        db_session.flush()
+
+        cast = svc.build_series_cast(db_session, SOURCE, SERIES)
+
+        assert cast[0].gender == "female"
+
+    def test_a_voice_can_be_pinned(self, db_session):
+        row = svc.correct_cast_member(
+            db_session, SOURCE, SERIES, "Myre", voice_id="libritts-3853"
+        )
+
+        assert row.voice_id == "libritts-3853"
+
+    def test_a_nonsense_gender_is_refused(self, db_session):
+        # Storing it would silently route the character to the narrator.
+        with pytest.raises(ValueError):
+            svc.correct_cast_member(db_session, SOURCE, SERIES, "Myre", gender="woman")
+
+    def test_correcting_bumps_the_cast_version(self, db_session):
+        # So a client can tell a cached voice map is stale.
+        before = svc.bump_cast_version(db_session, SOURCE, SERIES)
+        svc.correct_cast_member(db_session, SOURCE, SERIES, "Myre", gender="female")
+        state = db_session.get(
+            __import__("database.models", fromlist=["x"]).NovelSeriesCastState,
+            (SOURCE, SERIES),
+        )
+
+        assert state.cast_version > before
+
+    def test_an_alias_resolves_to_the_same_voice(self, db_session):
+        self._cast(db_session, "arthur")
+        svc.correct_cast_member(
+            db_session, SOURCE, SERIES, "arthur", voice_id="voice-m1"
+        )
+
+        svc.merge_alias(db_session, SOURCE, SERIES, "King Grey", "arthur")
+
+        # Stored under the NORMALISED key — "King Grey" loses its rank, exactly
+        # as a span saying "King Grey" does. Both sides normalising the same
+        # way is what makes the lookup hit.
+        mapping = svc.resolve_voice_map(db_session, SOURCE, SERIES)
+        assert mapping[normalize_name("King Grey")] == mapping["arthur"] == "voice-m1"
+
+    def test_an_alias_matches_however_the_text_spells_it(self, db_session):
+        self._cast(db_session, "arthur")
+        svc.correct_cast_member(db_session, SOURCE, SERIES, "arthur", voice_id="voice-m1")
+        svc.merge_alias(db_session, SOURCE, SERIES, "King Grey", "arthur")
+
+        mapping = svc.resolve_voice_map(db_session, SOURCE, SERIES)
+
+        for spelling in ("King Grey", "KING GREY", "king grey", "Grey"):
+            assert mapping[normalize_name(spelling)] == "voice-m1", spelling
+
+    def test_an_alias_survives_being_re_pointed(self, db_session):
+        # Correcting a correction is ordinary; the primary key is what keeps it
+        # naming exactly one character afterwards.
+        self._cast(db_session, "arthur")
+        self._cast(db_session, "nico")
+        svc.merge_alias(db_session, SOURCE, SERIES, "Grey", "arthur")
+
+        svc.merge_alias(db_session, SOURCE, SERIES, "Grey", "nico")
+
+        from sqlalchemy import select as _select
+        from database.models import NovelSeriesAlias
+
+        rows = db_session.execute(
+            _select(NovelSeriesAlias).where(NovelSeriesAlias.series_key == SERIES)
+        ).scalars().all()
+        assert len(rows) == 1
+
+    def test_a_name_cannot_be_an_alias_of_itself(self, db_session):
+        self._cast(db_session, "arthur")
+
+        with pytest.raises(ValueError):
+            svc.merge_alias(db_session, SOURCE, SERIES, "Arthur", "arthur")
+
+    def test_an_alias_to_nobody_is_refused(self, db_session):
+        # It would produce a row that resolves to nothing, which is harder to
+        # notice than an error.
+        with pytest.raises(LookupError):
+            svc.merge_alias(db_session, SOURCE, SERIES, "King Grey", "Nobody")
+
+    def test_an_alias_ignores_a_rank_on_either_side(self, db_session):
+        self._cast(db_session, "mica")
+
+        svc.merge_alias(db_session, SOURCE, SERIES, "The Wind", "Lance Mica")
+
+        # "Lance Mica" resolves to the cast row stored as "mica"; the alias
+        # itself loses its leading article the same way a span would.
+        mapping = svc.resolve_voice_map(db_session, SOURCE, SERIES)
+        assert normalize_name("The Wind") in mapping
