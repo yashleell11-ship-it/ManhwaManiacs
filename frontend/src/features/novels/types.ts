@@ -96,6 +96,8 @@ export type NovelSpeakerSpanPayload = {
 
 export type NovelAttributionPayload = {
   attributed: boolean;
+  /** Who narrates THIS chapter, which in a rotating-POV book is not the series narrator. */
+  narrator: string | null;
   /**
    * Identity of the exact text the offsets were computed against. The chapter
    * cache refetches, so this will eventually disagree with what is on screen —

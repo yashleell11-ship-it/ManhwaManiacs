@@ -107,6 +107,18 @@ def main() -> int:
     print(f"\nnarrator clips reserved: {sorted(narrators)}")
     print(f"character voices: {voices}")
 
+    # Persist the assignment. Without this the DATABASE says every character
+    # reads as narrator while the AUDIO gives them their own voice, and the
+    # reader's cast list — which reads the database — contradicts what the
+    # listener hears. The column exists for exactly this.
+    #
+    # A locked row is an owner's decision and is left alone.
+    for member in cast:
+        assigned = voices.get(member.normalized_name)
+        if assigned and not member.locked and member.voice_id != assigned:
+            member.voice_id = assigned
+    db.commit()
+
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     for chapter in chapters:

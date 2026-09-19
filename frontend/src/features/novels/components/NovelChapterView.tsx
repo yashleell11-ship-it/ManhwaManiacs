@@ -30,6 +30,7 @@ import { tintParagraph, type SpeakerSpan, type TintedRun } from "@/features/nove
 import { speakerHues } from "@/features/novels/speaker-tint";
 import { useNovelAttribution, useNovelAudio } from "@/features/novels/hooks";
 import { NovelAudioPlayer } from "@/features/novels/components/NovelAudioPlayer";
+import { NovelCastPanel } from "@/features/novels/components/NovelCastPanel";
 import { createHighlighter } from "@/features/novels/audio-highlight";
 import { segmentAt, timingMatchesText } from "@/features/novels/audio-follow";
 import { useScrollContainer } from "@/lib/scroll-container";
@@ -225,6 +226,26 @@ export function NovelChapterView({
   const hues = useMemo(
     () => speakerHues((attribution?.cast ?? []).map((member) => member.name)),
     [attribution],
+  );
+
+  const [castOpen, setCastOpen] = useState(false);
+
+  // Counted from the spans actually shown, not from the series totals: the
+  // panel answers "who speaks in THIS chapter", and a series-wide number would
+  // list characters who say nothing here.
+  const lineCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    const source = timing ?? attribution?.spans ?? [];
+    for (const span of source) {
+      if (!span.speaker) continue;
+      counts.set(span.speaker, (counts.get(span.speaker) ?? 0) + 1);
+    }
+    return counts;
+  }, [attribution, timing]);
+
+  const castInChapter = useMemo(
+    () => (attribution?.cast ?? []).filter((m) => lineCounts.has(m.name)),
+    [attribution, lineCounts],
   );
   const { palette, choice, siteScheme, siteThemeLabel, setChoice } = useNovelPalette();
   const {
@@ -610,6 +631,31 @@ export function NovelChapterView({
             spansByParagraph={spansByParagraph}
             hues={hues}
           />
+
+          {castInChapter.length > 0 || attribution?.narrator ? (
+            <div className="mt-6 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setCastOpen((open) => !open)}
+                className="text-xs underline-offset-2 hover:underline"
+                style={{ color: surface.muted }}
+                aria-expanded={castOpen}
+              >
+                {castOpen ? "Hide voices" : `Voices (${castInChapter.length})`}
+              </button>
+            </div>
+          ) : null}
+
+          {castOpen ? (
+            <NovelCastPanel
+              cast={castInChapter}
+              hues={hues}
+              lineCounts={lineCounts}
+              narrator={attribution?.narrator ?? null}
+              surface={surface}
+              onClose={() => setCastOpen(false)}
+            />
+          ) : null}
 
           {audio?.available && attributionRef ? (
             <NovelAudioPlayer
