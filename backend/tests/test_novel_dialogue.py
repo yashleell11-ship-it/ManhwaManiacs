@@ -152,6 +152,32 @@ class TestScareQuotes:
         paragraphs = ["“Run!”"]
         assert len(segment(paragraphs).spans) == 1
 
+    def test_a_scare_quote_swallowing_the_sentence_period_is_still_not_speech(self):
+        # Verbatim from a real cached chapter. English convention puts the
+        # period INSIDE the closing quote even when the quoted words are not
+        # speech, so this ends in terminal punctuation while being narration.
+        # An adversarial pass over live attributions caught it being read as a
+        # spoken line -- harmless there only because the narrator happened to
+        # be the assigned speaker. A scare-quoted phrase echoing a DIFFERENT
+        # character switches voices mid-narration in the finished audio.
+        paragraphs = ['He seemed amused at the apparent irony of us “lesser races.”']
+
+        assert segment(paragraphs).spans == ()
+
+    def test_a_full_line_ending_in_a_period_is_still_speech(self):
+        # The period rule must not swing too far: a quote that OPENS the
+        # sentence has no narration before it to read as emphasis.
+        paragraphs = ["“Go.” He turned away and did not look back."]
+
+        assert len(segment(paragraphs).spans) == 1
+
+    def test_a_question_inside_narration_is_still_speech(self):
+        # Nothing puts a question mark inside quotes by typographic habit, so
+        # it remains real evidence even mid-sentence.
+        paragraphs = ["She asked him “what now?” and waited."]
+
+        assert len(segment(paragraphs).spans) == 1
+
 
 class TestPovHeaders:
     def test_a_bare_name_in_capitals_is_a_pov_header(self):

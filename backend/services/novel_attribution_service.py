@@ -97,15 +97,23 @@ def _resolve_speakers(segments, attributions, gate: float) -> list[dict]:
 
     rows: list[dict] = []
     last_speaker: str | None = None
+    last_rule = 7
     for span in segments.spans:
         answer = answer_for.get(id(span))
         if answer is not None:
             speaker = answer.speaker if answer.accepted(gate) else None
             rule = answer.rule
-            last_speaker = speaker
+            last_speaker, last_rule = speaker, rule
         else:
-            # Carried from the span it continues.
-            speaker, rule = last_speaker, 6
+            # Carried from the span it continues -- including its RULE, not a
+            # fixed one. A continuation is exactly as certain as the line it
+            # continues: `"Yes," he said, "go on."` is one speaker identified
+            # once by an explicit tag. Stamping these with a weaker rule would
+            # mean a later re-gate silently dropped the tail of every split
+            # quote while keeping its head, which is worse than either
+            # outcome on its own -- and re-gating without re-spending is the
+            # whole reason the model returns a rule instead of a score.
+            speaker, rule = last_speaker, last_rule
         rows.append(
             {
                 "p": span.paragraph,

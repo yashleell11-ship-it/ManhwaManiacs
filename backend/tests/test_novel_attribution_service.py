@@ -140,6 +140,24 @@ class TestStoring:
         assert tail, "fixture no longer contains a split quote"
         assert tail[0]["speaker"] == "Tessia"
 
+    def test_a_continuation_inherits_its_parents_certainty_too(self, db_session):
+        # `"Yes," he said, "go on."` is ONE speaker, identified once by an
+        # explicit tag. If the tail were stamped with a weaker rule, a later
+        # re-gate would keep the head and drop the tail of every split quote --
+        # and re-gating without re-spending is the whole point of returning a
+        # rule rather than a score.
+        spy = _Spy(_answer(("Arthur", 2), ("Tessia", 1)))
+
+        row = svc.attribute_chapter(
+            db_session, SOURCE, SERIES, CHAPTER, QUOTED, complete=spy
+        )
+
+        spans = json.loads(row.spans)
+        tail = [s for s in spans if s["cont"]]
+        assert tail, "fixture no longer contains a split quote"
+        head = [s for s in spans if not s["cont"] and s["speaker"] == tail[0]["speaker"]]
+        assert head and tail[0]["rule"] == head[-1]["rule"]
+
     def test_a_below_gate_answer_stores_no_speaker(self, db_session):
         # Rule 4 is alternation: recorded, and ignored until the gate moves.
         spy = _Spy(_answer(("Arthur", 4), ("Tessia", 4)))

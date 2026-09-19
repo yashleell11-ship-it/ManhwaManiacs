@@ -59,6 +59,17 @@ _SCARE_QUOTE_MAX_WORDS = 3
 
 _TERMINAL_PUNCT = frozenset(".!?…。！？")
 
+#: Punctuation that genuinely argues a short quote is SPEECH. A full stop is
+#: deliberately absent: English convention puts the sentence's period inside
+#: the closing quote even when the quoted words are not speech at all, so
+#: `us "lesser races."` ends in terminal punctuation while being pure
+#: narration. Treating a period as proof of speech let exactly that phrase
+#: through as a spoken line in a real chapter -- and a scare-quoted phrase
+#: echoing another character is how the narrator's voice switches mid-sentence
+#: in the middle of an audiobook. A question or exclamation mark carries no
+#: such convention: nothing puts those inside quotes by typographic habit.
+_SPEECH_PUNCT = frozenset("!?…。！？")
+
 #: A POV header names whose "I" the following narration is. 119 of the owner's
 #: 120 sampled chapters have exactly one, which makes first-person dialogue --
 #: a large share of web fiction -- resolvable for free.
@@ -177,7 +188,7 @@ def _is_scare_quote(inner: str, paragraph: str, start: int, end: int) -> bool:
     words = inner.split()
     if len(words) > _SCARE_QUOTE_MAX_WORDS:
         return False
-    if inner and inner.rstrip()[-1:] in _TERMINAL_PUNCT:
+    if inner and inner.rstrip()[-1:] in _SPEECH_PUNCT:
         return False
     # An attribution clause immediately around it makes even a two-word quote
     # real speech ("Go," he said).
