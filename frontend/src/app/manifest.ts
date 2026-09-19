@@ -26,8 +26,12 @@ export default function manifest(): MetadataRoute.Manifest {
   return {
     name: "ManhwaManiacs",
     short_name: "Manhwa",
+    // Novels are named explicitly because they are not a footnote here: they
+    // are the most-read surface on this instance by a wide margin, and a
+    // description that lists only comics tells a reader the app does not do
+    // the thing they mostly use it for.
     description:
-      "Read and manage your manga & manhwa library — with chapters saved for offline reading.",
+      "Read and manage your manga, manhwa and novel library — with chapters saved for offline reading.",
     // Landing on the library rather than "/" because an installed icon is
     // pressed to read. "/" is now a bare redirect here anyway, and naming the
     // destination directly saves the installed window a round trip on launch.

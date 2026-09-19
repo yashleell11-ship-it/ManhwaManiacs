@@ -25,7 +25,8 @@ const dmSans = DM_Sans({
 
 export const metadata: Metadata = {
   title: "ManhwaManiacs",
-  description: "ManhwaManiacs — read and manage your manga & manhwa library.",
+  description:
+    "ManhwaManiacs — read and manage your manga, manhwa and novel library.",
   // `manifest.ts` in this directory generates /manifest.webmanifest; naming it
   // here is what makes the page installable.
   manifest: "/manifest.webmanifest",
