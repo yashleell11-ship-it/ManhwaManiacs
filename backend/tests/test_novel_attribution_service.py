@@ -497,3 +497,74 @@ class TestSeriesCast:
         cast = svc.build_series_cast(db_session, SOURCE, SERIES)
 
         assert len(cast) == 1 and cast[0].gender == "unknown"
+
+
+class TestNarratorGender:
+    """The one gender pronoun counting cannot reach.
+
+    First-person narration never uses a third-person pronoun about its own
+    narrator, so a POV character scores he=0 she=0 however long the book is —
+    measured on a real series, the protagonist stayed "unknown" across eight
+    chapters and 119 lines. Without the model's answer the narrator's own voice
+    cannot be chosen, which matters most in a book that rotates POV: a female
+    narrator would otherwise be read by whatever clip the series defaulted to.
+    """
+
+    def test_a_reported_gender_fills_the_gap(self, db_session):
+        row = svc.record_narrator(db_session, SOURCE, SERIES, "Tessia", "female")
+
+        assert row.gender == "female" and row.is_pov is True
+
+    def test_it_only_fills_a_gap_and_never_overrides(self, db_session):
+        # Pronouns saw this character in third person elsewhere; that evidence
+        # outranks a model's aside.
+        row = svc.record_narrator(db_session, SOURCE, SERIES, "Arthur", "female")
+        row.gender = "male"
+        db_session.flush()
+
+        svc.record_narrator(db_session, SOURCE, SERIES, "Arthur", "female")
+
+        assert row.gender == "male"
+
+    def test_a_bogus_gender_is_ignored(self, db_session):
+        row = svc.record_narrator(db_session, SOURCE, SERIES, "Tessia", "unsure")
+
+        assert row.gender == "unknown"
+
+    def test_a_recast_does_not_undo_it(self, db_session):
+        # build_series_cast recomputes gender from pronouns. For a POV
+        # character that recomputation is always "unknown", so left alone it
+        # would erase the narrator's gender on every pass.
+        from database.models import NovelChapterAttribution
+
+        svc.record_narrator(db_session, SOURCE, SERIES, "Tessia", "female")
+        db_session.add(NovelChapterAttribution(
+            source_id=SOURCE, series_key=SERIES, chapter_key="c0",
+            text_fingerprint="c0", paragraph_count=1, style="quoted",
+            spans=json.dumps([{"p": 0, "s": 0, "e": 5, "ord": 0, "head": "x",
+                               "cont": False, "speaker": "Tessia", "rule": 1}]),
+            pronoun_counts=json.dumps({"tessia": [0, 0]}),
+            status=svc.STATUS_OK,
+        ))
+        db_session.flush()
+
+        cast = svc.build_series_cast(db_session, SOURCE, SERIES)
+
+        assert cast[0].gender == "female"
+
+    def test_a_recast_still_updates_a_non_pov_character(self, db_session):
+        from database.models import NovelChapterAttribution
+
+        db_session.add(NovelChapterAttribution(
+            source_id=SOURCE, series_key=SERIES, chapter_key="c0",
+            text_fingerprint="c0", paragraph_count=1, style="quoted",
+            spans=json.dumps([{"p": 0, "s": 0, "e": 5, "ord": 0, "head": "x",
+                               "cont": False, "speaker": "Myre", "rule": 1}]),
+            pronoun_counts=json.dumps({"myre": [0, 12]}),
+            status=svc.STATUS_OK,
+        ))
+        db_session.flush()
+
+        cast = svc.build_series_cast(db_session, SOURCE, SERIES)
+
+        assert cast[0].gender == "female"

@@ -187,6 +187,34 @@ class TestPovHeaders:
         assert [h.name for h in headers] == ["Arthur Leywin"]
         assert headers[0].paragraph == 1
 
+    def test_a_possessive_pov_header_yields_just_the_name(self):
+        # Verbatim from a real chapter. `str.title()` alone turns this into
+        # "Tessia Eralith’S Pov:", which matches no cast member — so the
+        # chapter's narrator resolves to nobody and is read in the series'
+        # default voice, audibly wrong in a book that rotates POV.
+        headers = find_pov_headers(["TESSIA ERALITH’S POV:"])
+
+        assert [h.name for h in headers] == ["Tessia Eralith"]
+
+    def test_the_other_pov_header_shapes_work_too(self):
+        for text, expected in (
+            ("POV: ARTHUR", "Arthur"),
+            ("ARTHUR — POV", "Arthur"),
+            ("STANNARD BERWICK’S POV:", "Stannard Berwick"),
+        ):
+            got = find_pov_headers([text])
+            assert [h.name for h in got] == [expected], text
+
+    def test_a_plain_name_header_is_unchanged(self):
+        assert [h.name for h in find_pov_headers(["ARTHUR LEYWIN"])] == ["Arthur Leywin"]
+
+    def test_a_pov_name_matches_its_cast_entry(self):
+        # The whole point: the extracted name has to normalise to the same key
+        # the cast is stored under, or the narrator lookup misses.
+        headers = find_pov_headers(["TESSIA ERALITH’S POV:"])
+
+        assert normalize_name(headers[0].name) == normalize_name("Tessia Eralith")
+
     def test_a_chapter_heading_is_not_a_pov_header(self):
         assert find_pov_headers(["CHAPTER 12", "PART ONE", "PROLOGUE"]) == ()
 

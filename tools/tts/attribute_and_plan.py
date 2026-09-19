@@ -28,6 +28,7 @@ from services.novel_audio_plan import (  # noqa: E402
     assign_voices,
     plan_chapter,
 )
+from services.novel_dialogue import normalize_name  # noqa: E402
 
 
 def main() -> int:
@@ -70,20 +71,41 @@ def main() -> int:
 
     pack = json.loads(Path(args.voices).read_text(encoding="utf-8"))
     clips = {c["voice_id"]: c for c in pack["clips"]}
-    # The narrator is the flattest clip of the POV character's gender when that
-    # is known, and male by default — a choice worth revisiting per series.
-    pov_gender = next(
-        (c.gender for c in cast if pov and c.normalized_name == pov.lower()), "male"
-    )
-    pool = [c for c in pack["clips"] if c["gender"] == (pov_gender if pov_gender != "unknown" else "male")]
-    narrator = sorted(pool, key=lambda c: c["pitch_spread"])[0]["voice_id"]
+    gender_of = {c.normalized_name: c.gender for c in cast}
 
+    def narrator_clip(who: str | None) -> str:
+        """The flattest clip matching this chapter's narrator.
+
+        PER CHAPTER, not per series. A book that rotates POV has a different
+        narrator in different chapters, and reading a woman's chapter in the
+        series' default male voice is wrong in a way no amount of correct
+        character casting makes up for.
+        """
+        gender = gender_of.get(normalize_name(who or ""), "unknown")
+        if gender not in ("male", "female"):
+            gender = "male"
+        pool = [c for c in pack["clips"] if c["gender"] == gender]
+        return sorted(pool, key=lambda c: c["pitch_spread"])[0]["voice_id"]
+
+    # Every clip a narrator could use is reserved, so no character is ever
+    # given a voice that reads as narration somewhere else in the book.
+    narrators = {
+        narrator_clip(w)
+        for w in {pov}
+        | {
+            attribution.read_attribution(
+                db, source_id, series_key, c["chapter_key"]
+            ).get("narrator")
+            for c in chapters
+        }
+    }
     voices = assign_voices(
         [(c.display_name, c.gender) for c in cast],
-        [(c["voice_id"], c["gender"]) for c in pack["clips"]],
-        pov=pov, narrator_voice=narrator,
+        [(c["voice_id"], c["gender"]) for c in pack["clips"] if c["voice_id"] not in narrators],
+        pov=pov,
     )
-    print(f"\nnarrator {narrator} (reserved)   character voices: {voices}")
+    print(f"\nnarrator clips reserved: {sorted(narrators)}")
+    print(f"character voices: {voices}")
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -95,8 +117,15 @@ def main() -> int:
             print(f"  #{chapter.get('number','?')} skipped (not attributed)")
             continue
         spans = [SpeechSpan(s["p"], s["s"], s["e"], s["speaker"]) for s in record["spans"]]
-        plan = plan_chapter(chapter["paragraphs"], spans, voices)
-        used = set(voices.values()) | {narrator}
+        chapter_narrator = record.get("narrator") or pov
+        narrator = narrator_clip(chapter_narrator)
+        # This chapter's narrator reads their own dialogue; they get no second
+        # voice. Any OTHER chapter's narrator is an ordinary character here.
+        chapter_voices = {
+            k: v for k, v in voices.items() if k != normalize_name(chapter_narrator or "")
+        }
+        plan = plan_chapter(chapter["paragraphs"], spans, chapter_voices)
+        used = set(chapter_voices.values()) | {narrator}
         number = chapter.get("number", chapter["chapter_key"])
         (out_dir / f"plan{number}.json").write_text(json.dumps({
             "chapter": str(number), "title": chapter.get("title", ""),
@@ -108,7 +137,8 @@ def main() -> int:
                          for i, s in enumerate(plan)],
         }, indent=1), encoding="utf-8")
         voiced = sum(1 for s in plan if s.voice_id)
-        print(f"  #{number} {len(plan):>4} segments, {voiced} in a character voice")
+        print(f"  #{number} {len(plan):>4} segments, {voiced} in a character voice, "
+              f"narrated by {chapter_narrator} ({narrator})")
     return 0
 
 

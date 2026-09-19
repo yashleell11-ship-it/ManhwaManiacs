@@ -91,6 +91,21 @@ class TestReading:
 
         assert [c["name"] for c in fetch(novels_on).json()["cast"]] == ["Arthur"]
 
+    def test_the_chapter_s_own_narrator_comes_back(self, novels_on, db_session):
+        # Not the series narrator. A book that rotates POV has a different one
+        # per chapter, and the narrator's VOICE has to follow it — otherwise a
+        # chapter narrated by a woman is read in the series default.
+        from database.models import NovelChapterAttribution
+
+        seed(db_session)
+        row = db_session.get(
+            NovelChapterAttribution, (STUB_SOURCE, SERIES, CHAPTER)
+        )
+        row.pov = json.dumps(["Tessia Eralith"])
+        db_session.flush()
+
+        assert fetch(novels_on).json()["narrator"] == "Tessia Eralith"
+
     def test_the_voice_comes_with_the_cast(self, novels_on, db_session):
         seed(db_session)
 
@@ -105,7 +120,8 @@ class TestAbsence:
 
         assert response.status_code == 200
         assert response.json() == {
-            "attributed": False, "spans": [], "cast": [], "text_fingerprint": None,
+            "attributed": False, "spans": [], "cast": [],
+            "text_fingerprint": None, "narrator": None,
         }
 
     def test_a_failed_attribution_reads_as_absent(self, novels_on, db_session):

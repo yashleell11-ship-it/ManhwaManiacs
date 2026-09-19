@@ -194,7 +194,8 @@ def series_pov(db: Session, source_id: str, series_key: str) -> str | None:
 
 
 def record_narrator(
-    db: Session, source_id: str, series_key: str, name: str
+    db: Session, source_id: str, series_key: str, name: str,
+    gender: str | None = None,
 ) -> NovelSeriesCast:
     """Remember who narrates this series, learned from a chapter that showed it.
 
@@ -219,6 +220,14 @@ def record_narrator(
         db.flush()
     if not row.locked:
         row.is_pov = True
+        # The one gender the pronoun pass can never reach. First-person
+        # narration uses no third-person pronoun about its own narrator, so a
+        # POV character scores he=0 she=0 however long the book is — measured,
+        # the protagonist stayed "unknown" across eight chapters and 119 lines.
+        # Only ever FILLS a gap; a gender already established from pronouns, or
+        # set by hand, stands.
+        if gender in ("male", "female") and row.gender == "unknown":
+            row.gender = gender
         row.updated_at = utcnow()
         # Flushed because the very next thing that happens is a SELECT for the
         # series POV, and this factory does not autoflush -- an unflushed
@@ -252,6 +261,7 @@ def _store(
     segments,
     spans: list[dict],
     status: str,
+    narrator: str | None = None,
     served_model: str | None = None,
     pronouns: dict | None = None,
     prompt_tokens: int = 0,
@@ -266,7 +276,13 @@ def _store(
     row.paragraph_count = len(paragraphs)
     row.style = segments.style
     row.spans = json.dumps(spans, separators=(",", ":"))
-    row.pov = json.dumps([h.name for h in segments.pov]) if segments.pov else None
+    # Who narrates THIS chapter, not the series. A book that rotates POV has a
+    # different narrator per chapter, and the narrator's voice has to follow —
+    # otherwise a chapter narrated by a woman is read in the series default.
+    # The chapter's own header wins; the model's answer fills in when there is
+    # none.
+    names = [h.name for h in segments.pov] or ([narrator] if narrator else [])
+    row.pov = json.dumps(names) if names else None
     row.pronoun_counts = json.dumps(pronouns) if pronouns else None
     row.status = status
     # What served it, not what was requested: the two differ whenever an id is
@@ -358,7 +374,9 @@ def attribute_chapter(
     # Learned, not assumed: whatever the model worked out about this chapter's
     # narrator is what lets the NEXT chapter be attributed when it names nobody.
     if parsed.narrator:
-        record_narrator(db, source_id, series_key, parsed.narrator)
+        record_narrator(
+            db, source_id, series_key, parsed.narrator, parsed.narrator_gender
+        )
 
     # Pronoun evidence is gathered per speaker from the paragraphs they speak
     # in, so gender accumulates across a series rather than being decided by
@@ -378,6 +396,7 @@ def attribute_chapter(
         db, source_id=source_id, series_key=series_key, chapter_key=chapter_key,
         fingerprint=fingerprint, paragraphs=paragraphs, segments=segments,
         spans=spans, status=STATUS_OK, pronouns=pronouns,
+        narrator=chapter_pov,
         served_model=answer.model or deepseek_client.MODEL,
         prompt_tokens=answer.prompt_tokens, completion_tokens=answer.completion_tokens,
     )
@@ -398,7 +417,8 @@ def read_attribution(
     """
     row = db.get(NovelChapterAttribution, (source_id, series_key, chapter_key))
     if row is None or row.status != STATUS_OK:
-        return {"attributed": False, "spans": [], "cast": [], "text_fingerprint": None}
+        return {"attributed": False, "spans": [], "cast": [],
+                "text_fingerprint": None, "narrator": None}
 
     try:
         spans = json.loads(row.spans)
@@ -426,9 +446,15 @@ def read_attribution(
     # Ordered by how much they speak, because the client assigns colours in
     # this order and the two busiest speakers should be the furthest apart.
     speaking = {s["speaker"] for s in visible}
+    try:
+        pov_names = json.loads(row.pov) if row.pov else []
+    except ValueError:
+        pov_names = []
+
     return {
         "attributed": True,
         "text_fingerprint": row.text_fingerprint,
+        "narrator": pov_names[0] if pov_names else None,
         "spans": visible,
         "cast": [
             {"name": row.display_name, "gender": row.gender, "voice_id": row.voice_id}
@@ -517,7 +543,12 @@ def build_series_cast(
         cast.updated_at = utcnow()
         if not cast.locked:
             cast.display_name = name
-            cast.gender = infer_gender(he, she)
+            inferred = infer_gender(he, she)
+            # A POV character's gender came from the model, not from pronouns,
+            # because pronouns cannot see them. Recomputing would throw that
+            # away on every recast and put the narrator back to "unknown".
+            if inferred != "unknown" or not cast.is_pov:
+                cast.gender = inferred
         out.append(cast)
     db.flush()
     out.sort(key=lambda c: (-c.line_count, c.normalized_name))

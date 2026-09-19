@@ -186,8 +186,38 @@ def find_pov_headers(paragraphs: list[str] | tuple[str, ...]) -> tuple[PovHeader
         # "CHAPTER 12" / "PART ONE" are structure, not a speaker.
         if re.fullmatch(r"(CHAPTER|PART|BOOK|VOLUME|ARC|EPILOGUE|PROLOGUE)\b.*", text):
             continue
-        headers.append(PovHeader(paragraph=index, name=text.title()))
+        headers.append(PovHeader(paragraph=index, name=_header_name(text)))
     return tuple(headers)
+
+
+#: The forms a POV header takes around the name: `TESSIA ERALITH'S POV:`,
+#: `ARTHUR — POV`, `POV: ARTHUR`. Only the name is wanted, because it has to
+#: match a cast member; anything else and the chapter's narrator resolves to
+#: nobody and falls back to the series default voice.
+_POV_MARKER = re.compile(
+    r"^\s*(?:POV\s*[:\-\u2014]?\s*)?(.*?)(?:[\u2019']s)?\s*(?:[:\-\u2014]\s*)?(?:POV)?\s*[:.]?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _header_name(text: str) -> str:
+    """The character's name out of a POV header, cased for display.
+
+    `str.title()` alone is not enough and is actively wrong here: it turns
+    `TESSIA ERALITH'S POV:` into `Tessia Eralith'S Pov:`, which matches no cast
+    member, so the chapter's narrator resolves to nobody and is read in the
+    series' default voice — audibly wrong in a book that rotates POV.
+    """
+    found = _POV_MARKER.match(text)
+    name = (found.group(1) if found else text).strip(" :.-\u2014")
+    if not name:
+        name = text.strip(" :.-\u2014")
+    # Title-case per word, leaving an apostrophe's tail alone: "o'brien" should
+    # become "O'Brien", never "O'Brien" -> "O'Brien" mangled to "O'Brien".
+    return " ".join(
+        w[:1].upper() + w[1:].lower() if w.isupper() or w.islower() else w
+        for w in name.split()
+    )
 
 
 def _is_scare_quote(inner: str, paragraph: str, start: int, end: int) -> bool:

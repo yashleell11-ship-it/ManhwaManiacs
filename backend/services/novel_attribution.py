@@ -197,10 +197,12 @@ def build_prompt(
     lines.append("")
     lines.append(
         'Reply with JSON: {"narrator": "Name or null", '
+        '"narrator_gender": "male" | "female" | null, '
         '"lines": [{"i": 0, "speaker": "Name"}, ...]} '
         f"with exactly {len(asked)} entries, one per numbered line, in order. "
         '"narrator" is the first-person narrator of THIS chapter, or null if '
-        "it is not written in first person."
+        "it is not written in first person. Give the narrator's gender only if "
+        "the text makes it clear; null otherwise."
     )
     return "\n".join(lines)
 
@@ -220,20 +222,35 @@ class ChapterAnswer:
     #: first chapter that makes it obvious, so later chapters that name nobody
     #: can still be attributed.
     narrator: str | None = None
+    #: The narrator's gender, which is the ONE case pronoun counting cannot
+    #: reach: first-person narration never uses a third-person pronoun about
+    #: its own narrator, so they score he=0 she=0 however long the chapter is.
+    #: Measured on a real series, the protagonist came out "unknown" across
+    #: eight chapters and 119 lines. Without this the narrator's own voice
+    #: cannot be chosen, which matters most in a book that rotates POV —
+    #: a female narrator would be read by whichever clip the series defaulted
+    #: to.
+    narrator_gender: str | None = None
 
 
 def parse_answer(raw: str, expected: int) -> ChapterAnswer:
     """Parse a whole reply: the narrator and the per-line attributions."""
     narrator = None
+    gender = None
     try:
         data = json.loads(raw)
         if isinstance(data, dict):
             value = data.get("narrator")
             if isinstance(value, str) and value.strip().lower() not in ("", "null", "none", "unknown"):
                 narrator = value.strip()
+            said = data.get("narrator_gender")
+            if isinstance(said, str) and said.strip().lower() in ("male", "female"):
+                gender = said.strip().lower()
     except (ValueError, TypeError):
         pass
-    return ChapterAnswer(lines=parse_response(raw, expected), narrator=narrator)
+    return ChapterAnswer(
+        lines=parse_response(raw, expected), narrator=narrator, narrator_gender=gender
+    )
 
 
 def parse_response(raw: str, expected: int) -> tuple[SpanAttribution, ...]:
