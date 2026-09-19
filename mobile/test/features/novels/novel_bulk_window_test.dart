@@ -14,6 +14,7 @@ import 'package:manhwamaniacs/features/downloads/services/chapter_page_fetcher.d
 import 'package:manhwamaniacs/features/downloads/services/device_storage_info.dart';
 import 'package:manhwamaniacs/features/downloads/services/offline_novel_reader.dart';
 import 'package:manhwamaniacs/features/downloads/services/retention_maintenance.dart';
+import 'package:manhwamaniacs/features/novels/models/novel_audio.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter_window.dart';
 import 'package:manhwamaniacs/features/novels/repositories/novels_repository.dart';
@@ -56,6 +57,13 @@ NovelChapter _chapter(int n, {int paragraphs = 3}) => NovelChapter(
 /// A novels API that answers windows, and counts both doors so a test can say
 /// which one the queue used.
 class _WindowingNovelsRepository implements NovelsRepository {
+  @override
+  Future<Result<NovelAudio>> audio({
+    required String sourceId,
+    required String seriesKey,
+    required String chapterKey,
+  }) async => const Ok(NovelAudio.none);
+
   _WindowingNovelsRepository({
     this.maxChapters = kNovelWindowChapters,
     this.brokenKeys = const {},

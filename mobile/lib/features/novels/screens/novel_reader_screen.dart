@@ -1,5 +1,5 @@
-import 'dart:async';
 
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -14,11 +14,13 @@ import 'package:manhwamaniacs/features/downloads/widgets/open_chapter_scope.dart
 import 'package:manhwamaniacs/features/novels/models/novel_chapter.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_palette.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_typography.dart';
+import 'package:manhwamaniacs/features/novels/providers/novel_audio_provider.dart';
 import 'package:manhwamaniacs/features/novels/providers/novel_chapter_provider.dart';
 import 'package:manhwamaniacs/features/novels/providers/novel_preferences_provider.dart';
 import 'package:manhwamaniacs/features/novels/utils/novel_book.dart';
 import 'package:manhwamaniacs/features/novels/utils/novel_progress.dart';
 import 'package:manhwamaniacs/features/novels/utils/novel_snippet.dart';
+import 'package:manhwamaniacs/features/novels/widgets/novel_audio_player.dart';
 import 'package:manhwamaniacs/features/novels/widgets/novel_chapter_view.dart';
 import 'package:manhwamaniacs/features/novels/widgets/novel_reader_chrome.dart';
 import 'package:manhwamaniacs/features/novels/widgets/novel_type_panel.dart';
@@ -29,6 +31,7 @@ import 'package:manhwamaniacs/features/reader/utils/reader_wakelock.dart';
 import 'package:manhwamaniacs/features/reader/utils/reading_clock.dart';
 import 'package:manhwamaniacs/features/reader/widgets/reader_error_state.dart';
 import 'package:manhwamaniacs/features/settings/providers/settings_provider.dart';
+import 'package:manhwamaniacs/shared/providers/core_providers.dart';
 
 /// How often a scroll is turned into a progress position. The manga reader
 /// uses the same 500 ms, and for the same reason: often enough that a kill
@@ -695,6 +698,56 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
                       palette: surface,
                       preferences: prefs,
                       paragraphKeys: _paragraphKeys,
+                    ),
+                  ),
+                  // Audio, when this chapter has been rendered. A separate
+                  // request from the prose and never awaited in front of it:
+                  // almost nothing in the library is rendered, so a reader
+                  // must not wait on a lookup that usually answers "no".
+                  SliverToBoxAdapter(
+                    child: Consumer(
+                      builder: (context, ref, _) {
+                        final key = (
+                          sourceId: chapter.sourceId,
+                          seriesKey: chapter.seriesKey,
+                          chapterKey: chapter.chapterKey,
+                        );
+                        final audio =
+                            ref.watch(novelAudioProvider(key)).valueOrNull;
+                        final token = ref.read(authTokenStoreProvider).token;
+                        if (audio == null ||
+                            !audio.available ||
+                            token == null ||
+                            token.isEmpty) {
+                          return const SizedBox.shrink();
+                        }
+                        final base = ref.read(apiBaseUrlProvider);
+                        final trimmed = base.endsWith('/')
+                            ? base.substring(0, base.length - 1)
+                            : base;
+                        // Query parameters, never path segments: connector
+                        // keys are opaque and routinely contain slashes.
+                        final query = Uri(
+                          queryParameters: {
+                            'source': chapter.sourceId,
+                            'series': chapter.seriesKey,
+                            'chapter': chapter.chapterKey,
+                          },
+                        ).query;
+                        return Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: (width - column) / 2,
+                          ),
+                          child: NovelAudioPlayerBar(
+                            url: '$trimmed/novels/audio/file?$query',
+                            headers: {'Authorization': 'Bearer $token'},
+                            audio: audio,
+                            muted: surface.muted,
+                            rule: surface.rule,
+                            onPosition: (ms) {},
+                          ),
+                        );
+                      },
                     ),
                   ),
                   SliverToBoxAdapter(

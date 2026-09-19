@@ -1,4 +1,5 @@
 import 'package:manhwamaniacs/core/utils/result.dart';
+import 'package:manhwamaniacs/features/novels/models/novel_audio.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter_window.dart';
 
@@ -18,6 +19,19 @@ abstract class NovelsRepository {
   /// unmounted, so an off feature is indistinguishable from one that was
   /// never built.
   Future<Result<NovelChapter>> chapter({
+    required String sourceId,
+    required String seriesKey,
+    required String chapterKey,
+  });
+
+  /// Whether this chapter has been rendered, and where each sentence sits.
+  ///
+  /// READ-ONLY on the server: attribution and rendering are bought by a
+  /// deliberate pass, never by somebody opening a chapter. An unrendered
+  /// chapter answers `available: false` rather than 404, because that is the
+  /// ordinary state for almost the whole library and a reader should not be
+  /// walking error paths for it.
+  Future<Result<NovelAudio>> audio({
     required String sourceId,
     required String seriesKey,
     required String chapterKey,

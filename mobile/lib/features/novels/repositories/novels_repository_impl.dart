@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:manhwamaniacs/core/error/app_error.dart';
 import 'package:manhwamaniacs/core/utils/result.dart';
+import 'package:manhwamaniacs/features/novels/models/novel_audio.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter_window.dart';
 import 'package:manhwamaniacs/features/novels/repositories/novels_repository.dart';
@@ -26,6 +27,29 @@ class NovelsRepositoryImpl implements NovelsRepository {
         },
       );
       return Ok(NovelChapter.fromJson(r.data ?? const {}));
+    } on DioException catch (e) {
+      return Err(_err(e));
+    } catch (e) {
+      return Err(UnknownError(message: e.toString(), cause: e));
+    }
+  }
+
+  @override
+  Future<Result<NovelAudio>> audio({
+    required String sourceId,
+    required String seriesKey,
+    required String chapterKey,
+  }) async {
+    try {
+      final r = await _dio.get<Map<String, dynamic>>(
+        '/novels/audio',
+        queryParameters: {
+          'source': sourceId,
+          'series': seriesKey,
+          'chapter': chapterKey,
+        },
+      );
+      return Ok(NovelAudio.fromJson(r.data ?? const {}));
     } on DioException catch (e) {
       return Err(_err(e));
     } catch (e) {

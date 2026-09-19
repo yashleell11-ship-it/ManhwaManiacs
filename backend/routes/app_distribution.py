@@ -134,6 +134,25 @@ class Changelog(BaseModel):
 # consume the exact same source of truth.
 _RELEASE_NOTES: list[ChangelogEntry] = [
     ChangelogEntry(
+        version="3.0.0",
+        build=49,
+        date="September 2026",
+        highlights=[
+            "Novels can be listened to. A chapter is read aloud with a "
+            "separate voice for each of the main characters and the narrator, "
+            "and the sentence being spoken lights up in the text as it goes, "
+            "so you can put the phone down mid-paragraph and pick the book "
+            "back up with your eyes exactly where the voice is",
+            "The reader can show you who is speaking each line, and which "
+            "voice they were given. If it gets somebody wrong you can correct "
+            "it once and every chapter of that book follows, including ones "
+            "read months ago",
+            "A major version because this is the first thing here that is not "
+            "reading: the app now makes audiobooks out of the novels already "
+            "in your library",
+        ],
+    ),
+    ChangelogEntry(
         version="2.7.8",
         build=48,
         date="September 2026",
