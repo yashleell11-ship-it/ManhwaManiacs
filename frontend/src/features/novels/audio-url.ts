@@ -1,22 +1,47 @@
 /**
- * The URL an `<audio>` element loads a rendered chapter from.
+ * Loading a rendered chapter's audio, with the session attached.
  *
- * A plain URL rather than a fetch, because the element streams it itself: the
- * server answers Range requests with a 206, so seeking pulls only the bytes it
- * needs instead of re-downloading twelve minutes of Opus. Routing this through
- * the JSON client would buffer the whole file into memory and throw that away.
+ * NOT `<audio src={url}>`, and that is not a stylistic choice. `mm_session` is
+ * httpOnly and `SameSite=lax`, so a browser-MANAGED subresource request to
+ * another origin never carries it: in dev the page is on :3000 and the API on
+ * :8000, and the element would load nothing but a 401. `services/http.ts`
+ * records this as the same failure that took `next/image`'s optimizer out
+ * app-wide, and solves it the same way — go through fetch, which keeps
+ * `credentials: "include"`.
+ *
+ * The cost is real and worth naming: an object URL means the whole file is in
+ * memory, so playback cannot begin until it has all arrived and the server's
+ * Range support buys nothing here. At 24 kbps a twelve-minute chapter is about
+ * two megabytes, which is a short wait once rather than a broken player in
+ * dev. The MOBILE client is the one that benefits from Range, and it can:
+ * it holds a token and sets its own headers, so it streams the URL directly.
+ *
+ * Fetched only when the reader presses play — most people open a chapter to
+ * read it, and nobody should spend two megabytes on a button they never
+ * touched.
  */
 
-import { env } from "@/config/env";
+import { requestBlob, sourceChapterQuery } from "@/services/http";
 import type { ChapterId } from "@/types/api";
 
-export function novelAudioUrl(ref: ChapterId): string {
-  const query = new URLSearchParams({
-    source: ref.sourceId,
-    series: ref.seriesKey,
-    chapter: ref.chapterKey,
-  });
-  // Encoded as query parameters, never path segments: connector keys are
-  // opaque and routinely contain slashes and percent-encoding.
-  return `${env.apiUrl}/novels/audio/file?${query.toString()}`;
+/** The path and query the audio lives at, shared by both clients. */
+export function novelAudioPath(ref: ChapterId): {
+  path: string;
+  query: Record<string, string>;
+} {
+  // Query parameters, never path segments: connector keys are opaque and
+  // routinely contain slashes and percent-encoding.
+  return { path: "/novels/audio/file", query: sourceChapterQuery(ref) };
+}
+
+/**
+ * Fetch the chapter's audio and hand back an object URL.
+ *
+ * The caller owns the URL and must `URL.revokeObjectURL` it — a leaked one
+ * pins the whole file in memory for the life of the tab.
+ */
+export async function loadNovelAudioObjectUrl(ref: ChapterId): Promise<string> {
+  const { path, query } = novelAudioPath(ref);
+  const { blob } = await requestBlob(path, { query });
+  return URL.createObjectURL(blob);
 }

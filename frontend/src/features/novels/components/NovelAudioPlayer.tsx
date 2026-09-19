@@ -2,16 +2,20 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { novelAudioUrl } from "@/features/novels/audio-url";
+import { loadNovelAudioObjectUrl } from "@/features/novels/audio-url";
 import type { ChapterId } from "@/types/api";
 
 /**
  * Playback for a rendered chapter, and the clock the highlight follows.
  *
- * `preload="none"`. A chapter is a couple of megabytes and most readers open a
- * chapter to READ it; fetching the audio on sight would spend their data on
- * something they never pressed play for. The element streams on demand and the
- * server answers Range with a 206, so seeking pulls only what it needs.
+ * The file is fetched on the FIRST PRESS of play, not when the page renders.
+ * Most people open a chapter to read it, and nobody should spend two megabytes
+ * on a button they never touched.
+ *
+ * It goes through fetch rather than `<audio src={url}>` because `mm_session`
+ * is httpOnly and `SameSite=lax`: a browser-managed subresource request to
+ * another origin never carries it, so in dev the element would load a 401.
+ * See `audio-url.ts` for the full reasoning and what it costs.
  *
  * The time is reported through a ref-backed callback rather than lifted into
  * this component's state: `timeupdate` fires about four times a second, and
@@ -34,6 +38,21 @@ export function NovelAudioPlayer({
   const [playing, setPlaying] = useState(false);
   const [positionMs, setPositionMs] = useState(0);
   const [rate, setRate] = useState(1);
+  const [source, setSource] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  // Revoked on unmount and whenever the chapter changes: a leaked object URL
+  // pins the whole file in memory for the life of the tab, and a reader moving
+  // through a book would accumulate one per chapter.
+  useEffect(() => {
+    return () => {
+      setSource((current) => {
+        if (current) URL.revokeObjectURL(current);
+        return null;
+      });
+    };
+  }, [chapter.sourceId, chapter.seriesKey, chapter.chapterKey]);
 
   // Held in a ref so `timeupdate` never needs a fresh closure, and so changing
   // the callback cannot re-attach the listener mid-playback.
@@ -76,12 +95,31 @@ export function NovelAudioPlayer({
     if (audioRef.current) audioRef.current.playbackRate = rate;
   }, [rate]);
 
-  const toggle = useCallback(() => {
+  const toggle = useCallback(async () => {
     const element = audioRef.current;
     if (!element) return;
-    if (element.paused) void element.play();
-    else element.pause();
-  }, []);
+    if (!element.paused) {
+      element.pause();
+      return;
+    }
+    if (!source) {
+      setLoading(true);
+      setFailed(false);
+      try {
+        const url = await loadNovelAudioObjectUrl(chapter);
+        setSource(url);
+        element.src = url;
+      } catch {
+        // Audio is an addition to the page. A failure here leaves the chapter
+        // readable and says so, rather than breaking the reader.
+        setFailed(true);
+        return;
+      } finally {
+        setLoading(false);
+      }
+    }
+    void element.play();
+  }, [chapter, source]);
 
   const seek = useCallback((ms: number) => {
     const element = audioRef.current;
@@ -96,17 +134,24 @@ export function NovelAudioPlayer({
       className="mt-6 flex items-center gap-3 rounded-lg border px-3 py-2"
       style={{ borderColor: surface.rule }}
     >
-      <audio ref={audioRef} src={novelAudioUrl(chapter)} preload="none" />
+      <audio ref={audioRef} preload="none" />
 
       <button
         type="button"
-        onClick={toggle}
-        aria-label={playing ? "Pause" : "Listen to this chapter"}
+        onClick={() => void toggle()}
+        disabled={loading}
+        aria-label={
+          failed
+            ? "Audio could not be loaded"
+            : playing
+              ? "Pause"
+              : "Listen to this chapter"
+        }
         className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border"
         style={{ borderColor: surface.rule }}
       >
         <span aria-hidden className="text-sm leading-none">
-          {playing ? "❚❚" : "▶"}
+          {loading ? "…" : failed ? "!" : playing ? "❚❚" : "▶"}
         </span>
       </button>
 
