@@ -1,8 +1,10 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_palette.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_typography.dart';
 import 'package:manhwamaniacs/features/novels/providers/novel_preferences_provider.dart';
 import 'package:manhwamaniacs/features/novels/utils/novel_book.dart';
+import 'package:manhwamaniacs/features/novels/utils/novel_speaking.dart';
 
 /// The prose itself: a chapter set as a book sets one.
 ///
@@ -32,6 +34,7 @@ class NovelChapterView extends StatelessWidget {
     required this.palette,
     required this.preferences,
     required this.paragraphKeys,
+    this.speaking,
   });
 
   final List<String> paragraphs;
@@ -44,6 +47,16 @@ class NovelChapterView extends StatelessWidget {
   /// One key per paragraph, owned by the screen so it can measure where the
   /// reader is without this widget holding state.
   final List<GlobalKey> paragraphKeys;
+
+  /// The words being spoken, when a chapter's audio is playing and its timing
+  /// map has been proven to match this text.
+  ///
+  /// A listenable rather than a value: the playhead ticks many times a second
+  /// and neither this widget nor the paragraphs that are not speaking may be
+  /// rebuilt by it. Null when there is nothing to follow, which is almost
+  /// every chapter in the library — and that path renders exactly what it
+  /// rendered before this existed.
+  final ValueListenable<NovelSpeakingRange?>? speaking;
 
   @override
   Widget build(BuildContext context) {
@@ -62,6 +75,8 @@ class NovelChapterView extends StatelessWidget {
         }
         return _Paragraph(
           key: paragraphKeys[index],
+          index: index,
+          speaking: speaking,
           text: text,
           // Flush when it opens the chapter, or when the line above it was an
           // ornament: books do not indent the paragraph that starts a scene.
@@ -110,6 +125,8 @@ class NovelSurfaceColors {
 class _Paragraph extends StatelessWidget {
   const _Paragraph({
     super.key,
+    required this.index,
+    required this.speaking,
     required this.text,
     required this.flush,
     required this.dropCap,
@@ -117,6 +134,8 @@ class _Paragraph extends StatelessWidget {
     required this.preferences,
   });
 
+  final int index;
+  final ValueListenable<NovelSpeakingRange?>? speaking;
   final String text;
   final bool flush;
   final DropCap? dropCap;
@@ -143,29 +162,103 @@ class _Paragraph extends StatelessWidget {
     // paragraph without indenting all of them.
     final indent = flush ? 0.0 : preferences.fontSize * kNovelParagraphIndentEm;
 
-    if (dropCap != null) {
-      return Padding(
-        padding: const EdgeInsets.only(bottom: 2),
-        child: Text.rich(
-          TextSpan(
-            children: [
-              TextSpan(
-                text: dropCap!.initial,
-                style: style.copyWith(
-                  fontSize: preferences.fontSize * 2.6,
-                  height: 1.0,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              TextSpan(text: dropCap!.rest),
-            ],
-          ),
-          style: style,
-          textAlign: TextAlign.left,
-        ),
-      );
-    }
+    final runs = _runs(style);
 
+    // Null when nothing is being read aloud — which is the whole library, and
+    // every chapter in it before this feature existed. That path has to render
+    // exactly what it rendered then, down to the span tree, so it is its own
+    // return rather than a degenerate case of the speaking one.
+    final listenable = speaking;
+    if (listenable == null) {
+      return _body(runs, style, indent, const []);
+    }
+    return ValueListenableBuilder<NovelSpeakingRange?>(
+      valueListenable: listenable,
+      builder: (context, range, _) {
+        if (range == null) return _body(runs, style, indent, const []);
+        final length = text.length - _leading;
+        // Three cases, and the map's order is what makes them exhaustive:
+        // the voice has passed this paragraph entirely, is inside it, or has
+        // not reached it.
+        if (range.paragraph > index) {
+          return _body(
+            runs,
+            style,
+            indent,
+            markSpokenRuns(runs, doneEnd: length, start: 0, end: 0),
+          );
+        }
+        if (range.paragraph < index) {
+          return _body(runs, style, indent, const []);
+        }
+        final start = range.start - _leading;
+        return _body(
+          runs,
+          style,
+          indent,
+          markSpokenRuns(
+            runs,
+            doneEnd: start,
+            start: start,
+            end: range.end - _leading,
+          ),
+        );
+      },
+    );
+  }
+
+  /// How far the rendered runs sit from the offsets the server measured.
+  ///
+  /// [splitDropCap] trims its input, so a drop-capped paragraph's runs
+  /// concatenate to `text.trim()` while the timing map was measured against
+  /// `text`. Every other paragraph renders verbatim. A paragraph whose
+  /// leading whitespace does not account for the whole shift falls out of
+  /// range in [splitSpokenRuns] and loses its highlight rather than lighting
+  /// the wrong words.
+  int get _leading =>
+      dropCap == null ? 0 : text.length - text.trimLeft().length;
+
+  /// The paragraph as the runs the playhead is laid over.
+  ///
+  /// The drop cap is a styled first run rather than a second rendering path:
+  /// paragraph 0 is where a chapter's audio starts, so a branch that skipped
+  /// it would mean the highlight never appears until the second paragraph.
+  /// The indent spacer is deliberately NOT a run — it is not part of the
+  /// paragraph's text, and counting it would shift every offset by one.
+  List<NovelRun> _runs(TextStyle style) {
+    if (dropCap != null) {
+      return [
+        (
+          text: dropCap!.initial,
+          style: style.copyWith(
+            fontSize: preferences.fontSize * 2.6,
+            height: 1.0,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        (text: dropCap!.rest, style: null),
+      ];
+    }
+    return [(text: text, style: null)];
+  }
+
+  Widget _body(
+    List<NovelRun> runs,
+    TextStyle style,
+    double indent,
+    List<NovelSpokenRun> marked,
+  ) {
+    // Both washes are drawn from the ink, so they are right in both themes by
+    // construction rather than by palette entries that can drift from this
+    // one. The trail is deliberately near the threshold of noticing — it is
+    // there to be seen out of the corner of the eye when you look back up, not
+    // to compete with the line actually being read.
+    final done = TextStyle(
+      backgroundColor: palette.ink.withValues(alpha: 0.05),
+    );
+    final speaking = TextStyle(
+      backgroundColor: palette.ink.withValues(alpha: 0.15),
+    );
     return Padding(
       padding: const EdgeInsets.only(bottom: 2),
       child: Text.rich(
@@ -179,10 +272,24 @@ class _Paragraph extends StatelessWidget {
             // by exactly `indent` either way, so this renders identically.
             if (indent > 0)
               TextSpan(
-                text: '\u200B',
+                text: '​',
                 style: TextStyle(letterSpacing: indent),
               ),
-            TextSpan(text: text),
+            if (marked.isEmpty)
+              for (final run in runs)
+                TextSpan(text: run.text, style: run.style)
+            else
+              for (final run in marked)
+                TextSpan(
+                  text: run.text,
+                  style: switch (run.mark) {
+                    NovelSpeechMark.none => run.style,
+                    NovelSpeechMark.done =>
+                      (run.style ?? const TextStyle()).merge(done),
+                    NovelSpeechMark.speaking =>
+                      (run.style ?? const TextStyle()).merge(speaking),
+                  },
+                ),
           ],
         ),
         style: style,

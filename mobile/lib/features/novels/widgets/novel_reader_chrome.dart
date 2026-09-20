@@ -27,6 +27,7 @@ class NovelReaderChrome extends StatelessWidget {
     required this.onNext,
     required this.onType,
     this.onBookmark,
+    this.audio,
   });
 
   final bool visible;
@@ -50,6 +51,21 @@ class NovelReaderChrome extends StatelessWidget {
   /// with prev/next: those two are navigation, this is an action on the
   /// chapter — the same division the manga reader's chrome already makes.
   final VoidCallback? onBookmark;
+
+  /// The chapter's player, when it has one.
+  ///
+  /// It lives here rather than at the foot of the prose because the foot is
+  /// eighty paragraphs down: a reader resuming at 60% never reaches it, and a
+  /// reader who has not scrolled has no way to know a voice exists.
+  ///
+  /// NOT unmounted when the chrome hides — [AnimatedOpacity] at opacity 0
+  /// keeps the element alive, and the player disposes its platform handle in
+  /// `dispose()`, so anything that unmounted it would stop the audio the
+  /// moment the controls faded.
+  ///
+  /// A widget rather than the audio's arguments: this file knows nothing
+  /// about providers or tokens and should carry on not knowing.
+  final Widget? audio;
 
   @override
   Widget build(BuildContext context) {
@@ -109,6 +125,7 @@ class NovelReaderChrome extends StatelessWidget {
               ),
             ),
             const Spacer(),
+            if (audio != null) audio!,
             _Bar(
               surface: surface,
               top: false,

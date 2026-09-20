@@ -20,6 +20,7 @@ import 'package:manhwamaniacs/features/novels/providers/novel_preferences_provid
 import 'package:manhwamaniacs/features/novels/utils/novel_book.dart';
 import 'package:manhwamaniacs/features/novels/utils/novel_progress.dart';
 import 'package:manhwamaniacs/features/novels/utils/novel_snippet.dart';
+import 'package:manhwamaniacs/features/novels/utils/novel_speaking.dart';
 import 'package:manhwamaniacs/features/novels/widgets/novel_audio_player.dart';
 import 'package:manhwamaniacs/features/novels/widgets/novel_chapter_view.dart';
 import 'package:manhwamaniacs/features/novels/widgets/novel_reader_chrome.dart';
@@ -214,6 +215,22 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
   /// entire session. Only the chrome's percent actually depends on it.
   final ValueNotifier<int> _bucket = ValueNotifier<int>(1);
 
+  /// Which words the voice is on. The same argument as [_bucket], one order of
+  /// magnitude worse: the playhead ticks many times a second where the
+  /// progress bucket moved twice, so it must never reach `setState`.
+  late final NovelAudioFollower _follower;
+
+  /// The paragraph follow-scroll last moved to, so a new sentence inside the
+  /// paragraph already on screen does not re-aim the viewport.
+  int _followedParagraph = -1;
+
+  /// A chapter that HAS a voice says so once, by revealing the controls.
+  ///
+  /// This is the reported bug rather than a nicety: the chrome sits behind a
+  /// tap that nothing advertises, so a chapter with audio looked identical to
+  /// one without and the feature was invisible on the phone.
+  bool _audioAnnounced = false;
+
   /// How long this reader has been read, for the reading-time statistic.
   final ReadingClock _clock = ReadingClock(DateTime.now());
 
@@ -267,6 +284,8 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
       widget.chapter.paragraphs.length,
       (_) => GlobalKey(),
     );
+    _follower = NovelAudioFollower(widget.chapter.paragraphs);
+    _follower.range.addListener(_onSpeakingChanged);
     _scrollController.addListener(_onScroll);
     applyReadingSystemUiMode();
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -282,6 +301,8 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
     _autoNextTimer?.cancel();
     _scrollController.dispose();
     _bucket.dispose();
+    _follower.range.removeListener(_onSpeakingChanged);
+    _follower.dispose();
     // Symmetric with initState: leaving a chapter restores exactly what the
     // app launched with rather than permanently changing its shape.
     applyRestingSystemUiMode();
@@ -589,6 +610,15 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
   /// makes a bounce at the bottom, or a second scroll event in the same
   /// window, incapable of firing it twice.
   void _maybeScheduleAutoNext() {
+    // A chapter being read aloud is not over when its last line reaches the
+    // top of the screen: follow-scroll gets there while there is still voice
+    // left, and advancing would cut the reader off mid-sentence. The stop
+    // tick calls back in through [_onSpeakingChanged].
+    if (_follower.range.value != null) {
+      _autoNextTimer?.cancel();
+      _autoNextTimer = null;
+      return;
+    }
     final next = _nextKey;
     if (!ref.read(readerDefaultsProvider).autoNextChapter ||
         next == null ||
@@ -649,6 +679,163 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
     );
   }
 
+  /// The player, in the chrome rather than at the foot of the prose.
+  ///
+  /// It used to be a sliver after the last paragraph, which is where the
+  /// reported bug lived: chapters run to eighty-odd paragraphs, so a reader
+  /// who had not scrolled to the very end had no way to know a voice existed
+  /// at all. The chrome is the one surface this screen already teaches a
+  /// reader to reveal.
+  ///
+  /// Taking it out of the scroll view also removes a latent bug: the bar
+  /// arrived after first paint and grew `maxScrollExtent` under a reader
+  /// already sitting at the chapter end, which perturbed [_atEnd] and so
+  /// auto-next's timing.
+  ///
+  /// A separate request from the prose and never awaited in front of it:
+  /// almost nothing in the library is rendered, so a reader must not wait on
+  /// a lookup that usually answers "no".
+  Widget _audioBar(NovelSurfaceColors surface) {
+    final chapter = widget.chapter;
+    return Consumer(
+      builder: (context, ref, _) {
+        final key = (
+          sourceId: chapter.sourceId,
+          seriesKey: chapter.seriesKey,
+          chapterKey: chapter.chapterKey,
+        );
+        final audio = ref.watch(novelAudioProvider(key)).valueOrNull;
+        final token = ref.read(authTokenStoreProvider).token;
+        if (audio == null ||
+            !audio.available ||
+            token == null ||
+            token.isEmpty) {
+          return const SizedBox.shrink();
+        }
+        _announceAudio();
+        final base = ref.read(apiBaseUrlProvider);
+        final trimmed =
+            base.endsWith('/') ? base.substring(0, base.length - 1) : base;
+        // Query parameters, never path segments: connector keys are opaque
+        // and routinely contain slashes.
+        final query = Uri(
+          queryParameters: {
+            'source': chapter.sourceId,
+            'series': chapter.seriesKey,
+            'chapter': chapter.chapterKey,
+          },
+        ).query;
+        return ColoredBox(
+          // Opaque for the same reason the chrome's own bars are: prose has to
+          // stop showing through a control for it to read as one.
+          color: surface.bg,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
+            child: NovelAudioPlayerBar(
+              url: '$trimmed/novels/audio/file?$query',
+              headers: {'Authorization': 'Bearer $token'},
+              audio: audio,
+              muted: surface.muted,
+              rule: surface.rule,
+              onPosition: (ms) => _follower.onPosition(ms, audio),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  /// The voice moved to another paragraph, or stopped.
+  void _onSpeakingChanged() {
+    final range = _follower.range.value;
+    if (range == null) {
+      _followedParagraph = -1;
+      // The voice stopped. [_maybeScheduleAutoNext] refuses to fire while it
+      // is reading, so this is where a chapter finished by LISTENING rather
+      // than by scrolling gets to continue.
+      _maybeScheduleAutoNext();
+      return;
+    }
+    if (range.paragraph == _followedParagraph) return;
+    // -1 means nothing has been followed since the voice last stopped, so
+    // this is the first sentence of a fresh press of play.
+    final starting = _followedParagraph < 0;
+    _followedParagraph = range.paragraph;
+    _followScroll(range.paragraph, starting: starting);
+  }
+
+  /// Bring the spoken paragraph into view, and otherwise leave the scroll
+  /// alone.
+  ///
+  /// Two behaviours, because starting playback and continuing it are different
+  /// requests. Pressing play means "read me THIS", wherever the reader happens
+  /// to be sitting — a listener who resumes a chapter at 60% and hears the
+  /// voice start from the top needs the page to go with it. After that it is
+  /// the web's `block: "nearest"`: a reader who has scrolled ahead to see what
+  /// happens must not be yanked back on every sentence.
+  ///
+  /// When it does move it aims at the reading line — the same reference
+  /// [_anchorAtReadingLine] measures against — so listening and reading agree
+  /// about where "here" is, and a bookmark taken while listening round-trips.
+  void _followScroll(int paragraph, {required bool starting}) {
+    if (_pendingRestoreParagraph != null) return;
+    if (!mounted || !_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    // Never fight a finger, or our own in-flight animation.
+    if (!starting && position.isScrollingNotifier.value) return;
+
+    final box = _boxFor(paragraph);
+    if (box == null) {
+      // Far enough off screen that the list has not built it. Only worth
+      // crossing that distance on a deliberate press of play; mid-chapter it
+      // would mean the reader had scrolled away on purpose.
+      if (!starting) return;
+      // The restore machinery already knows how to reach an unbuilt paragraph:
+      // jump to where it is estimated to be, let the list build, measure, and
+      // land exactly. Reusing it beats a second, less-tested guess.
+      _restoreFraction = 0;
+      _restoreToReadingLine = true;
+      _pendingRestoreParagraph = paragraph;
+      _restoreFrames = 0;
+      _lastRestoreMaxExtent = -1;
+      _attemptRestore();
+      return;
+    }
+
+    final top = box.localToGlobal(Offset.zero).dy;
+    final bottom = top + box.size.height;
+    final line = _readingLine();
+    // A paragraph taller than the screen never "fits", so being ON it means
+    // the reading line is inside it — which is what progress means by it too.
+    if (top <= line && bottom > line) return;
+    if (!starting) {
+      final viewportTop = _viewportTop();
+      if (top >= viewportTop &&
+          bottom <= viewportTop + MediaQuery.sizeOf(context).height) {
+        return;
+      }
+    }
+    _scrollController.animateTo(
+      (position.pixels + top - line).clamp(0.0, position.maxScrollExtent),
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeOut,
+    );
+  }
+
+  /// Reveal the controls once, on the first chapter that turns out to have a
+  /// voice. Hidden again by the next tap, like any other chrome — no new
+  /// affordance and no new gesture.
+  void _announceAudio() {
+    if (_audioAnnounced) return;
+    _audioAnnounced = true;
+    // Post-frame because this is reached from inside a build: the provider
+    // resolves late and the reveal is a setState on this body.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _chromeVisible) return;
+      setState(() => _chromeVisible = true);
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final chapter = widget.chapter;
@@ -698,56 +885,7 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
                       palette: surface,
                       preferences: prefs,
                       paragraphKeys: _paragraphKeys,
-                    ),
-                  ),
-                  // Audio, when this chapter has been rendered. A separate
-                  // request from the prose and never awaited in front of it:
-                  // almost nothing in the library is rendered, so a reader
-                  // must not wait on a lookup that usually answers "no".
-                  SliverToBoxAdapter(
-                    child: Consumer(
-                      builder: (context, ref, _) {
-                        final key = (
-                          sourceId: chapter.sourceId,
-                          seriesKey: chapter.seriesKey,
-                          chapterKey: chapter.chapterKey,
-                        );
-                        final audio =
-                            ref.watch(novelAudioProvider(key)).valueOrNull;
-                        final token = ref.read(authTokenStoreProvider).token;
-                        if (audio == null ||
-                            !audio.available ||
-                            token == null ||
-                            token.isEmpty) {
-                          return const SizedBox.shrink();
-                        }
-                        final base = ref.read(apiBaseUrlProvider);
-                        final trimmed = base.endsWith('/')
-                            ? base.substring(0, base.length - 1)
-                            : base;
-                        // Query parameters, never path segments: connector
-                        // keys are opaque and routinely contain slashes.
-                        final query = Uri(
-                          queryParameters: {
-                            'source': chapter.sourceId,
-                            'series': chapter.seriesKey,
-                            'chapter': chapter.chapterKey,
-                          },
-                        ).query;
-                        return Padding(
-                          padding: EdgeInsets.symmetric(
-                            horizontal: (width - column) / 2,
-                          ),
-                          child: NovelAudioPlayerBar(
-                            url: '$trimmed/novels/audio/file?$query',
-                            headers: {'Authorization': 'Bearer $token'},
-                            audio: audio,
-                            muted: surface.muted,
-                            rule: surface.rule,
-                            onPosition: (ms) {},
-                          ),
-                        );
-                      },
+                      speaking: _follower.range,
                     ),
                   ),
                   SliverToBoxAdapter(
@@ -767,7 +905,13 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
           // rebuilds when it moves — the paragraph list underneath does not.
           ValueListenableBuilder<int>(
             valueListenable: _bucket,
-            builder: (context, bucket, _) => NovelReaderChrome(
+            // The player goes through `child`, not the builder: this fires on
+            // nearly every progress tick, and rebuilding a slider and a speed
+            // menu because a percent moved is the cost [_bucket] exists to
+            // avoid in the first place.
+            child: _audioBar(surface),
+            builder: (context, bucket, child) => NovelReaderChrome(
+              audio: child,
               visible: _chromeVisible,
               surface: surface,
               title: chapter.title,

@@ -124,7 +124,6 @@ class _NovelAudioPlayerBarState extends State<NovelAudioPlayerBar> {
     final playing = _player?.playing ?? false;
 
     return Container(
-      margin: const EdgeInsets.only(top: 24),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
         border: Border.all(color: widget.rule),

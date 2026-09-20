@@ -7,7 +7,9 @@ import 'package:go_router/go_router.dart';
 import 'package:manhwamaniacs/app/app.dart';
 import 'package:manhwamaniacs/app/router/app_router.dart';
 import 'package:manhwamaniacs/app/router/routes.dart';
+import 'package:manhwamaniacs/features/novels/models/novel_audio.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter.dart';
+import 'package:manhwamaniacs/features/novels/providers/novel_audio_provider.dart';
 import 'package:manhwamaniacs/features/novels/providers/novel_chapter_provider.dart';
 import 'package:manhwamaniacs/features/novels/screens/novel_reader_screen.dart';
 import 'package:manhwamaniacs/features/reader/models/chapter_manifest.dart';
@@ -157,6 +159,14 @@ Future<ProviderContainer> _pumpApp(
               ),),
       chapterManifestProvider(_mangaKey(_mangaChapterTwo))
           .overrideWith((ref) async => _mangaManifest(_mangaChapterTwo)),
+      // Answered explicitly, because the reader's CHROME now depends on it:
+      // a chapter that turns out to have audio reveals the controls once by
+      // itself, and every tap-to-reveal assertion below would then be
+      // toggling them off instead of on.
+      novelAudioProvider(_novelKey(_chapterOne))
+          .overrideWith((ref) async => NovelAudio.none),
+      novelAudioProvider(_novelKey(_chapterTwo))
+          .overrideWith((ref) async => NovelAudio.none),
       ..._pendingSeriesDetail(),
     ],
   );
