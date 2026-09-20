@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -64,6 +65,35 @@ class ChapterAudio:
     bytes: int = 0
     total_ms: int = 0
     segments: tuple[dict, ...] = ()
+
+
+def rendered_chapters(
+    source_id: str, series_key: str, chapter_keys: Iterable[str]
+) -> dict[str, dict[str, int]]:
+    """Which of [chapter_keys] have audio on disk, and how much.
+
+    One ``stat`` per chapter and no timing file is opened: the caller is
+    marking a table of contents, which needs "is there audio and how long",
+    not the several hundred segments behind it. A 530-chapter book is a few
+    hundred stats on a sharded directory, against 530 round trips if a client
+    asked per chapter.
+
+    Only the chapters that HAVE audio appear. Absence is the ordinary state
+    for almost the whole library, and sending a row of zeroes for every
+    chapter of a long book is most of the payload saying nothing.
+    """
+    out: dict[str, dict[str, int]] = {}
+    for key in chapter_keys:
+        audio, timing = chapter_paths(source_id, series_key, key)
+        try:
+            size = audio.stat().st_size
+        except OSError:
+            continue
+        # Duration comes from the timing file's own size-free header only when
+        # it is already cheap to get; otherwise the client asks per chapter
+        # when it actually opens one.
+        out[key] = {"bytes": size, "has_timing": int(timing.is_file())}
+    return out
 
 
 def read_chapter_audio(

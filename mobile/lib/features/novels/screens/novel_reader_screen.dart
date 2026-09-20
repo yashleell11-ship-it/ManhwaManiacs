@@ -225,12 +225,6 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
   /// paragraph already on screen does not re-aim the viewport.
   int _followedParagraph = -1;
 
-  /// A chapter that HAS a voice says so once, by revealing the controls.
-  ///
-  /// This is the reported bug rather than a nicety: the chrome sits behind a
-  /// tap that nothing advertises, so a chapter with audio looked identical to
-  /// one without and the feature was invisible on the phone.
-  bool _audioAnnounced = false;
 
   /// How long this reader has been read, for the reading-time statistic.
   final ReadingClock _clock = ReadingClock(DateTime.now());
@@ -713,7 +707,6 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
             token.isEmpty) {
           return const SizedBox.shrink();
         }
-        _announceAudio();
         final base = ref.read(apiBaseUrlProvider);
         final trimmed =
             base.endsWith('/') ? base.substring(0, base.length - 1) : base;
@@ -823,20 +816,6 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
     );
   }
 
-  /// Reveal the controls once, on the first chapter that turns out to have a
-  /// voice. Hidden again by the next tap, like any other chrome — no new
-  /// affordance and no new gesture.
-  void _announceAudio() {
-    if (_audioAnnounced) return;
-    _audioAnnounced = true;
-    // Post-frame because this is reached from inside a build: the provider
-    // resolves late and the reveal is a setState on this body.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _chromeVisible) return;
-      setState(() => _chromeVisible = true);
-    });
-  }
-
   @override
   Widget build(BuildContext context) {
     final chapter = widget.chapter;
@@ -873,6 +852,11 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
                           chapter: chapter,
                           surface: surface,
                           preferences: prefs,
+                          onListen: () {
+                            if (!_chromeVisible) {
+                              setState(() => _chromeVisible = true);
+                            }
+                          },
                         ),
                       ],
                     ),
@@ -958,11 +942,17 @@ class _ChapterHeading extends StatelessWidget {
     required this.chapter,
     required this.surface,
     required this.preferences,
+    required this.onListen,
   });
 
   final NovelChapter chapter;
   final NovelSurfaceColors surface;
   final NovelPreferences preferences;
+
+  /// Reveal the controls, where the player is. Deliberately not a second
+  /// player: [NovelAudioPlayerBar] owns the platform handle and must not be
+  /// mounted twice.
+  final VoidCallback onListen;
 
   @override
   Widget build(BuildContext context) {
@@ -1007,9 +997,54 @@ class _ChapterHeading extends StatelessWidget {
             textAlign: TextAlign.center,
             style: TextStyle(fontSize: 12, color: surface.muted),
           ),
+          // Listening is offered at the TOP of the chapter, where somebody
+          // deciding how to read it actually is. The player lives in the
+          // chrome behind a tap, which is fine once you know it is there and
+          // useless before: a chapter with a voice looked identical to one
+          // without.
+          //
+          // Its own Consumer rather than a callback threaded down from the
+          // body — the heading rebuilds only when the chapter changes, and
+          // this lookup answers "no" for almost the whole library.
+          Consumer(
+            builder: (context, ref, _) {
+              final key = (
+                sourceId: chapter.sourceId,
+                seriesKey: chapter.seriesKey,
+                chapterKey: chapter.chapterKey,
+              );
+              final audio = ref.watch(novelAudioProvider(key)).valueOrNull;
+              if (audio == null || !audio.available) {
+                return const SizedBox.shrink();
+              }
+              return Padding(
+                padding: const EdgeInsets.only(top: 18),
+                child: Center(
+                  child: OutlinedButton.icon(
+                    onPressed: onListen,
+                    icon: const Icon(Icons.headphones_rounded, size: 18),
+                    label: Text(
+                      'Listen to this chapter${_spoken(audio.totalMs)}',
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: surface.ink,
+                      side: BorderSide(color: surface.rule),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
         ],
       ),
     );
+  }
+
+  /// " · 13 min", or nothing when the render carried no timing map.
+  String _spoken(int totalMs) {
+    if (totalMs <= 0) return '';
+    final minutes = (totalMs / 60000).round();
+    return minutes <= 0 ? '' : ' · $minutes min';
   }
 }
 

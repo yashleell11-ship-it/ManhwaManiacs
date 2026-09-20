@@ -631,6 +631,18 @@ export function NovelChapterView({
               style={{ backgroundColor: surface.rule }}
               aria-hidden
             />
+            {/* At the TOP of the chapter, where somebody deciding how to read
+                it actually is. It used to sit after the last paragraph, which
+                meant a chapter with a voice looked identical to one without
+                unless you scrolled the whole way down. */}
+            {audio?.available && attributionRef ? (
+              <NovelAudioPlayer
+                chapter={attributionRef}
+                totalMs={audio.total_ms}
+                onTimeMs={onAudioTime}
+                surface={surface}
+              />
+            ) : null}
           </header>
 
           <ChapterBody
@@ -669,15 +681,6 @@ export function NovelChapterView({
               onChooseVoice={(name, voiceId) =>
                 setVoice.mutate({ name, voiceId })
               }
-            />
-          ) : null}
-
-          {audio?.available && attributionRef ? (
-            <NovelAudioPlayer
-              chapter={attributionRef}
-              totalMs={audio.total_ms}
-              onTimeMs={onAudioTime}
-              surface={surface}
             />
           ) : null}
 

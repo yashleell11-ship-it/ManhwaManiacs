@@ -31,13 +31,19 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from core.config import get_settings
 from core.rate_limit import bulk_limit, limiter, sources_limit
 from database.session import get_db
-from services.chapter_audio_store import chapter_paths, read_chapter_audio
+from services.chapter_audio_store import (
+    chapter_paths,
+    read_chapter_audio,
+    rendered_chapters,
+)
 from services.novel_attribution_service import (
     correct_cast_member,
     merge_alias,
     read_attribution,
     set_narrator_voice,
 )
+from database.models import NovelChapterCache
+from sqlalchemy import select
 from services.novel_service import NovelService, get_novel_service
 from services.voice_pack import is_known_voice, load_voices, sample_path
 
@@ -139,6 +145,49 @@ def get_novel_audio(
         "bytes": found.bytes,
         "total_ms": found.total_ms,
         "segments": list(found.segments),
+    }
+
+
+@router.get("/audio/series")
+@limiter.limit(sources_limit)
+def get_novel_series_audio(
+    request: Request,
+    response: Response,  # slowapi injects X-RateLimit-* headers into this
+    db: DbDep,
+    source: str = Query(..., min_length=1, max_length=64),
+    series: str = Query(..., min_length=1, max_length=512),
+) -> dict[str, object]:
+    """Which chapters of this book have audio.
+
+    One call so a table of contents can mark what is listenable. Asking per
+    chapter would be several hundred round trips for a long book, and every
+    one of them would answer "no".
+
+    The chapter list comes from the text cache, which is what bounds the
+    answer: audio only ever exists for a chapter that was cached when it was
+    rendered. That has an edge the client should not be surprised by — the
+    cache is an LRU, so an evicted chapter's audio is still on disk and still
+    plays, it just stops being advertised here until the text is fetched
+    again. A durable record of what has been rendered arrives with the job
+    table; until then this is honest about being derived.
+    """
+    keys = list(
+        db.execute(
+            select(NovelChapterCache.chapter_key).where(
+                NovelChapterCache.source_id == source,
+                NovelChapterCache.series_key == series,
+            )
+        ).scalars()
+    )
+    found = rendered_chapters(source, series, keys)
+    return {
+        "source_id": source,
+        "series_key": series,
+        "chapters": [
+            {"chapter_key": key, "bytes": meta["bytes"],
+             "has_timing": bool(meta["has_timing"])}
+            for key, meta in sorted(found.items())
+        ],
     }
 
 
