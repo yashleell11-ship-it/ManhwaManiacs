@@ -126,6 +126,24 @@ class TestVoiceAssignment:
 
         assert got == {}
 
+    def test_a_pov_character_still_gets_a_voice_when_they_are_not_the_only_pov(self):
+        # The series cast is for the WHOLE book. A character who narrates some
+        # chapters still SPEAKS in the ones somebody else narrates, and there
+        # they need a voice like anyone else — the chapter plan is what drops
+        # the narrator of that particular chapter.
+        #
+        # Measured on the real series: Tessia narrates 2 of 10 chapters but
+        # speaks 175 lines across 6 — more than anyone, the protagonist
+        # included. Excluding her from the series cast left her with no voice
+        # at all, so through all seven chapters Arthur narrates she was read
+        # in his narration voice, indistinguishable from the prose.
+        got = assign_voices(
+            [("Tessia", "female"), ("Myre", "female")],
+            [("f1", "female"), ("f2", "female")],
+        )
+
+        assert got == {"tessia": "f1", "myre": "f2"}
+
     def test_the_twelve_voice_ceiling_holds(self):
         cast = [(f"N{i}", "male") for i in range(30)]
         pack = [(f"m{i}", "male") for i in range(30)]

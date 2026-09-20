@@ -99,10 +99,31 @@ def main() -> int:
             for c in chapters
         }
     }
+    # Whether the series POV narrates EVERY chapter decides whether they need
+    # a character voice at all.
+    #
+    # In a single-POV book they never speak in anyone else's chapter, so a
+    # voice for them is a wasted slot out of twelve. In a book that rotates,
+    # they do — and excluding them here was a real bug: the series' busiest
+    # speaker, with 175 lines across six chapters, held NO voice and so read
+    # in the narrator's own voice through all seven chapters somebody else
+    # narrated. The per-chapter exclusion below is what implements "the
+    # narrator reads their own dialogue"; doing it here as well is what broke
+    # it.
+    narrated = [
+        attribution.read_attribution(
+            db, source_id, series_key, c["chapter_key"]
+        ).get("narrator")
+        for c in chapters
+    ]
+    told = [n for n in narrated if n]
+    sole = pov if told and all(
+        normalize_name(n) == normalize_name(pov or "") for n in told
+    ) else None
     voices = assign_voices(
         [(c.display_name, c.gender) for c in cast],
         [(c["voice_id"], c["gender"]) for c in pack["clips"] if c["voice_id"] not in narrators],
-        pov=pov,
+        pov=sole,
     )
     print(f"\nnarrator clips reserved: {sorted(narrators)}")
     print(f"character voices: {voices}")
@@ -113,9 +134,16 @@ def main() -> int:
     # listener hears. The column exists for exactly this.
     #
     # A locked row is an owner's decision and is left alone.
+    #
+    # Clearing matters as much as setting. This loop used to write only when
+    # `assigned` was truthy, so a character who lost their voice to a changed
+    # cast kept the old one — and the next character in line was handed the
+    # same clip. Measured on the real series: re-running after the POV changed
+    # gave Arthur and Wren BOTH libritts-251, which is worse than the bug it
+    # would have been fixing.
     for member in cast:
         assigned = voices.get(member.normalized_name)
-        if assigned and not member.locked and member.voice_id != assigned:
+        if not member.locked and member.voice_id != assigned:
             member.voice_id = assigned
     db.commit()
 
