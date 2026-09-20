@@ -134,6 +134,30 @@ class Changelog(BaseModel):
 # consume the exact same source of truth.
 _RELEASE_NOTES: list[ChangelogEntry] = [
     ChangelogEntry(
+        version="3.1.0",
+        build=50,
+        date="September 2026",
+        highlights=[
+            "The play button for a novel's audio is where you can actually "
+            "find it. It used to sit below the very last paragraph of the "
+            "chapter, so unless you scrolled to the end you never knew a "
+            "chapter had a voice at all. It is now with the rest of the "
+            "reader's controls, and a chapter that has audio shows them to "
+            "you once by itself",
+            "Pressing play takes you to the line being read, wherever in the "
+            "chapter you had stopped, and the page keeps up as it goes. Read "
+            "ahead if you like — it only follows when the voice leaves the "
+            "screen, so it will not drag you back",
+            "Lines already read stay faintly marked, with the sentence being "
+            "spoken brighter. Look away for a minute and you can see how far "
+            "the voice got without hunting for it",
+            "Characters who narrate some chapters of a book but not others "
+            "now get their own voice in the chapters they are only speaking "
+            "in. Tessia has more lines than anyone in The Beginning After The "
+            "End and was being read in the narrator's voice throughout",
+        ],
+    ),
+    ChangelogEntry(
         version="3.0.0",
         build=49,
         date="September 2026",
