@@ -1,0 +1,228 @@
+"""The audiobook render queue.
+
+Two properties carry the weight here, and both are about cost rather than
+correctness in the ordinary sense.
+
+A chapter is about nine minutes on a GPU shared with a training run, so
+queuing the same one twice is not a tidiness problem — it is eighteen minutes
+and two writers racing for one file. The guard is a partial unique index, so
+it holds against two requests in the same millisecond rather than only against
+two a user makes slowly.
+
+And rendering reads the chapter, so a chapter that is not cached would be
+fetched live from the source. A two-hundred-chapter queue over cache misses is
+a two-hundred-request scrape, which is how this project already lost two
+sources.
+"""
+
+from __future__ import annotations
+
+import json
+
+from database.models import NovelAudioJob, NovelChapterCache
+
+from tests.test_novels_flag import (  # noqa: F401
+    SERIES,
+    STUB_SOURCE,
+    novels_off,
+    novels_on,
+    stub_registered,
+)
+
+
+def cache_chapter(db, chapter_key, *, number=1.0, paragraphs=None):
+    db.add(
+        NovelChapterCache(
+            source_id=STUB_SOURCE,
+            series_key=SERIES,
+            chapter_key=chapter_key,
+            title=f"Chapter {number:g}",
+            chapter_number=number,
+            paragraphs=json.dumps(paragraphs or ["He turned and ran."]),
+            word_count=4,
+        )
+    )
+    db.commit()
+
+
+def ask(client, keys, **over):
+    body = {"source_id": STUB_SOURCE, "series_key": SERIES, "chapter_keys": keys}
+    body.update(over)
+    return client.post("/novels/audio/render", json=body)
+
+
+class TestEnqueue:
+    def test_a_cached_chapter_is_queued(self, novels_on, db_session):
+        cache_chapter(db_session, "ch-1")
+
+        body = ask(novels_on, ["ch-1"]).json()
+
+        assert [q["chapter_key"] for q in body["queued"]] == ["ch-1"]
+        assert body["skipped"] == []
+        row = db_session.query(NovelAudioJob).one()
+        assert row.status == "queued"
+        # Pinned to the text it was accepted against: a render whose chapter
+        # changed underneath produces a timing map pointing at moved words.
+        assert row.text_fingerprint
+
+    def test_an_uncached_chapter_is_refused_not_fetched(self, novels_on, db_session):
+        # The whole reason the gate exists. Queuing a miss would make the
+        # server scrape the source once per chapter.
+        body = ask(novels_on, ["never-seen"]).json()
+
+        assert body["queued"] == []
+        assert body["skipped"] == [
+            {"chapter_key": "never-seen", "reason": "chapter_not_cached"}
+        ]
+        assert db_session.query(NovelAudioJob).count() == 0
+
+    def test_the_same_chapter_cannot_be_queued_twice(self, novels_on, db_session):
+        cache_chapter(db_session, "ch-1")
+        ask(novels_on, ["ch-1"])
+
+        body = ask(novels_on, ["ch-1"]).json()
+
+        assert body["queued"] == []
+        assert body["skipped"] == [
+            {"chapter_key": "ch-1", "reason": "already_queued"}
+        ]
+        assert db_session.query(NovelAudioJob).count() == 1
+
+    def test_a_chapter_that_already_has_audio_is_skipped(
+        self, novels_on, db_session, tmp_path, monkeypatch
+    ):
+        from services.chapter_audio_store import chapter_paths
+
+        cache_chapter(db_session, "ch-1")
+        monkeypatch.setenv("MM_AUDIO_DIR", str(tmp_path))
+        audio, _ = chapter_paths(STUB_SOURCE, SERIES, "ch-1")
+        audio.parent.mkdir(parents=True, exist_ok=True)
+        audio.write_bytes(b"OggS")
+
+        body = ask(novels_on, ["ch-1"]).json()
+
+        assert body["skipped"] == [
+            {"chapter_key": "ch-1", "reason": "already_rendered"}
+        ]
+
+    def test_a_mixed_batch_answers_for_every_chapter(self, novels_on, db_session):
+        # Asking for a whole book normally finds some of it already done.
+        # Reporting that as a failure would be wrong.
+        cache_chapter(db_session, "ch-1")
+        cache_chapter(db_session, "ch-2", number=2)
+
+        body = ask(novels_on, ["ch-1", "ch-2", "ch-404"]).json()
+
+        assert {q["chapter_key"] for q in body["queued"]} == {"ch-1", "ch-2"}
+        assert [s["chapter_key"] for s in body["skipped"]] == ["ch-404"]
+
+    def test_one_bad_chapter_does_not_lose_the_batch(self, novels_on, db_session):
+        # Each job is flushed on its own precisely so a constraint failure is
+        # one chapter's problem.
+        cache_chapter(db_session, "ch-1")
+        ask(novels_on, ["ch-1"])
+        cache_chapter(db_session, "ch-2", number=2)
+
+        body = ask(novels_on, ["ch-1", "ch-2"]).json()
+
+        assert [q["chapter_key"] for q in body["queued"]] == ["ch-2"]
+        assert [s["reason"] for s in body["skipped"]] == ["already_queued"]
+
+    def test_the_batch_is_bounded(self, novels_on):
+        # Each chapter is ~9 minutes of GPU. A whole long book is a fair ask,
+        # but as a deliberate batch rather than one click booking days.
+        assert ask(novels_on, [f"ch-{i}" for i in range(201)]).status_code == 422
+
+    def test_an_empty_request_is_refused(self, novels_on):
+        assert ask(novels_on, []).status_code == 422
+
+
+class TestListing:
+    def test_jobs_for_a_book_are_listed_with_progress(self, novels_on, db_session):
+        cache_chapter(db_session, "ch-1")
+        ask(novels_on, ["ch-1"])
+        row = db_session.query(NovelAudioJob).one()
+        row.segment_count = 200
+        row.progress_segments = 50
+        row.status = "rendering"
+        db_session.commit()
+
+        job = novels_on.get(
+            "/novels/audio/jobs",
+            params={"source": STUB_SOURCE, "series": SERIES},
+        ).json()["jobs"][0]
+
+        assert job["status"] == "rendering"
+        # A fraction, because the client draws a bar and a segment count means
+        # nothing to a reader.
+        assert job["progress"] == 0.25
+
+    def test_progress_is_zero_rather_than_a_divide_by_zero(
+        self, novels_on, db_session
+    ):
+        cache_chapter(db_session, "ch-1")
+        ask(novels_on, ["ch-1"])
+
+        job = novels_on.get(
+            "/novels/audio/jobs",
+            params={"source": STUB_SOURCE, "series": SERIES},
+        ).json()["jobs"][0]
+
+        assert job["progress"] == 0.0
+
+    def test_active_jobs_span_every_book(self, novels_on, db_session):
+        # Somebody who queued a book and went to read something else still
+        # wants to know it is working.
+        cache_chapter(db_session, "ch-1")
+        ask(novels_on, ["ch-1"])
+
+        body = novels_on.get("/novels/audio/jobs/active").json()
+
+        assert len(body["jobs"]) == 1
+
+    def test_a_finished_job_is_not_active(self, novels_on, db_session):
+        cache_chapter(db_session, "ch-1")
+        ask(novels_on, ["ch-1"])
+        db_session.query(NovelAudioJob).one().status = "done"
+        db_session.commit()
+
+        assert novels_on.get("/novels/audio/jobs/active").json()["jobs"] == []
+
+
+class TestCancel:
+    def test_a_queued_job_can_be_cancelled(self, novels_on, db_session):
+        cache_chapter(db_session, "ch-1")
+        job_id = ask(novels_on, ["ch-1"]).json()["queued"][0]["job_id"]
+
+        assert novels_on.delete(f"/novels/audio/jobs/{job_id}").status_code == 204
+        db_session.expire_all()
+        assert db_session.get(NovelAudioJob, job_id).status == "cancelled"
+
+    def test_cancelling_frees_the_chapter_to_be_asked_for_again(
+        self, novels_on, db_session
+    ):
+        # The unique index is partial for exactly this: it binds only while a
+        # job is in flight.
+        cache_chapter(db_session, "ch-1")
+        job_id = ask(novels_on, ["ch-1"]).json()["queued"][0]["job_id"]
+        novels_on.delete(f"/novels/audio/jobs/{job_id}")
+
+        body = ask(novels_on, ["ch-1"]).json()
+
+        assert [q["chapter_key"] for q in body["queued"]] == ["ch-1"]
+
+    def test_an_unknown_job_is_404(self, novels_on):
+        assert novels_on.delete("/novels/audio/jobs/nope").status_code == 404
+
+    def test_a_finished_job_cannot_be_cancelled(self, novels_on, db_session):
+        cache_chapter(db_session, "ch-1")
+        job_id = ask(novels_on, ["ch-1"]).json()["queued"][0]["job_id"]
+        db_session.get(NovelAudioJob, job_id).status = "done"
+        db_session.commit()
+
+        assert novels_on.delete(f"/novels/audio/jobs/{job_id}").status_code == 404
+
+
+class TestFlagOff:
+    def test_the_queue_is_a_stock_404_when_novels_are_off(self, novels_off):
+        assert novels_off.get("/novels/audio/jobs/active").status_code == 404

@@ -979,6 +979,89 @@ class NovelChapterAttribution(Base):
     attributed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class NovelAudioJob(Base):
+    """One request to turn a chapter into audio, and what became of it.
+
+    NOT a cache table, and the distinction is load-bearing. A cache row can be
+    dropped at any instant because it can be refetched; this row is the only
+    record that a chapter cost nine minutes on a GPU shared with a training
+    run. Worse, membership in ``CACHE_TABLES`` means a backup DELETEs the
+    table — which, taken while a worker is six minutes into a render, would
+    leave that worker heartbeating against a row that no longer exists and
+    throw the work away. The same reasoning is already written out for
+    ``NovelChapterAttribution``: rows that are re-BOUGHT rather than
+    re-fetched stay out.
+
+    The AUDIO is on the filesystem and deliberately outside the backup too —
+    a thousand chapters is over a gigabyte of Opus, which is exactly the class
+    of payload that took a nightly dump from 9 MB to 45 MB. Audio is
+    re-renderable; this table is what says so.
+
+    Stores only what schedules and reports a render. No summary, no
+    characters, no anything a reader would learn the story from —
+    ``frontend/AGENTS.md`` records that extraction as permanently abandoned,
+    and a job row is as tempting a place to reintroduce it as a cast row.
+    """
+
+    __tablename__ = "novel_audio_jobs"
+    __table_args__ = (
+        # The whole double-enqueue guard: a second press of "Make audiobook"
+        # on a chapter already in flight is an IntegrityError the service
+        # turns into "already queued", not a second nine-minute render.
+        Index(
+            "uq_novel_audio_job_active",
+            "source_id",
+            "series_key",
+            "chapter_key",
+            unique=True,
+            sqlite_where=text(
+                "status IN ('queued','planning','rendering')"
+            ),
+        ),
+        Index("ix_novel_audio_job_pick", "status", "priority", "created_at"),
+        Index("ix_novel_audio_job_series", "source_id", "series_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    source_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    series_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    chapter_key: Mapped[str] = mapped_column(String(512), nullable=False)
+
+    #: Display only, so a queue can be listed in reading order.
+    chapter_number: Mapped[float | None] = mapped_column(Float)
+
+    #: The text this job was accepted against. A render whose chapter changed
+    #: underneath it produces a timing map that points at words that moved,
+    #: and a highlight on the wrong words is worse than none.
+    text_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    worker_id: Mapped[str | None] = mapped_column(String(64))
+
+    #: Wall clock, never a monotonic one: the reaper that reads this runs in a
+    #: different process from the worker that wrote it, and usually after a
+    #: restart.
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime)
+
+    segment_count: Mapped[int | None] = mapped_column(Integer)
+    progress_segments: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+
+    error_code: Mapped[str | None] = mapped_column(String(48))
+    #: Truncated at write. A raw traceback in a row a client can read is both
+    #: a disclosure and an unbounded column.
+    error_detail: Mapped[str | None] = mapped_column(String(500))
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
 class NovelSeriesCast(Base):
     """One character who may get their own voice, in one series.
 

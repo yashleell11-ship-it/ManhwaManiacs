@@ -44,6 +44,13 @@ from services.novel_attribution_service import (
 )
 from database.models import NovelChapterCache
 from sqlalchemy import select
+from services.novel_render_queue import (
+    active_jobs,
+    as_json,
+    cancel,
+    enqueue,
+    series_jobs,
+)
 from services.novel_service import NovelService, get_novel_service
 from services.voice_pack import is_known_voice, load_voices, sample_path
 
@@ -189,6 +196,97 @@ def get_novel_series_audio(
             for key, meta in sorted(found.items())
         ],
     }
+
+
+class AudioRenderRequest(BaseModel):
+    """Ask for chapters to be narrated."""
+
+    model_config = {"extra": "ignore"}
+
+    source_id: str = Field(min_length=1, max_length=64)
+    series_key: str = Field(min_length=1, max_length=512)
+
+    #: Bounded because each one is about nine minutes on a shared GPU. A
+    #: whole long book is a legitimate ask, but it should be a deliberate one
+    #: made in batches rather than a single click that books three days of
+    #: card time.
+    chapter_keys: list[str] = Field(min_length=1, max_length=200)
+    priority: int = Field(default=0, ge=0, le=9)
+
+
+@router.post("/audio/render")
+@limiter.limit(sources_limit)
+def request_novel_audio(
+    request: Request,
+    response: Response,
+    body: AudioRenderRequest,
+    db: DbDep,
+) -> dict[str, object]:
+    """Queue chapters for narration.
+
+    POST and not GET for the same reason ``/novels/chapters`` is: the body is
+    a list of opaque connector keys that routinely contain slashes, and two
+    hundred of them do not belong in a query string.
+
+    Every chapter is answered for — queued with an id, or skipped with a
+    reason. Partial success is the ordinary outcome when somebody asks for a
+    whole book, and calling it a failure would be wrong.
+    """
+    result = enqueue(
+        db, body.source_id, body.series_key, body.chapter_keys,
+        priority=body.priority,
+    )
+    db.commit()
+    return {"queued": list(result.queued), "skipped": list(result.skipped)}
+
+
+@router.get("/audio/jobs")
+@limiter.limit(sources_limit)
+def list_novel_audio_jobs(
+    request: Request,
+    response: Response,
+    db: DbDep,
+    source: str = Query(..., min_length=1, max_length=64),
+    series: str = Query(..., min_length=1, max_length=512),
+) -> dict[str, object]:
+    """Every render asked for on this book, and where each one got to."""
+    return {"jobs": [as_json(job) for job in series_jobs(db, source, series)]}
+
+
+@router.get("/audio/jobs/active")
+@limiter.limit(sources_limit)
+def list_active_novel_audio_jobs(
+    request: Request,
+    response: Response,
+    db: DbDep,
+) -> dict[str, object]:
+    """Everything still being narrated, across every book.
+
+    Deliberately not filtered by series: somebody who queued a book and then
+    went to read something else still wants to know it is working.
+    """
+    return {"jobs": [as_json(job) for job in active_jobs(db)]}
+
+
+@router.delete("/audio/jobs/{job_id}", status_code=204)
+@limiter.limit(sources_limit)
+def cancel_novel_audio_job(
+    request: Request,
+    response: Response,
+    job_id: str,
+    db: DbDep,
+) -> Response:
+    """Stop a render.
+
+    A job already on the card is marked cancelled rather than killed — nothing
+    here can reach into the render box. It finds out on its next heartbeat.
+    Saying "stopped" and meaning "will stop shortly" is the honest version;
+    pretending to have killed it is not.
+    """
+    if not cancel(db, job_id):
+        raise StarletteHTTPException(status_code=404, detail="Not Found")
+    db.commit()
+    return Response(status_code=204)
 
 
 @router.get("/audio/file")

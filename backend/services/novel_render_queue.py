@@ -1,0 +1,207 @@
+"""The audiobook render queue: what has been asked for, and what became of it.
+
+The server cannot make audio. A chapter of speech is roughly nine minutes on a
+GPU that lives in the owner's house, behind a home NAT, asleep half the time
+and frequently busy training something else. So this is a pull queue: the
+server records what is wanted, the box comes and asks for work.
+
+Two rules do most of the work here.
+
+**Only chapters already in the text cache may be queued.** Rendering reads the
+chapter, and reading a chapter that is not cached makes the server fetch it
+live from the source. A two-hundred-chapter queue would therefore be a
+two-hundred-request scrape, which is precisely how this project already lost
+Toonily and Bbato. The same SELECT that proves the row exists yields the
+fingerprint the job is pinned to.
+
+**A chapter already in flight cannot be queued twice.** Pressing the button
+again is cheap and idempotent rather than two renders racing to write one
+file. The database enforces it with a partial unique index, so the guard holds
+even against two requests in the same millisecond — this is not a check-then-
+act in Python.
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from connectors.ids import fully_unquote
+from database.models import NovelAudioJob, NovelChapterCache
+from services.chapter_audio_store import chapter_paths
+from services.novel_attribution_service import chapter_fingerprint
+
+#: In flight. A chapter in any of these has a render either waiting or
+#: happening, and must not be queued again.
+ACTIVE = ("queued", "planning", "rendering")
+
+#: Nothing further will happen to a job in one of these without a new request.
+TERMINAL = ("done", "failed", "cancelled")
+
+#: How long a claim is good for. Long enough that a slow chapter does not lose
+#: its lease mid-render, short enough that a box which simply slept does not
+#: wedge a chapter for an hour.
+LEASE = timedelta(minutes=10)
+
+#: A render that has failed this many times stops being retried. Three is
+#: enough to ride out a reboot and a dropped connection, and few enough that a
+#: chapter which genuinely cannot be rendered does not burn the card forever.
+MAX_ATTEMPTS = 3
+
+
+@dataclass(frozen=True, slots=True)
+class Enqueued:
+    """What came of one request to render a list of chapters."""
+
+    queued: tuple[dict[str, str], ...]
+    skipped: tuple[dict[str, str], ...]
+
+
+def _now() -> datetime:
+    from database.models import utcnow
+
+    return utcnow()
+
+
+def enqueue(
+    db: Session,
+    source_id: str,
+    series_key: str,
+    chapter_keys: list[str],
+    *,
+    priority: int = 0,
+) -> Enqueued:
+    """Ask for these chapters to be narrated.
+
+    Every chapter is answered for: either it is queued with a job id, or it is
+    skipped with a reason the UI can show. A partial success is the ordinary
+    outcome — asking for a whole book will usually find some chapters already
+    rendered — and reporting it as a failure would be wrong.
+    """
+    series_key = fully_unquote(series_key)
+    queued: list[dict[str, str]] = []
+    skipped: list[dict[str, str]] = []
+
+    for raw_key in chapter_keys:
+        key = fully_unquote(raw_key)
+
+        audio, _timing = chapter_paths(source_id, series_key, key)
+        if audio.is_file():
+            skipped.append({"chapter_key": key, "reason": "already_rendered"})
+            continue
+
+        cached = db.execute(
+            select(
+                NovelChapterCache.paragraphs, NovelChapterCache.chapter_number
+            ).where(
+                NovelChapterCache.source_id == source_id,
+                NovelChapterCache.series_key == series_key,
+                NovelChapterCache.chapter_key == key,
+            )
+        ).first()
+        if cached is None:
+            # Never enqueue a chapter the server would have to fetch. See the
+            # module docstring: a bulk queue over cache misses is a scrape.
+            skipped.append({"chapter_key": key, "reason": "chapter_not_cached"})
+            continue
+
+        try:
+            paragraphs = json.loads(cached[0]) or []
+        except ValueError:
+            skipped.append({"chapter_key": key, "reason": "chapter_unreadable"})
+            continue
+
+        job = NovelAudioJob(
+            id=uuid.uuid4().hex,
+            source_id=source_id,
+            series_key=series_key,
+            chapter_key=key,
+            chapter_number=cached[1],
+            text_fingerprint=chapter_fingerprint(paragraphs),
+            status="queued",
+            priority=priority,
+        )
+        db.add(job)
+        try:
+            # Flushed per job so the unique index answers now: a failure here
+            # is one chapter's "already queued", not a lost batch.
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            skipped.append({"chapter_key": key, "reason": "already_queued"})
+            continue
+        queued.append({"job_id": job.id, "chapter_key": key})
+
+    return Enqueued(queued=tuple(queued), skipped=tuple(skipped))
+
+
+def series_jobs(
+    db: Session, source_id: str, series_key: str
+) -> list[NovelAudioJob]:
+    """Every job for one book, newest request first."""
+    return list(
+        db.execute(
+            select(NovelAudioJob)
+            .where(
+                NovelAudioJob.source_id == source_id,
+                NovelAudioJob.series_key == fully_unquote(series_key),
+            )
+            .order_by(NovelAudioJob.created_at.desc())
+        ).scalars()
+    )
+
+
+def active_jobs(db: Session) -> list[NovelAudioJob]:
+    """Everything still in flight, across every book.
+
+    For the badge that says something is being narrated. Deliberately small
+    and unfiltered by series: a reader who queued a book then went somewhere
+    else still wants to know it is working.
+    """
+    return list(
+        db.execute(
+            select(NovelAudioJob)
+            .where(NovelAudioJob.status.in_(ACTIVE))
+            .order_by(NovelAudioJob.priority.desc(), NovelAudioJob.created_at)
+        ).scalars()
+    )
+
+
+def cancel(db: Session, job_id: str) -> bool:
+    """Stop a job. Returns whether there was one to stop.
+
+    A job being rendered right now is marked cancelled rather than killed —
+    nothing here can reach into the box. The worker finds out on its next
+    heartbeat and drops the work it has done, which is the right trade: the
+    alternative is a server that lies about having stopped.
+    """
+    job = db.get(NovelAudioJob, job_id)
+    if job is None or job.status in TERMINAL:
+        return False
+    job.status = "cancelled"
+    job.finished_at = _now()
+    job.updated_at = _now()
+    return True
+
+
+def as_json(job: NovelAudioJob) -> dict[str, object]:
+    """One job, as a client reads it."""
+    total = job.segment_count or 0
+    return {
+        "job_id": job.id,
+        "chapter_key": job.chapter_key,
+        "chapter_number": job.chapter_number,
+        "status": job.status,
+        # A fraction rather than a count: the client shows a bar, and the
+        # number of segments in a chapter is meaningless to a reader.
+        "progress": (job.progress_segments / total) if total else 0.0,
+        "attempts": job.attempts,
+        "error_code": job.error_code,
+        "error_detail": job.error_detail,
+    }

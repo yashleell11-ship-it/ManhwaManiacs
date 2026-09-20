@@ -90,9 +90,15 @@ def test_attribution_and_cast_are_never_treated_as_cache():
         "novel_series_cast",
         "novel_series_alias",
         "novel_series_cast_state",
+        # And the render queue, which is worse than expensive: a backup
+        # DELETEs every cache table, so a dump taken while the render box is
+        # six minutes into a chapter would leave it heartbeating against a row
+        # that no longer exists and throw the work away.
+        "novel_audio_jobs",
     ):
         assert table not in CACHE_TABLES, (
             f"{table} is in CACHE_TABLES, so every backup drops it; "
-            "attribution costs money to rebuild and owner corrections cannot "
-            "be rebuilt at all"
+            "attribution costs money to rebuild, owner corrections cannot "
+            "be rebuilt at all, and a dropped render job discards GPU-hours "
+            "already spent"
         )
