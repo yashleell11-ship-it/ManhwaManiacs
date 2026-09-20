@@ -16,16 +16,31 @@ import 'package:manhwamaniacs/features/downloads/store/downloads_db.dart';
 /// guess from a page count of 1.
 enum DownloadKind {
   manga,
-  novel;
+  novel,
 
-  static DownloadKind fromWire(String? value) =>
-      value == kNovelDownloadKind ? DownloadKind.novel : DownloadKind.manga;
+  /// A chapter read aloud. One opus blob, stored as its own row beside the
+  /// text — see [kAudioDownloadKind] for why it is not a second page on the
+  /// novel row.
+  audio;
 
-  String get wire => this == DownloadKind.novel
-      ? kNovelDownloadKind
-      : kMangaDownloadKind;
+  static DownloadKind fromWire(String? value) => switch (value) {
+    kNovelDownloadKind => DownloadKind.novel,
+    kAudioDownloadKind => DownloadKind.audio,
+    _ => DownloadKind.manga,
+  };
+
+  String get wire => switch (this) {
+    DownloadKind.novel => kNovelDownloadKind,
+    DownloadKind.audio => kAudioDownloadKind,
+    DownloadKind.manga => kMangaDownloadKind,
+  };
 
   bool get isNovel => this == DownloadKind.novel;
+
+  bool get isAudio => this == DownloadKind.audio;
+
+  /// Prose or narration — either way, not a page loop.
+  bool get isNovelSide => this == DownloadKind.novel || this == DownloadKind.audio;
 }
 
 class SavedChapter {

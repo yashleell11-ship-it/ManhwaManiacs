@@ -343,8 +343,21 @@ class DownloadsStore {
   /// The one blob number a novel chapter's text lives at.
   static const int novelTextBlobNumber = 1;
 
+  /// A chapter's narration, on its own row. Same blob number because the
+  /// row holds exactly one blob either way — the ROW's kind says which.
+  static const int audioBlobNumber = 1;
+
   /// Writes [chapter] (a [NovelChapter.toStoredJson] map) as this chapter's
   /// single blob. Idempotent for the same text, exactly like [savePage].
+  /// Store one chapter's narration.
+  ///
+  /// Goes through [savePage] like everything else, so the opus is
+  /// content-addressed in the shared `blobs` table: two profiles reading the
+  /// same book share one file, and the bytes are released only when the last
+  /// row lets go.
+  Future<void> saveAudio({required int rowId, required List<int> bytes}) =>
+      savePage(rowId: rowId, pageNumber: audioBlobNumber, bytes: bytes);
+
   Future<void> saveNovelText({
     required int rowId,
     required Map<String, dynamic> chapter,
@@ -541,14 +554,25 @@ class DownloadsStore {
   /// [deleteChapterAndBlobs]); a no-op if [id] has no row in this scope.
   Future<void> deleteDownload(ChapterIdentity id) async {
     final db = await database;
-    final row = await _getRow(db, id);
-    if (row == null) return;
-    await deleteChapterAndBlobs(
-      db: db,
-      blobStore: await blobStore,
-      chapterRowId: row[DownloadsSchema.colId]! as int,
-      scopeId: scopeId,
-    );
+    final store = await blobStore;
+
+    // The chapter AND its narration. The audio row is invisible to every
+    // screen, so leaving it behind strands a couple of megabytes that nothing
+    // will show and nothing will collect — its blob refcount is still held,
+    // so the orphan sweep will not take it either.
+    //
+    // Both go through the same delete, so refcounting, the freed-bytes total
+    // and the scope predicate are identical for each.
+    for (final target in {id, audioIdentity(id)}) {
+      final row = await _getRow(db, target);
+      if (row == null) continue;
+      await deleteChapterAndBlobs(
+        db: db,
+        blobStore: store,
+        chapterRowId: row[DownloadsSchema.colId]! as int,
+        scopeId: scopeId,
+      );
+    }
   }
 
   // ── Progress outbox ────────────────────────────────────────────────────

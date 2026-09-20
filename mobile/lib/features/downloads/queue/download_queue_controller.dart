@@ -564,6 +564,13 @@ class DownloadQueueController extends Notifier<DownloadQueueState> {
     // Prose takes a different fetch and a different blob shape, but the same
     // row, the same retry bound and the same completeness guard — see
     // [_downloadOneNovelChapter].
+    if (chapter.kind.isAudio) {
+      return _downloadOneAudioChapter(
+        store,
+        chapter,
+        reportsProgress: reportsProgress,
+      );
+    }
     if (chapter.kind.isNovel) {
       return _downloadOneNovelChapter(
         store,
@@ -641,6 +648,62 @@ class DownloadQueueController extends Notifier<DownloadQueueState> {
   /// only difference a window makes down here. Everything after the fetch is
   /// identical either way, deliberately: a whole-book download is not a
   /// separate pipeline, it is this one with fewer round trips.
+  /// One chapter's narration: a single opus, stored like any other blob.
+  ///
+  /// Its own row rather than a page on the text row, so the two download,
+  /// retry, fail and delete independently — and so a reader is never kept
+  /// from a chapter's TEXT while two megabytes of speech arrive.
+  ///
+  /// Nothing else in the queue learns a new shape: the same request gate, the
+  /// same retry bound, the same completeness guard, the same blob store with
+  /// its refcounting and storage cap.
+  Future<_ChapterOutcome> _downloadOneAudioChapter(
+    DownloadsStore store,
+    SavedChapter chapter, {
+    required bool reportsProgress,
+  }) async {
+    final result = await _gate.run(
+      () => ref.read(novelsRepositoryProvider).audioBytes(
+            sourceId: chapter.sourceId,
+            seriesKey: chapter.seriesKey,
+            chapterKey: chapter.chapterKey,
+          ),
+    );
+    if (result.isErr) {
+      return _recordChapterFailure(store, chapter, result.error.userMessage);
+    }
+    final bytes = result.value;
+    if (bytes.isEmpty) {
+      // The server has no audio for this chapter. Not retryable: waiting will
+      // not produce it, and a render has to be asked for.
+      return _recordChapterFailure(
+        store, chapter, 'This chapter has not been narrated yet.',
+      );
+    }
+
+    await store.updateManifestInfo(
+      rowId: chapter.rowId,
+      pageCount: 1,
+      chapterNumber: chapter.chapterNumber,
+      title: chapter.title,
+    );
+    if (reportsProgress) _reportPageProgress(done: 0, total: 1);
+
+    try {
+      await store.saveAudio(rowId: chapter.rowId, bytes: bytes);
+    } catch (error) {
+      return _recordChapterFailure(store, chapter, 'Could not save the audio.');
+    }
+    if (reportsProgress) _reportPageProgress(done: 1, total: 1);
+
+    if (_cancelledRowIds.contains(chapter.rowId)) {
+      return _ChapterOutcome.cancelled;
+    }
+    final completed = await store.markCompleteIfAllPagesPresent(chapter.rowId);
+    if (completed) return _ChapterOutcome.completed;
+    return _recordChapterFailure(store, chapter, 'The audio failed to save.');
+  }
+
   Future<_ChapterOutcome> _downloadOneNovelChapter(
     DownloadsStore store,
     SavedChapter chapter, {

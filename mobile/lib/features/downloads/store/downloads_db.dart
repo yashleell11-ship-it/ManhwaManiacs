@@ -99,6 +99,16 @@ const _dbVersion = 3;
 const String kMangaDownloadKind = 'manga';
 const String kNovelDownloadKind = 'novel';
 
+/// A chapter's NARRATION, stored beside its text rather than inside it.
+///
+/// Its own row because a novel chapter settles `ready` the moment its one
+/// text blob lands. Hanging a 2 MB opus off that row would make the TEXT
+/// unreadable offline until the audio finished, and a failed audio fetch
+/// would fail the chapter. Separate rows download, retry, fail and delete
+/// independently, and both are ordinary rows to refcounting, the storage
+/// cap, retention and export.
+const String kAudioDownloadKind = 'audio';
+
 /// The on-device store's database file name, under
 /// `getApplicationSupportDirectory()` — deliberately **not**
 /// `getApplicationDocumentsDirectory()` (that's reserved for blob bytes so
