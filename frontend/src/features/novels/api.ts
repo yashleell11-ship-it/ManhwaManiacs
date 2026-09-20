@@ -1,4 +1,4 @@
-import { http, sourceChapterQuery } from "@/services/http";
+import { http, requestBlob, sourceChapterQuery } from "@/services/http";
 import type { ChapterId, SeriesId } from "@/types/api";
 import { bucketCount } from "./progress";
 import { countWords } from "./reading-time";
@@ -8,6 +8,7 @@ import type {
   NovelChapterContent,
   NovelChapterPayload,
   NovelChapterWindowPayload,
+  NovelVoicePayload,
 } from "./types";
 
 /**
@@ -99,6 +100,67 @@ export const novelsApi = {
    * bucket once. Callers must bound the list — `boundedWindow` in
    * `chapter-window.ts` is the guard — because over the cap is a 413.
    */
+  /**
+   * Every voice a character can be given, deepest first within each gender.
+   *
+   * Served rather than shipped in the bundle because the pack is data on the
+   * server: a client carrying its own list would disagree with the renderer
+   * the moment a voice was added, and offer one that cannot be rendered.
+   */
+  voices: () => http.get<{ voices: NovelVoicePayload[] }>("/novels/voices"),
+
+  /**
+   * The clip of a voice introducing itself, as an object URL.
+   *
+   * Through `requestBlob` and NOT `<audio src>`, for the same reason chapter
+   * audio is (see `audio-url.ts`): `mm_session` is httpOnly and `SameSite=lax`,
+   * so a browser-managed subresource request to the API origin carries no
+   * session and loads a 401. A preview clip is tens of kilobytes, so the cost
+   * that makes this a real trade-off for a whole chapter is not one here.
+   *
+   * The caller owns the URL and must revoke it.
+   */
+  voiceSampleObjectUrl: async (voiceId: string) => {
+    const { blob } = await requestBlob("/novels/voices/sample", {
+      query: { voice: voiceId },
+    });
+    return URL.createObjectURL(blob);
+  },
+
+  /**
+   * Give a character a voice by hand, and lock it.
+   *
+   * Locking is the point: gender is recomputed from pronoun counts on every
+   * recast, and somebody who has listened to the book knows things the counts
+   * do not.
+   */
+  setCastVoice: (ref: SeriesId, name: string, voiceId: string | null) =>
+    http.post<{
+      name: string;
+      gender: string;
+      voice_id: string | null;
+      locked: boolean;
+    }>("/novels/cast", {
+      source_id: ref.sourceId,
+      series_key: ref.seriesKey,
+      name,
+      voice_id: voiceId,
+    }),
+
+  /**
+   * The voice that reads narration belonging to nobody in the cast.
+   *
+   * Separate from a cast member because the narrator is a property of the
+   * BOOK. A chapter narrated by a character still reads in that character's
+   * own voice — they are the same person. `null` restores the derived default.
+   */
+  setNarratorVoice: (ref: SeriesId, voiceId: string | null) =>
+    http.post<{ narrator_voice_id: string | null }>("/novels/narrator", {
+      source_id: ref.sourceId,
+      series_key: ref.seriesKey,
+      voice_id: voiceId,
+    }),
+
   chapterWindow: (ref: SeriesId, chapterKeys: readonly string[]) =>
     http.post<NovelChapterWindowPayload>("/novels/chapters", {
       source_id: ref.sourceId,

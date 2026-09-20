@@ -1,6 +1,11 @@
 "use client";
 
-import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 import { useEffect, useMemo, useReducer } from "react";
 import { useBootstrapStatus } from "@/features/auth/hooks";
 import { useSources } from "@/features/sources/hooks";
@@ -271,4 +276,64 @@ export function useCachedNovelWordCounts(
     // which is exactly the "unnecessary dependency" the rule cannot see.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queryClient, sourceId, seriesKey, revision]);
+}
+
+/**
+ * Every voice a character can be given.
+ *
+ * Per-server and effectively static — the pack changes when somebody drops a
+ * clip on the box, not when a reader does anything — so it is cached hard and
+ * shared by every chapter of every book.
+ *
+ * A failure resolves to no voices rather than an error: the picker simply does
+ * not offer itself, and the reader keeps the automatic casting they had.
+ */
+export function useNovelVoices(enabled: boolean) {
+  return useQuery({
+    queryKey: [...NOVELS_KEY, "voices"],
+    queryFn: () => novelsApi.voices(),
+    enabled,
+    staleTime: Infinity,
+    retry: false,
+  });
+}
+
+/**
+ * Pin the voice for one character, or for the series' narration.
+ *
+ * `name === null` means the narrator, which is a different endpoint because it
+ * is a property of the BOOK rather than of somebody in it.
+ *
+ * Invalidates the attribution query on success: the cast it returns carries
+ * `voice_id`, so leaving it cached would show the old voice next to the new
+ * choice until something else happened to refetch.
+ */
+export function useSetNovelVoice(ref: ChapterId | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    // The two endpoints answer different shapes and the caller needs neither
+    // — the attribution refetch below is what updates the panel — so this
+    // resolves to void rather than to a union nothing reads.
+    mutationFn: async ({
+      name,
+      voiceId,
+    }: {
+      name: string | null;
+      voiceId: string | null;
+    }): Promise<void> => {
+      if (!ref) throw new Error("no chapter");
+      const series = { sourceId: ref.sourceId, seriesKey: ref.seriesKey };
+      if (name === null) {
+        await novelsApi.setNarratorVoice(series, voiceId);
+        return;
+      }
+      await novelsApi.setCastVoice(series, name, voiceId);
+    },
+    onSuccess: () => {
+      if (!ref) return;
+      void queryClient.invalidateQueries({
+        queryKey: novelAttributionQueryKey(ref),
+      });
+    },
+  });
 }

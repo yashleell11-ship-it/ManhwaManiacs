@@ -28,7 +28,12 @@ import { BookmarkNotice } from "@/features/bookmarks";
 import { setReaderScrollTop } from "@/features/reader/scroll-preparation";
 import { tintParagraph, type SpeakerSpan, type TintedRun } from "@/features/novels/speaker-tint";
 import { speakerHues } from "@/features/novels/speaker-tint";
-import { useNovelAttribution, useNovelAudio } from "@/features/novels/hooks";
+import {
+  useNovelAttribution,
+  useNovelAudio,
+  useNovelVoices,
+  useSetNovelVoice,
+} from "@/features/novels/hooks";
 import { NovelAudioPlayer } from "@/features/novels/components/NovelAudioPlayer";
 import { NovelCastPanel } from "@/features/novels/components/NovelCastPanel";
 import { createHighlighter } from "@/features/novels/audio-highlight";
@@ -229,6 +234,10 @@ export function NovelChapterView({
   );
 
   const [castOpen, setCastOpen] = useState(false);
+  // Fetched only when the panel opens: most readers never cast anybody, and
+  // the roster is a request they should not spend to turn a page.
+  const { data: voices } = useNovelVoices(castOpen);
+  const setVoice = useSetNovelVoice(attributionRef);
 
   // Counted from the spans actually shown, not from the series totals: the
   // panel answers "who speaks in THIS chapter", and a series-wide number would
@@ -654,6 +663,12 @@ export function NovelChapterView({
               narrator={attribution?.narrator ?? null}
               surface={surface}
               onClose={() => setCastOpen(false)}
+              voices={voices?.voices}
+              narratorVoiceId={attribution?.narrator_voice_id ?? null}
+              saving={setVoice.isPending}
+              onChooseVoice={(name, voiceId) =>
+                setVoice.mutate({ name, voiceId })
+              }
             />
           ) : null}
 

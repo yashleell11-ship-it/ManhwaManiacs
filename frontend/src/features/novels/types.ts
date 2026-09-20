@@ -107,6 +107,8 @@ export type NovelAttributionPayload = {
   spans: NovelSpeakerSpanPayload[];
   /** Ordered by how much each speaks, which is the order colours are assigned. */
   cast: { name: string; gender: string; voice_id: string | null }[];
+  /** The series' pinned narration voice, or null to use the derived default. */
+  narrator_voice_id: string | null;
 };
 
 
@@ -128,4 +130,27 @@ export type NovelAudioPayload = {
   bytes: number;
   total_ms: number;
   segments: NovelAudioSegmentPayload[];
+};
+
+/**
+ * One voice a character can be given.
+ *
+ * `name` and `character` are what a person actually chooses on — nobody picks
+ * between `libritts-2803` and `libritts-251`. `pitch_hz` is kept because it is
+ * the one number that orders the list the way people ask for it ("something
+ * deeper"), and the licence travels with the voice because a voice that cannot
+ * say where it came from is not one this project will use.
+ */
+export type NovelVoicePayload = {
+  voice_id: string;
+  name: string;
+  /** Two words on how it reads, e.g. "deep, steady". */
+  character: string;
+  gender: string;
+  pitch_hz: number;
+  expressiveness: number;
+  seconds: number;
+  license: string;
+  attribution: string;
+  transcript: string;
 };

@@ -15,11 +15,18 @@
  * different hat.
  */
 
+import { useState } from "react";
+import { NovelVoicePicker } from "./NovelVoicePicker";
+import type { NovelVoicePayload } from "../types";
+
 export type CastMember = {
   name: string;
   gender: string;
   voice_id: string | null;
 };
+
+/** The narrator is cast from the same roster, under its own key. */
+const NARRATOR = "\u0000narrator";
 
 export function NovelCastPanel({
   cast,
@@ -28,6 +35,10 @@ export function NovelCastPanel({
   narrator,
   surface,
   onClose,
+  voices,
+  narratorVoiceId,
+  onChooseVoice,
+  saving,
 }: {
   cast: readonly CastMember[];
   hues: ReadonlyMap<string, number>;
@@ -37,7 +48,21 @@ export function NovelCastPanel({
   narrator: string | null;
   surface: { bg: string; ink: string; muted: string; rule: string };
   onClose: () => void;
+  /** Every voice on offer. Empty when no pack is installed. */
+  voices?: readonly NovelVoicePayload[];
+  /** The series' narration voice, when one has been pinned. */
+  narratorVoiceId?: string | null;
+  /** `null` as the name means the narrator. Absent = read-only panel. */
+  onChooseVoice?: (name: string | null, voiceId: string | null) => void;
+  saving?: boolean;
 }) {
+  // Which row has its picker open. One at a time: this panel sits inside the
+  // page, and thirty voices under every character is a wall.
+  const [open, setOpen] = useState<string | null>(null);
+  const canCast = Boolean(onChooseVoice && voices && voices.length > 0);
+  const voiceName = (id: string | null) =>
+    voices?.find((v) => v.voice_id === id)?.name ?? null;
+
   return (
     <div
       className="mx-auto mt-3 max-w-2xl rounded-lg border px-4 py-3"
@@ -68,6 +93,34 @@ export function NovelCastPanel({
         </p>
       ) : null}
 
+      {canCast ? (
+        <div className="mt-2">
+          <button
+            type="button"
+            onClick={() => setOpen(open === NARRATOR ? null : NARRATOR)}
+            className="text-xs underline-offset-2 hover:underline"
+            style={{ color: surface.muted }}
+          >
+            Narration is read by{" "}
+            <span style={{ color: surface.ink }}>
+              {voiceName(narratorVoiceId ?? null) ?? "the default voice"}
+            </span>
+            {open === NARRATOR ? "" : " — change"}
+          </button>
+          {open === NARRATOR ? (
+            <NovelVoicePicker
+              voices={voices ?? []}
+              selected={narratorVoiceId ?? null}
+              label="the narration"
+              surface={surface}
+              busy={Boolean(saving)}
+              onChoose={(voiceId) => onChooseVoice?.(null, voiceId)}
+              onClose={() => setOpen(null)}
+            />
+          ) : null}
+        </div>
+      ) : null}
+
       {cast.length === 0 ? (
         <p className="mt-2 text-xs" style={{ color: surface.muted }}>
           Nobody else was identified with enough confidence to be given a voice,
@@ -96,13 +149,41 @@ export function NovelCastPanel({
                   }
                 />
                 <span style={{ color: surface.ink }}>{member.name}</span>
-                <span
-                  className="font-mono text-[11px] tabular-nums"
-                  style={{ color: surface.muted }}
-                >
-                  {lines} {lines === 1 ? "line" : "lines"}
-                  {member.voice_id ? "" : " · narrator"}
-                </span>
+                {canCast ? (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setOpen(open === member.name ? null : member.name)
+                    }
+                    className="font-mono text-[11px] tabular-nums underline-offset-2 hover:underline"
+                    style={{ color: surface.muted }}
+                  >
+                    {voiceName(member.voice_id) ?? "narrator"} · {lines}
+                  </button>
+                ) : (
+                  <span
+                    className="font-mono text-[11px] tabular-nums"
+                    style={{ color: surface.muted }}
+                  >
+                    {lines} {lines === 1 ? "line" : "lines"}
+                    {member.voice_id ? "" : " · narrator"}
+                  </span>
+                )}
+                {open === member.name ? (
+                  <div className="col-span-3">
+                    <NovelVoicePicker
+                      voices={voices ?? []}
+                      selected={member.voice_id}
+                      label={member.name}
+                      surface={surface}
+                      busy={Boolean(saving)}
+                      onChoose={(voiceId) =>
+                        onChooseVoice?.(member.name, voiceId)
+                      }
+                      onClose={() => setOpen(null)}
+                    />
+                  </div>
+                ) : null}
               </li>
             );
           })}
