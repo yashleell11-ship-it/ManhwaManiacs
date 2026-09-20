@@ -155,6 +155,14 @@ _RELEASE_NOTES: list[ChangelogEntry] = [
             "now get their own voice in the chapters they are only speaking "
             "in. Tessia has more lines than anyone in The Beginning After The "
             "End and was being read in the narrator's voice throughout",
+            "You can pick the voices yourself. Thirty-one of them, each with "
+            "a name, and each one introduces itself so you hear what you are "
+            "choosing before you choose it. Set one for the narrator and one "
+            "for any character, on the phone or on the web",
+            "Thirteen male voices instead of six, reaching a good deal deeper "
+            "than anything on offer before. The old list was picked for being "
+            "the most even-toned, which quietly ruled out every deep voice in "
+            "the collection",
         ],
     ),
     ChangelogEntry(
