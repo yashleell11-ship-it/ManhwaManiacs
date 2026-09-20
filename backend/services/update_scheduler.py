@@ -169,9 +169,37 @@ class UpdateSchedulerManager:
         disk fill.
         """
         self._maybe_sweep_caches()
+        self._reap_render_leases()
         self._maybe_reprobe_sources()
         if self._scheduled_checks_enabled():
             self.trigger_check(trigger="scheduled")
+
+    def _reap_render_leases(self) -> None:
+        """Put back render jobs whose box stopped answering.
+
+        Unconditional, like the cache sweep and for a stronger reason: this is
+        not about contacting anything. The render box is a desktop in a house.
+        It sleeps, it reboots, it loses Wi-Fi mid-chapter — and without this
+        the job it was holding says ``rendering`` forever and no worker will
+        ever claim that chapter again.
+
+        The lease is a wall clock precisely so this can run here, in a
+        different process from the one that wrote it and usually after a
+        restart. A monotonic clock would be meaningless across that boundary.
+        """
+        try:
+            from database.session import SessionLocal
+            from services.novel_render_queue import reap_expired
+        except Exception:  # pragma: no cover - import guard
+            return
+        try:
+            with SessionLocal() as db:
+                if reap_expired(db):
+                    db.commit()
+        except Exception:
+            # A scheduler tick must never die on this. The next tick tries
+            # again, and a lease that is already expired stays expired.
+            logger.exception("render lease reap failed")
 
     def _maybe_reprobe_sources(self) -> None:
         """Re-check a few sources nobody follows, so a dead one can recover.

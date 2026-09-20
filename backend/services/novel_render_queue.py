@@ -28,7 +28,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -205,3 +205,191 @@ def as_json(job: NovelAudioJob) -> dict[str, object]:
         "error_code": job.error_code,
         "error_detail": job.error_detail,
     }
+
+
+# --------------------------------------------------------------------------
+# What the render box drives. Everything below is reached with the worker
+# token, never a session.
+# --------------------------------------------------------------------------
+
+
+def claim(
+    db: Session, worker_id: str, *, lease: timedelta = LEASE
+) -> NovelAudioJob | None:
+    """Take the next queued job, or None when there is nothing to do.
+
+    A conditional UPDATE and nothing else, so two workers cannot take the same
+    row: the second one's ``WHERE status='queued'`` matches nothing. The
+    in-process ``threading.Lock`` the update scheduler uses is no help here —
+    the renderer is a different machine.
+
+    Ordered by priority then age, so "do this chapter next" works and nothing
+    starves behind it.
+    """
+    now = _now()
+    candidate = db.execute(
+        select(NovelAudioJob.id)
+        .where(NovelAudioJob.status == "queued")
+        .order_by(NovelAudioJob.priority.desc(), NovelAudioJob.created_at)
+        .limit(1)
+    ).scalar_one_or_none()
+    if candidate is None:
+        return None
+
+    taken = db.execute(
+        update(NovelAudioJob)
+        .where(NovelAudioJob.id == candidate, NovelAudioJob.status == "queued")
+        .values(
+            status="planning",
+            worker_id=worker_id,
+            lease_until=now + lease,
+            attempts=NovelAudioJob.attempts + 1,
+            started_at=func.coalesce(NovelAudioJob.started_at, now),
+            updated_at=now,
+        )
+    )
+    if taken.rowcount == 0:
+        # Somebody else got there first. The caller tries again or answers
+        # "nothing to do"; it must not block.
+        return None
+    return db.get(NovelAudioJob, candidate)
+
+
+def _held(db: Session, job_id: str, worker_id: str) -> NovelAudioJob | None:
+    """The job, if this worker still holds its lease."""
+    job = db.get(NovelAudioJob, job_id)
+    if job is None or job.worker_id != worker_id:
+        return None
+    return job
+
+
+def heartbeat(
+    db: Session,
+    job_id: str,
+    worker_id: str,
+    segments_done: int,
+    *,
+    lease: timedelta = LEASE,
+) -> dict[str, object] | None:
+    """Extend the lease and report progress. None when the lease is gone.
+
+    Also how a worker learns it has been cancelled. Nothing on the server can
+    reach into the box, so the box has to ask — and it asks often enough that
+    "cancel" means within half a minute rather than at the end of the chapter.
+    """
+    job = _held(db, job_id, worker_id)
+    if job is None:
+        return None
+    if job.status == "cancelled":
+        return {"cancelled": True, "lease_seconds": 0}
+    if job.status not in ("planning", "rendering"):
+        return None
+    job.status = "rendering"
+    job.progress_segments = max(0, segments_done)
+    job.lease_until = _now() + lease
+    job.updated_at = _now()
+    return {"cancelled": False, "lease_seconds": int(lease.total_seconds())}
+
+
+def complete(db: Session, job_id: str, worker_id: str) -> bool:
+    """Mark a render finished. The BYTES are written by the caller first.
+
+    Ordering matters and is the route's job, not this function's: the files
+    must be in place before the row says done, or a reader can be told there
+    is audio a moment before there is.
+    """
+    job = _held(db, job_id, worker_id)
+    if job is None or job.status not in ("planning", "rendering"):
+        return False
+    job.status = "done"
+    job.progress_segments = job.segment_count or job.progress_segments
+    job.lease_until = None
+    job.finished_at = _now()
+    job.updated_at = _now()
+    return True
+
+
+def fail(
+    db: Session,
+    job_id: str,
+    worker_id: str,
+    code: str,
+    detail: str,
+    *,
+    retryable: bool = True,
+) -> bool:
+    """Record that a render did not work.
+
+    A retryable failure goes back in the queue until it has burned
+    [MAX_ATTEMPTS]; anything else stops immediately. The distinction matters
+    because the two common failures are opposites — a dropped connection
+    should be tried again, and a chapter the model cannot read never will be.
+    """
+    job = _held(db, job_id, worker_id)
+    if job is None or job.status in TERMINAL:
+        return False
+    job.error_code = code[:48]
+    # Truncated at write: a raw traceback in a row a client reads is both a
+    # disclosure and an unbounded column.
+    job.error_detail = (detail or "")[:500]
+    job.worker_id = None
+    job.lease_until = None
+    if retryable and job.attempts < MAX_ATTEMPTS:
+        job.status = "queued"
+    else:
+        job.status = "failed"
+        job.finished_at = _now()
+    job.updated_at = _now()
+    return True
+
+
+def release(db: Session, job_id: str, worker_id: str, reason: str) -> bool:
+    """Put a job back untouched, without charging an attempt.
+
+    This is the GPU being wanted by something else, or the owner pausing
+    rendering — not a failure. Charging an attempt would mean three training
+    runs permanently burn a chapter's retries.
+    """
+    job = _held(db, job_id, worker_id)
+    if job is None or job.status in TERMINAL:
+        return False
+    job.status = "queued"
+    job.worker_id = None
+    job.lease_until = None
+    job.attempts = max(0, job.attempts - 1)
+    job.error_code = None
+    job.error_detail = reason[:500] if reason else None
+    job.updated_at = _now()
+    return True
+
+
+def reap_expired(db: Session) -> int:
+    """Return jobs whose worker went away. Returns how many.
+
+    Without this a box that slept mid-render wedges that chapter forever: the
+    row says ``rendering`` and no worker will ever claim it again. The lease
+    is a wall clock precisely so this can run in a different process, after a
+    restart, and still be right.
+    """
+    now = _now()
+    stale = list(
+        db.execute(
+            select(NovelAudioJob).where(
+                NovelAudioJob.status.in_(("planning", "rendering")),
+                NovelAudioJob.lease_until.is_not(None),
+                NovelAudioJob.lease_until < now,
+            )
+        ).scalars()
+    )
+    for job in stale:
+        job.worker_id = None
+        job.lease_until = None
+        if job.attempts >= MAX_ATTEMPTS:
+            job.status = "failed"
+            job.error_code = "lease_expired"
+            job.error_detail = "the render box stopped answering"
+            job.finished_at = now
+        else:
+            job.status = "queued"
+        job.updated_at = now
+    return len(stale)

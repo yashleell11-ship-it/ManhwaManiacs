@@ -194,6 +194,15 @@ def create_app(*, run_migrations: bool = True, run_workers: bool = True) -> Fast
         app.include_router(
             novels_router, dependencies=[Depends(enforce_authentication)]
         )
+        # The render box's own routes. Mounted ONLY when a token is
+        # configured, and deliberately outside enforce_authentication: the box
+        # has no session. Its token is valid on these five paths and nowhere
+        # else, so a compromised renderer can upload audio and cannot read a
+        # library.
+        if str(getattr(settings, "render_worker_token", "") or ""):
+            from routes.novel_render import router as novel_render_router
+
+            app.include_router(novel_render_router)
     return app
 
 

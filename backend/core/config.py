@@ -84,6 +84,17 @@ class Settings(BaseModel):
     # are not mounted at all — the feature must be indistinguishable from
     # absent, not "present but forbidden".
     novels_enabled: bool = False
+    #: Shared secret the render box presents on /novels/render/*.
+    #:
+    #: EMPTY MEANS THE ROUTER IS NOT MOUNTED — the same posture as
+    #: novels_enabled, and for the same reason. A render endpoint that exists
+    #: but rejects everything is an invitation to guess; one that was never
+    #: mounted is indistinguishable from a feature that does not exist.
+    #:
+    #: Never the admin session. This key is valid on five literal routes and
+    #: nothing else, so a box that is compromised can render and upload audio
+    #: and cannot read a library.
+    render_worker_token: str = ""
     # TTL (minutes) for novel_chapter_cache rows. Deliberately long (7 days):
     # published chapter text is immutable in practice, and a refetch is a full
     # upstream page scrape. Expired rows are still served stale when the
@@ -317,6 +328,11 @@ def get_settings() -> Settings:
             "yes",
             "on",
         }
+    # The render box's shared secret. Absent means the worker routes are not
+    # mounted at all.
+    render_token = os.getenv("MM_RENDER_WORKER_TOKEN")
+    if render_token is not None:
+        data["render_worker_token"] = render_token.strip()
     # Cover downscaling kill switch: off => originals, exactly as before.
     cover_resize_override = os.getenv("MM_COVER_RESIZE_ENABLED")
     if cover_resize_override is not None:
