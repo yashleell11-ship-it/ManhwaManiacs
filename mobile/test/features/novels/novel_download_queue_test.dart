@@ -15,6 +15,7 @@ import 'package:manhwamaniacs/features/downloads/services/device_storage_info.da
 import 'package:manhwamaniacs/features/downloads/services/offline_novel_reader.dart';
 import 'package:manhwamaniacs/features/downloads/services/retention_maintenance.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_audio.dart';
+import 'package:manhwamaniacs/features/novels/models/novel_cast.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter_window.dart';
 import 'package:manhwamaniacs/features/novels/repositories/novels_repository.dart';
@@ -34,6 +35,32 @@ class _ScriptedNovelsRepository implements NovelsRepository {
     required String seriesKey,
     required String chapterKey,
   }) async => const Ok(NovelAudio.none);
+
+  @override
+  Future<Result<NovelAttribution>> attribution({
+    required String sourceId,
+    required String seriesKey,
+    required String chapterKey,
+  }) async => const Ok(NovelAttribution.none);
+
+  @override
+  Future<Result<List<NovelVoice>>> voices() async =>
+      const Ok(<NovelVoice>[]);
+
+  @override
+  Future<Result<void>> setCastVoice({
+    required String sourceId,
+    required String seriesKey,
+    required String name,
+    required String? voiceId,
+  }) async => const Ok(null);
+
+  @override
+  Future<Result<void>> setNarratorVoice({
+    required String sourceId,
+    required String seriesKey,
+    required String? voiceId,
+  }) async => const Ok(null);
 
   _ScriptedNovelsRepository(this._chapter);
 

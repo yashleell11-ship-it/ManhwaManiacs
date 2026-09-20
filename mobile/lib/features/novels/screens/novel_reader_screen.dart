@@ -22,6 +22,7 @@ import 'package:manhwamaniacs/features/novels/utils/novel_progress.dart';
 import 'package:manhwamaniacs/features/novels/utils/novel_snippet.dart';
 import 'package:manhwamaniacs/features/novels/utils/novel_speaking.dart';
 import 'package:manhwamaniacs/features/novels/widgets/novel_audio_player.dart';
+import 'package:manhwamaniacs/features/novels/widgets/novel_cast_panel.dart';
 import 'package:manhwamaniacs/features/novels/widgets/novel_chapter_view.dart';
 import 'package:manhwamaniacs/features/novels/widgets/novel_reader_chrome.dart';
 import 'package:manhwamaniacs/features/novels/widgets/novel_type_panel.dart';
@@ -927,6 +928,15 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
                   : () => _openChapter(_previousKey!),
               onNext: _nextKey == null ? null : () => _openChapter(_nextKey!),
               onBookmark: _bookmarkPending ? null : _handleBookmark,
+              onCast: () => NovelCastPanel.show(
+                context,
+                chapter: (
+                  sourceId: chapter.sourceId,
+                  seriesKey: chapter.seriesKey,
+                  chapterKey: chapter.chapterKey,
+                ),
+                surface: surface,
+              ),
               onType: () => NovelTypePanel.show(
                 context,
                 seriesPrefsKey: prefsKey,

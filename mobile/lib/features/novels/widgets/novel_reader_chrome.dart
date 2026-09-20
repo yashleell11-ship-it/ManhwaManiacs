@@ -27,6 +27,7 @@ class NovelReaderChrome extends StatelessWidget {
     required this.onNext,
     required this.onType,
     this.onBookmark,
+    this.onCast,
     this.audio,
   });
 
@@ -43,6 +44,10 @@ class NovelReaderChrome extends StatelessWidget {
   final VoidCallback? onPrevious;
   final VoidCallback? onNext;
   final VoidCallback onType;
+
+  /// Who reads this book, and the chance to decide otherwise. Null when the
+  /// chapter has no attribution to show.
+  final VoidCallback? onCast;
 
   /// Save the exact spot being read, in one tap. Null while a save is already
   /// in flight, which is what disables the button rather than a separate flag.
@@ -114,6 +119,12 @@ class NovelReaderChrome extends StatelessWidget {
                     icon: const Icon(Icons.bookmark_add_outlined),
                     color: onBookmark == null ? surface.rule : surface.ink,
                     tooltip: 'Bookmark this spot',
+                  ),
+                  IconButton(
+                    onPressed: onCast,
+                    icon: const Icon(Icons.record_voice_over_outlined),
+                    color: onCast == null ? surface.rule : surface.ink,
+                    tooltip: 'Voices',
                   ),
                   IconButton(
                     onPressed: onType,

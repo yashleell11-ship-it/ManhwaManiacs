@@ -1,5 +1,6 @@
 import 'package:manhwamaniacs/core/utils/result.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_audio.dart';
+import 'package:manhwamaniacs/features/novels/models/novel_cast.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter_window.dart';
 
@@ -35,6 +36,46 @@ abstract class NovelsRepository {
     required String sourceId,
     required String seriesKey,
     required String chapterKey,
+  });
+
+  /// Who speaks each line in this chapter, and in whose voice.
+  ///
+  /// A separate call from the chapter text, and never awaited in front of it:
+  /// attribution exists for a fraction of the library, so folding it in would
+  /// make every reader wait on a lookup that usually answers nothing.
+  Future<Result<NovelAttribution>> attribution({
+    required String sourceId,
+    required String seriesKey,
+    required String chapterKey,
+  });
+
+  /// Every voice a character can be given.
+  ///
+  /// Server-side data rather than a list compiled into the app: a client
+  /// carrying its own roster would offer a voice the renderer does not have
+  /// the moment somebody drops a clip on the box.
+  Future<Result<List<NovelVoice>>> voices();
+
+  /// Pin a character's voice, and lock the row against the next recast.
+  ///
+  /// `voiceId` null means "read as narrator", which is a real choice and not
+  /// a clear-the-field.
+  Future<Result<void>> setCastVoice({
+    required String sourceId,
+    required String seriesKey,
+    required String name,
+    required String? voiceId,
+  });
+
+  /// Pin the voice that reads narration for the whole series.
+  ///
+  /// Separate from a cast member because the narrator is a property of the
+  /// BOOK. A chapter narrated by somebody in the cast still reads in that
+  /// character's own voice — they are the same person.
+  Future<Result<void>> setNarratorVoice({
+    required String sourceId,
+    required String seriesKey,
+    required String? voiceId,
   });
 
   /// A bounded WINDOW of one book's chapters in a single round trip —
