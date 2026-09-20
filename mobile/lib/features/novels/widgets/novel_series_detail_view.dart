@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import 'package:manhwamaniacs/app/router/routes.dart';
 import 'package:manhwamaniacs/app/theme/app_colors.dart';
 import 'package:manhwamaniacs/app/theme/app_presets.dart';
+import 'package:manhwamaniacs/features/downloads/models/chapter_selection.dart';
 import 'package:manhwamaniacs/features/downloads/models/saved_chapter.dart';
 import 'package:manhwamaniacs/features/downloads/providers/downloads_scope.dart';
 import 'package:manhwamaniacs/features/downloads/providers/series_download_status_provider.dart';
@@ -12,7 +13,9 @@ import 'package:manhwamaniacs/features/downloads/widgets/chapter_download_action
 import 'package:manhwamaniacs/features/downloads/widgets/download_series_button.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_typography.dart';
 import 'package:manhwamaniacs/features/novels/providers/novel_series_providers.dart';
+import 'package:manhwamaniacs/features/novels/providers/series_audio_provider.dart';
 import 'package:manhwamaniacs/features/novels/utils/novel_book.dart';
+import 'package:manhwamaniacs/features/novels/widgets/audiobook_picker_sheet.dart';
 import 'package:manhwamaniacs/features/sources/models/source_chapter_progress.dart';
 import 'package:manhwamaniacs/features/sources/models/source_series.dart';
 import 'package:manhwamaniacs/features/sources/providers/source_progress_provider.dart';
@@ -314,6 +317,24 @@ class _FrontMatter extends ConsumerWidget {
               ),
             ],
           ),
+          SizedBox(height: context.space.sm),
+          // Narration is a REQUEST, not a download: it costs about nine
+          // minutes on the render PC per chapter, so it is its own deliberate
+          // control rather than a checkbox on "Download book".
+          _AudiobookButton(
+            sourceId: sourceId,
+            seriesKey: seriesId,
+            chapters: [
+              for (final chapter in chapters)
+                (
+                  key: chapter.id,
+                  number: chapter.number,
+                  title: chapter.title,
+                  isRead: false,
+                  isDownloaded: false,
+                ),
+            ],
+          ),
           if (blurb != null) ...[
             SizedBox(height: context.space.lg),
             Text(
@@ -544,6 +565,69 @@ class _TocRow extends ConsumerWidget {
                 ) case final action?)
               SeriesChapterDownloadControl(download: action),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+
+/// "Make audiobook" — opens the chapter picker.
+///
+/// Its own widget so the coverage lookup happens here rather than in the
+/// page: the answer marks which chapters are already narrated, and a page
+/// that awaited it would wait on a request that usually says "none" before
+/// showing a table of contents.
+class _AudiobookButton extends ConsumerWidget {
+  const _AudiobookButton({
+    required this.sourceId,
+    required this.seriesKey,
+    required this.chapters,
+  });
+
+  final String sourceId;
+  final String seriesKey;
+  final List<SelectableChapter> chapters;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final key = (sourceId: sourceId, seriesKey: seriesKey);
+    final audio = ref.watch(seriesAudioProvider(key)).valueOrNull;
+    final rendered = audio?.rendered ?? const <String>{};
+    final narratable = audio?.narratable ?? const <String>{};
+    final jobs = ref.watch(novelAudioJobsProvider(key)).valueOrNull ?? const [];
+    final running = jobs.where((job) => job.isActive).length;
+
+    return SizedBox(
+      width: double.infinity,
+      child: OutlinedButton.icon(
+        onPressed: () => AudiobookPickerSheet.show(
+          context,
+          sourceId: sourceId,
+          seriesKey: seriesKey,
+          chapters: [
+            for (final chapter in chapters)
+              (
+                key: chapter.key,
+                number: chapter.number,
+                title: chapter.title,
+                isRead: chapter.isRead,
+                // "Downloaded" means "already has audio" on this sheet.
+                isDownloaded: rendered.contains(chapter.key),
+              ),
+          ],
+          // Only chapters whose text is on the server can be narrated. The
+          // picker shows the rest greyed with the reason rather than letting
+          // them be chosen and then refused.
+          cached: narratable,
+        ),
+        icon: const Icon(Icons.graphic_eq_rounded, size: 18),
+        label: Text(
+          running > 0
+              ? 'Making audiobook · $running in progress'
+              : rendered.isEmpty
+              ? 'Make audiobook'
+              : 'Make audiobook · ${rendered.length} done',
         ),
       ),
     );

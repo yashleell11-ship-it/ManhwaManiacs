@@ -195,6 +195,11 @@ def get_novel_series_audio(
              "has_timing": bool(meta["has_timing"])}
             for key, meta in sorted(found.items())
         ],
+        # Which chapters COULD be narrated. Rendering reads the chapter, and
+        # reading one that is not cached makes the server fetch it live — so
+        # the client needs this to grey out what it cannot ask for, rather
+        # than offering it and having the request refused.
+        "narratable": sorted(keys),
     }
 
 

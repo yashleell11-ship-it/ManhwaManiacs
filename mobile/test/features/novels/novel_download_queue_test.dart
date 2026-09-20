@@ -37,6 +37,37 @@ class _ScriptedNovelsRepository implements NovelsRepository {
   }) async => const Ok(NovelAudio.none);
 
   @override
+  Future<Result<List<int>>> audioBytes({
+    required String sourceId,
+    required String seriesKey,
+    required String chapterKey,
+  }) async => const Ok(<int>[]);
+
+  @override
+  Future<Result<NovelSeriesAudio>> seriesAudio({
+    required String sourceId,
+    required String seriesKey,
+  }) async => const Ok((rendered: <String>{}, narratable: <String>{}));
+
+  @override
+  Future<Result<NovelAudioRequest>> requestAudio({
+    required String sourceId,
+    required String seriesKey,
+    required List<String> chapterKeys,
+  }) async => const Ok(
+    NovelAudioRequest(queued: <String>[], skipped: <String, String>{}),
+  );
+
+  @override
+  Future<Result<List<NovelAudioJob>>> audioJobs({
+    required String sourceId,
+    required String seriesKey,
+  }) async => const Ok(<NovelAudioJob>[]);
+
+  @override
+  Future<Result<void>> cancelAudioJob(String jobId) async => const Ok(null);
+
+  @override
   Future<Result<NovelAttribution>> attribution({
     required String sourceId,
     required String seriesKey,

@@ -11,6 +11,9 @@ import 'package:manhwamaniacs/features/novels/models/novel_chapter_window.dart';
 /// the registry gate lets the connectors through. Only chapter *text* has no
 /// manga equivalent, because a manga chapter's payload is a list of image
 /// URLs and a novel chapter's is the prose itself.
+/// What one book's audio looks like: what exists, and what could.
+typedef NovelSeriesAudio = ({Set<String> rendered, Set<String> narratable});
+
 abstract class NovelsRepository {
   /// One chapter as sanitized plain-text paragraphs.
   ///
@@ -27,11 +30,14 @@ abstract class NovelsRepository {
 
   /// Whether this chapter has been rendered, and where each sentence sits.
   ///
-  /// READ-ONLY on the server: attribution and rendering are bought by a
-  /// deliberate pass, never by somebody opening a chapter. An unrendered
-  /// chapter answers `available: false` rather than 404, because that is the
-  /// ordinary state for almost the whole library and a reader should not be
-  /// walking error paths for it.
+  /// Rendering is bought by a deliberate REQUEST — see [requestAudio] — and
+  /// never as a side effect of somebody opening a chapter. That distinction
+  /// is the whole cost model: a chapter is about nine minutes on a GPU shared
+  /// with a training run, so turning a page must never spend one.
+  ///
+  /// An unrendered chapter answers `available: false` rather than 404,
+  /// because that is the ordinary state for almost the whole library and a
+  /// reader should not be walking error paths for it.
   Future<Result<NovelAudio>> audio({
     required String sourceId,
     required String seriesKey,
@@ -48,6 +54,52 @@ abstract class NovelsRepository {
     required String seriesKey,
     required String chapterKey,
   });
+
+  /// One chapter's narration, as bytes, for storing on the phone.
+  ///
+  /// Separate from streaming it: the player sets a URL and lets the platform
+  /// pull ranges, which is right for listening and useless for saving.
+  /// Answers empty when the chapter has not been narrated.
+  Future<Result<List<int>>> audioBytes({
+    required String sourceId,
+    required String seriesKey,
+    required String chapterKey,
+  });
+
+  /// Which chapters of this book already have audio, and which COULD.
+  ///
+  /// One call so a table of contents can mark them. Asking per chapter is
+  /// several hundred round trips for a long novel, and all but a handful
+  /// answer no.
+  ///
+  /// `narratable` is the chapters whose text is on the server. Rendering
+  /// reads the chapter, so one that is not cached cannot be asked for — the
+  /// picker greys those rather than offering them and being refused.
+  Future<Result<NovelSeriesAudio>> seriesAudio({
+    required String sourceId,
+    required String seriesKey,
+  });
+
+  /// Ask for these chapters to be narrated.
+  ///
+  /// Answers for EVERY chapter — queued, or skipped with a reason. Partial
+  /// success is the ordinary outcome when somebody asks for a whole book, and
+  /// showing it as a failure would be wrong.
+  Future<Result<NovelAudioRequest>> requestAudio({
+    required String sourceId,
+    required String seriesKey,
+    required List<String> chapterKeys,
+  });
+
+  /// What has been asked for on this book, and where each one got to.
+  Future<Result<List<NovelAudioJob>>> audioJobs({
+    required String sourceId,
+    required String seriesKey,
+  });
+
+  /// Stop a render. A job already on the card learns of it on its next
+  /// heartbeat — nothing on the phone can reach the render box.
+  Future<Result<void>> cancelAudioJob(String jobId);
 
   /// Every voice a character can be given.
   ///

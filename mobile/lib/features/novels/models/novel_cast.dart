@@ -123,3 +123,79 @@ class NovelAttribution {
 
   final List<NovelCastMember> cast;
 }
+
+
+/// What came of asking for chapters to be narrated.
+///
+/// Every chapter is answered for. A partial result is the ordinary outcome —
+/// asking for a whole book normally finds some of it already done — so this
+/// carries both halves rather than being a success/failure.
+class NovelAudioRequest {
+  const NovelAudioRequest({required this.queued, required this.skipped});
+
+  factory NovelAudioRequest.fromJson(Map<String, dynamic> json) {
+    List<String> keys(String field) {
+      final raw = json[field];
+      return raw is List
+          ? raw
+                .whereType<Map<String, dynamic>>()
+                .map((e) => (e['chapter_key'] as String?) ?? '')
+                .where((k) => k.isNotEmpty)
+                .toList(growable: false)
+          : const <String>[];
+    }
+
+    final raw = json['skipped'];
+    return NovelAudioRequest(
+      queued: keys('queued'),
+      skipped: raw is List
+          ? {
+              for (final e in raw.whereType<Map<String, dynamic>>())
+                if ((e['chapter_key'] as String?)?.isNotEmpty ?? false)
+                  e['chapter_key'] as String:
+                      (e['reason'] as String?) ?? 'skipped',
+            }
+          : const <String, String>{},
+    );
+  }
+
+  final List<String> queued;
+
+  /// chapter key -> why. `chapter_not_cached` is the one a reader can act on:
+  /// download the text first.
+  final Map<String, String> skipped;
+}
+
+/// One render, and where it got to.
+class NovelAudioJob {
+  const NovelAudioJob({
+    required this.jobId,
+    required this.chapterKey,
+    required this.status,
+    required this.progress,
+    required this.errorCode,
+  });
+
+  factory NovelAudioJob.fromJson(Map<String, dynamic> json) {
+    return NovelAudioJob(
+      jobId: (json['job_id'] as String?) ?? '',
+      chapterKey: (json['chapter_key'] as String?) ?? '',
+      status: (json['status'] as String?) ?? 'queued',
+      progress: (json['progress'] as num?)?.toDouble() ?? 0,
+      errorCode: json['error_code'] as String?,
+    );
+  }
+
+  final String jobId;
+  final String chapterKey;
+
+  /// queued | planning | rendering | done | failed | cancelled
+  final String status;
+
+  /// 0..1, and 0 until the render box has reported a segment.
+  final double progress;
+  final String? errorCode;
+
+  bool get isActive =>
+      status == 'queued' || status == 'planning' || status == 'rendering';
+}
