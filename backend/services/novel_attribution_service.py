@@ -443,7 +443,8 @@ def read_attribution(
     row = db.get(NovelChapterAttribution, (source_id, series_key, chapter_key))
     if row is None or row.status != STATUS_OK:
         return {"attributed": False, "spans": [], "cast": [],
-                "text_fingerprint": None, "narrator": None}
+                "text_fingerprint": None, "narrator": None,
+                "narrator_voice_id": None}
 
     try:
         spans = json.loads(row.spans)
@@ -495,6 +496,10 @@ def read_attribution(
             for row in cast
             if row.display_name in speaking
         ],
+        # The series' pinned narration voice travels with the cast: the panel
+        # shows them together, and fetching it separately would mean a render
+        # where the narrator's row is briefly wrong.
+        "narrator_voice_id": narrator_voice(db, source_id, series_key),
     }
 
 
@@ -721,6 +726,42 @@ def resolve_voice_map(
         if target is not None:
             mapping[alias.alias_normalized] = target.voice_id
     return mapping
+
+
+def set_narrator_voice(
+    db: Session, source_id: str, series_key: str, voice_id: str | None
+) -> str | None:
+    """Pin the voice that reads narration for a series, or clear it.
+
+    Narration that belongs to nobody in the cast had no owner-settable voice at
+    all: it was derived as the flattest clip matching the narrator's gender,
+    and flatness tracks mid-range pitch, so the deepest voices in the pack were
+    unreachable no matter what the listener wanted.
+
+    ``None`` restores that derivation rather than silencing narration — there
+    has to be a way back from a choice, and "no voice" is not a state the
+    renderer can be in.
+
+    Bumps the cast version like any other change to how the book sounds, so a
+    client holding a cached voice map notices.
+    """
+    state = db.get(NovelSeriesCastState, (source_id, series_key))
+    if state is None:
+        state = NovelSeriesCastState(
+            source_id=source_id, series_key=series_key, cast_version=0
+        )
+        db.add(state)
+        db.flush()
+    state.narrator_voice_id = voice_id or None
+    state.cast_version = (state.cast_version or 0) + 1
+    state.updated_at = utcnow()
+    return state.narrator_voice_id
+
+
+def narrator_voice(db: Session, source_id: str, series_key: str) -> str | None:
+    """The owner's narration voice for this series, or None to derive one."""
+    state = db.get(NovelSeriesCastState, (source_id, series_key))
+    return state.narrator_voice_id if state else None
 
 
 def bump_cast_version(db: Session, source_id: str, series_key: str) -> int:

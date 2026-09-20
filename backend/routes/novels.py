@@ -36,8 +36,10 @@ from services.novel_attribution_service import (
     correct_cast_member,
     merge_alias,
     read_attribution,
+    set_narrator_voice,
 )
 from services.novel_service import NovelService, get_novel_service
+from services.voice_pack import is_known_voice, load_voices, sample_path
 
 
 def require_novels_enabled() -> None:
@@ -162,6 +164,76 @@ def get_novel_audio_file(
     return FileResponse(audio, media_type="audio/ogg")
 
 
+@router.get("/voices")
+@limiter.limit(sources_limit)
+def list_novel_voices(request: Request, response: Response) -> dict[str, object]:
+    """Every voice a character can be given, deepest first within each gender.
+
+    Served rather than hard-coded in the clients because the pack is data on
+    disk: adding a voice is dropping a clip and a manifest line, and a client
+    that shipped its own list would disagree with the renderer the moment that
+    happened.
+
+    An empty list is a real answer — a deployment with no pack installed can
+    still read novels, it just cannot give anyone a voice yet.
+    """
+    return {"voices": [voice.as_json() for voice in load_voices()]}
+
+
+@router.get("/voices/sample")
+@limiter.limit(sources_limit)
+def get_novel_voice_sample(
+    request: Request,
+    response: Response,
+    voice: str = Query(..., min_length=1, max_length=64),
+) -> FileResponse:
+    """The clip demonstrating one voice.
+
+    ``FileResponse`` for the same reason the chapter audio uses it: Range and
+    206, so scrubbing a preview does not refetch it.
+
+    The path comes from the manifest, never from joining ``voice`` onto the
+    directory — it arrives off a query string, and a path built from user input
+    is one ``../`` away from serving whatever else is on the box.
+    """
+    path = sample_path(voice)
+    if path is None:
+        raise StarletteHTTPException(status_code=404, detail="Not Found")
+    return FileResponse(path, media_type="audio/ogg")
+
+
+class NarratorVoice(BaseModel):
+    """Choose the voice that reads narration for a series."""
+
+    source_id: str = Field(min_length=1, max_length=64)
+    series_key: str = Field(min_length=1, max_length=512)
+
+    #: Null restores the derived default rather than silencing narration.
+    voice_id: str | None = Field(default=None, max_length=64)
+
+
+@router.post("/narrator")
+@limiter.limit(sources_limit)
+def set_novel_narrator_voice(
+    request: Request,
+    response: Response,
+    body: NarratorVoice,
+    db: DbDep,
+) -> dict[str, object]:
+    """Pin the narration voice for a whole series.
+
+    Separate from ``/cast`` because the narrator is a property of the BOOK, not
+    a character in it. A chapter narrated by somebody in the cast still reads
+    in that character's own voice — they are the same person — so this is the
+    voice for narration that belongs to nobody.
+    """
+    if body.voice_id and not is_known_voice(body.voice_id):
+        raise HTTPException(status_code=400, detail="unknown voice")
+    row = set_narrator_voice(db, body.source_id, body.series_key, body.voice_id)
+    db.commit()
+    return {"narrator_voice_id": row}
+
+
 class CastCorrection(BaseModel):
     """Set a character's gender or voice by hand."""
 
@@ -195,6 +267,10 @@ def correct_cast(
     recomputed from pronoun counts on every recast, and somebody who has
     listened to the book knows things the counts do not.
     """
+    # A voice the renderer does not have is not a preference, it is a chapter
+    # that silently reads as narrator. Refuse it here rather than storing it.
+    if body.voice_id and not is_known_voice(body.voice_id):
+        raise HTTPException(status_code=400, detail="unknown voice")
     try:
         row = correct_cast_member(
             db, body.source_id, body.series_key, body.name,

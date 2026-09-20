@@ -143,6 +143,7 @@ class TestAbsence:
         assert response.json() == {
             "attributed": False, "spans": [], "cast": [],
             "text_fingerprint": None, "narrator": None,
+            "narrator_voice_id": None,
         }
 
     def test_a_failed_attribution_reads_as_absent(self, novels_on, db_session):

@@ -1065,6 +1065,14 @@ class NovelSeriesCastState(Base):
         Integer, nullable=False, default=0
     )
     cast_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    #: The voice reading narration that belongs to nobody in the cast, chosen
+    #: by the owner. NULL means "derive it" — the flattest clip matching the
+    #: narrator's gender, which is a fine default and a bad only-option:
+    #: flatness tracks mid-range pitch, so the derivation can never pick the
+    #: deepest clips in the pack. A chapter narrated BY a character still reads
+    #: in that character's own voice; they are the same person.
+    narrator_voice_id: Mapped[str | None] = mapped_column(String(64))
     last_recast_at: Mapped[datetime | None] = mapped_column(DateTime)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 

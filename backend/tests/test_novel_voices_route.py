@@ -1,0 +1,228 @@
+"""The roster a listener picks from, and the narration voice they pin.
+
+Choosing a voice by hand is the whole point of these three routes: the
+automatic assignment is a starting position, not a verdict. What is worth
+pinning here is that a choice the RENDERER cannot honour is refused at the
+door — a voice id that is not in the pack does not become a preference, it
+becomes a chapter that silently reads as narrator.
+"""
+
+from __future__ import annotations
+
+import json
+
+from database.models import NovelSeriesCast, NovelSeriesCastState
+
+from tests.test_novels_flag import (  # noqa: F401
+    SERIES,
+    STUB_SOURCE,
+    novels_off,
+    novels_on,
+    stub_registered,
+)
+
+
+def install_pack(tmp_path, monkeypatch, clips=None):
+    """A pack on disk, because the roster is data and not a constant."""
+    from services import voice_pack
+
+    clips = clips if clips is not None else [
+        {
+            "voice_id": "libritts-2803", "gender": "male", "median_f0_hz": 103.0,
+            "pitch_spread": 0.254, "seconds": 8.1, "license": "CC BY 4.0",
+            "attribution": "LibriTTS-R", "transcript": "A line.",
+            "sample": "m-low.opus",
+        },
+        {
+            "voice_id": "libritts-251", "gender": "male", "median_f0_hz": 147.2,
+            "pitch_spread": 0.166, "seconds": 11.5, "license": "CC BY 4.0",
+            "attribution": "LibriTTS-R", "transcript": "Another line.",
+            "sample": "m-high.opus",
+        },
+    ]
+    for clip in clips:
+        if clip.get("sample"):
+            (tmp_path / clip["sample"]).write_bytes(b"OggS-stand-in")
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"version": "test", "clips": clips}), encoding="utf-8"
+    )
+    monkeypatch.setenv("MM_VOICES_DIR", str(tmp_path))
+    voice_pack._cached.cache_clear()
+
+
+class TestRoster:
+    def test_the_pack_is_served_deepest_first(self, novels_on, tmp_path, monkeypatch):
+        # The axis a person chooses on. "I want a deeper narrator" has to be
+        # answerable by reading down the list.
+        install_pack(tmp_path, monkeypatch)
+
+        body = novels_on.get("/novels/voices").json()
+
+        assert [v["voice_id"] for v in body["voices"]] == [
+            "libritts-2803", "libritts-251"
+        ]
+        assert body["voices"][0]["pitch_hz"] == 103.0
+
+    def test_no_pack_installed_is_an_empty_list_not_an_error(
+        self, novels_on, tmp_path, monkeypatch
+    ):
+        # A deployment with no voices can still read novels; it just cannot
+        # give anyone a voice yet.
+        from services import voice_pack
+
+        monkeypatch.setenv("MM_VOICES_DIR", str(tmp_path / "absent"))
+        voice_pack._cached.cache_clear()
+
+        response = novels_on.get("/novels/voices")
+
+        assert response.status_code == 200
+        assert response.json() == {"voices": []}
+
+    def test_the_on_disk_filename_is_never_served(
+        self, novels_on, tmp_path, monkeypatch
+    ):
+        # The client asks for a sample by voice id and never builds a path.
+        install_pack(tmp_path, monkeypatch)
+
+        voice = novels_on.get("/novels/voices").json()["voices"][0]
+
+        assert "sample" not in voice and "file" not in voice
+
+
+class TestSample:
+    def test_a_sample_is_served_with_range_support(
+        self, novels_on, tmp_path, monkeypatch
+    ):
+        # Without 206 a player refetches the whole clip on every scrub.
+        install_pack(tmp_path, monkeypatch)
+
+        response = novels_on.get("/novels/voices/sample?voice=libritts-2803")
+
+        assert response.status_code == 200
+        assert response.headers["accept-ranges"] == "bytes"
+        assert response.content == b"OggS-stand-in"
+
+    def test_an_unknown_voice_is_404(self, novels_on, tmp_path, monkeypatch):
+        install_pack(tmp_path, monkeypatch)
+
+        assert novels_on.get("/novels/voices/sample?voice=nope").status_code == 404
+
+    def test_a_traversal_cannot_reach_outside_the_pack(
+        self, novels_on, tmp_path, monkeypatch
+    ):
+        # The id arrives off a query string; resolution goes through the
+        # manifest precisely so no path is ever built from user input.
+        install_pack(tmp_path, monkeypatch)
+        (tmp_path.parent / "secret.txt").write_text("not yours", encoding="utf-8")
+
+        for attempt in ("../secret.txt", "..%2fsecret.txt", "/etc/passwd"):
+            assert novels_on.get(
+                f"/novels/voices/sample?voice={attempt}"
+            ).status_code == 404
+
+
+class TestNarratorVoice:
+    def _post(self, client, voice_id):
+        return client.post("/novels/narrator", json={
+            "source_id": STUB_SOURCE, "series_key": SERIES, "voice_id": voice_id,
+        })
+
+    def test_a_narration_voice_is_pinned_for_the_series(
+        self, novels_on, db_session, tmp_path, monkeypatch
+    ):
+        install_pack(tmp_path, monkeypatch)
+
+        response = self._post(novels_on, "libritts-2803")
+
+        assert response.status_code == 200
+        assert response.json()["narrator_voice_id"] == "libritts-2803"
+        row = db_session.get(NovelSeriesCastState, (STUB_SOURCE, SERIES))
+        assert row.narrator_voice_id == "libritts-2803"
+
+    def test_null_restores_the_derived_default(
+        self, novels_on, db_session, tmp_path, monkeypatch
+    ):
+        # There has to be a way back from a choice, and "no voice at all" is
+        # not a state the renderer can be in.
+        install_pack(tmp_path, monkeypatch)
+        self._post(novels_on, "libritts-2803")
+
+        response = self._post(novels_on, None)
+
+        assert response.json()["narrator_voice_id"] is None
+
+    def test_a_voice_the_renderer_does_not_have_is_refused(
+        self, novels_on, tmp_path, monkeypatch
+    ):
+        # Storing it would not be a preference — it would be narration that
+        # silently falls back, with the UI still showing the choice.
+        install_pack(tmp_path, monkeypatch)
+
+        assert self._post(novels_on, "libritts-does-not-exist").status_code == 400
+
+    def test_pinning_bumps_the_cast_version(
+        self, novels_on, db_session, tmp_path, monkeypatch
+    ):
+        # It changes how the book sounds, so a client holding a cached voice
+        # map has to notice.
+        install_pack(tmp_path, monkeypatch)
+
+        self._post(novels_on, "libritts-2803")
+        first = db_session.get(NovelSeriesCastState, (STUB_SOURCE, SERIES)).cast_version
+        db_session.expire_all()
+        self._post(novels_on, "libritts-251")
+        second = db_session.get(NovelSeriesCastState, (STUB_SOURCE, SERIES)).cast_version
+
+        assert second > first
+
+
+class TestCastVoiceValidation:
+    def test_a_character_can_be_given_a_voice_from_the_pack(
+        self, novels_on, db_session, tmp_path, monkeypatch
+    ):
+        install_pack(tmp_path, monkeypatch)
+
+        response = novels_on.post("/novels/cast", json={
+            "source_id": STUB_SOURCE, "series_key": SERIES,
+            "name": "Arthur", "voice_id": "libritts-2803",
+        })
+
+        assert response.status_code == 200
+        assert response.json()["voice_id"] == "libritts-2803"
+        # Locked, so the next recast does not quietly undo the choice.
+        assert response.json()["locked"] is True
+
+    def test_a_voice_outside_the_pack_is_refused(
+        self, novels_on, tmp_path, monkeypatch
+    ):
+        install_pack(tmp_path, monkeypatch)
+
+        response = novels_on.post("/novels/cast", json={
+            "source_id": STUB_SOURCE, "series_key": SERIES,
+            "name": "Arthur", "voice_id": "some-other-model",
+        })
+
+        assert response.status_code == 400
+
+    def test_clearing_a_voice_is_still_allowed(
+        self, novels_on, db_session, tmp_path, monkeypatch
+    ):
+        # Null is "read as narrator", which is a legitimate choice and must not
+        # be caught by the membership check.
+        install_pack(tmp_path, monkeypatch)
+        novels_on.post("/novels/cast", json={
+            "source_id": STUB_SOURCE, "series_key": SERIES,
+            "name": "Arthur", "voice_id": "libritts-2803",
+        })
+
+        response = novels_on.post("/novels/cast", json={
+            "source_id": STUB_SOURCE, "series_key": SERIES,
+            "name": "Arthur", "voice_id": None,
+        })
+
+        assert response.status_code == 200
+
+
+class TestFlagOff:
+    def test_the_roster_is_a_stock_404_when_novels_are_off(self, novels_off):
+        assert novels_off.get("/novels/voices").status_code == 404
