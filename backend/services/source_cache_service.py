@@ -336,6 +336,9 @@ class SourceCacheService:
                 # handler existed for a connector that could not answer, and a
                 # gate that will not answer is not the same thing.
                 raise
+            # Serving stale hides the failure from this reader, not from
+            # source health: BrowseService has already counted it (when it was
+            # the source's fault) before it reached here.
             if row is not None:
                 logger.warning(
                     "source_cache: connector failed for %s/%s, serving stale (%s)",

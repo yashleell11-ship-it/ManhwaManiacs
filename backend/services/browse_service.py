@@ -8,6 +8,7 @@ import logging
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from itertools import zip_longest
 from typing import Annotated, Any
 from urllib.parse import quote
@@ -42,6 +43,8 @@ from services.source_health import (
     SourceHealthState,
     load_states,
     record_outcomes,
+    record_traffic_outcome,
+    source_side_failure,
     states_for,
     summarize,
 )
@@ -427,6 +430,7 @@ class BrowseService:
         db: Session | None = None,
         user_id: int | None = None,
         profile_id: int | None = None,
+        record_traffic_health: bool = False,
     ) -> None:
         """``mature_enabled`` is the caller's *resolved* 18+ gate.
 
@@ -455,11 +459,22 @@ class BrowseService:
         without them the NAS listing would show one reader what another reader
         downloaded. Absent context yields an empty NAS listing rather than an
         unscoped one -- the safe direction to fail.
+
+        ``record_traffic_health`` makes a series page, a chapter list or a
+        single-source search count towards the source's health (see
+        ``source_health``'s "Real traffic"). Only ``get_browse_service`` turns it
+        on, because only there is the request a READER's. Every other
+        constructor is a background actor with rules of its own: the update
+        sweep records one outcome per source per pass and deliberately counts
+        an empty chapter list as neither success nor failure, which a per-call
+        success recorded underneath it would silently undo; and the browse
+        warm is a speculative fetch nobody is waiting on.
         """
         self._mature_enabled = mature_enabled
         self._db = db
         self._user_id = user_id
         self._profile_id = profile_id
+        self._record_traffic_health = record_traffic_health and db is not None
         # Guards ``self._db`` for the one read that happens off the request
         # thread -- see ``_require_visible_chapter``. Per instance, which is
         # per request, which is the scope of the fan-out that needs it.
@@ -534,6 +549,42 @@ class BrowseService:
                 status_code=404,
                 details={"source_id": source_id, "chapter_id": chapter_key},
             )
+
+    def _traffic_ok(self, source_id: str) -> None:
+        """This reader's request found the source answering."""
+        if self._record_traffic_health:
+            record_traffic_outcome(self._traffic_bind(), source_id, None)
+
+    def _traffic_failed(self, source_id: str, exc: BaseException) -> None:
+        """This reader's request failed; record it only if the SOURCE did."""
+        if not self._record_traffic_health:
+            return
+        error = source_side_failure(exc)
+        if error is not None:
+            record_traffic_outcome(self._traffic_bind(), source_id, error)
+
+    def _traffic_bind(self):
+        # The engine, not the session: the recording opens a session of its own
+        # (see ``record_traffic_outcome`` for why).
+        try:
+            return self._db.get_bind() if self._db is not None else None
+        except Exception:  # noqa: BLE001 - no engine means nothing to record into
+            return None
+
+    @contextmanager
+    def _observe_traffic(self, source_id: str):
+        """Count a failure raised inside this block against ``source_id``.
+
+        Only the failure: what counts as a success differs per read, so each
+        caller says so itself with ``_traffic_ok``. Anything that is not the
+        source's fault (a 404 of ours, the 18+ gate, a timeout) is filtered by
+        ``source_side_failure``, so wrapping a gate check here is harmless.
+        """
+        try:
+            yield
+        except Exception as exc:
+            self._traffic_failed(source_id, exc)
+            raise
 
     @staticmethod
     def _raise_source_connector_error(source_id: str, exc: Exception) -> None:
@@ -776,7 +827,20 @@ class BrowseService:
                 listing = connector.get_series_list(page, sort=normalized_sort)
                 operation = "browse"
         except (ConnectorHttpError, OSError) as exc:
+            # A search is real traffic the re-probe never makes -- its one
+            # listing page cannot see a source blocked only on search. A plain
+            # browse is left to the re-probe, which asks for exactly that.
+            if normalized_query:
+                self._traffic_failed(source_id, exc)
             self._raise_source_connector_error(source_id, exc)
+        except Exception as exc:
+            if normalized_query:
+                self._traffic_failed(source_id, exc)
+            raise
+        if normalized_query:
+            # Any answer is the source answering, zero results included --
+            # the same rule the federated fan-out records by.
+            self._traffic_ok(source_id)
 
         logger.info(
             "%s source=%s page=%d sort=%r query=%r genre=%r parsed=%d total=%d total_pages=%d has_more=%s",
@@ -1164,7 +1228,8 @@ class BrowseService:
 
     def get_series(self, source_id: str, series_id: str) -> dict[str, object]:
         connector = self._get_connector(source_id)
-        series = connector.get_series(fully_unquote(series_id))
+        with self._observe_traffic(source_id):
+            series = connector.get_series(fully_unquote(series_id))
         if series is None:
             raise AppError(
                 "Series not found.",
@@ -1172,30 +1237,17 @@ class BrowseService:
                 status_code=404,
                 details={"source_id": source_id, "series_id": series_id},
             )
+        # Only once a series came back. A None above is evidence of neither:
+        # "no such series" is the site answering about one page, and a soft
+        # block that parses as nothing looks exactly like it.
+        self._traffic_ok(source_id)
         self._require_visible_series(series, connector, source_id)
         return _serialize_series(series, source_id)
 
     def get_chapters(self, source_id: str, series_id: str) -> list[dict[str, object]]:
         connector = self._get_connector(source_id)
         series_id = fully_unquote(series_id)
-        series = connector.get_series(series_id)
-        if series is None:
-            raise AppError(
-                "Series not found.",
-                code="series_not_found",
-                status_code=404,
-                details={"source_id": source_id, "series_id": series_id},
-            )
-        self._require_visible_series(series, connector, source_id)
-        chapters = connector.get_chapters(series_id)
-        if not chapters and series.chapter_count > 0:
-            logger.warning(
-                "Chapters empty despite chapter_count=%d source=%s series=%s; retrying after cache bust",
-                series.chapter_count,
-                source_id,
-                series_id,
-            )
-            _invalidate_series_caches(connector, series_id)
+        with self._observe_traffic(source_id):
             series = connector.get_series(series_id)
             if series is None:
                 raise AppError(
@@ -1204,7 +1256,31 @@ class BrowseService:
                     status_code=404,
                     details={"source_id": source_id, "series_id": series_id},
                 )
+            self._require_visible_series(series, connector, source_id)
             chapters = connector.get_chapters(series_id)
+            if not chapters and series.chapter_count > 0:
+                logger.warning(
+                    "Chapters empty despite chapter_count=%d source=%s series=%s; retrying after cache bust",
+                    series.chapter_count,
+                    source_id,
+                    series_id,
+                )
+                _invalidate_series_caches(connector, series_id)
+                series = connector.get_series(series_id)
+                if series is None:
+                    raise AppError(
+                        "Series not found.",
+                        code="series_not_found",
+                        status_code=404,
+                        details={"source_id": source_id, "series_id": series_id},
+                    )
+                chapters = connector.get_chapters(series_id)
+        # Only a list with chapters in it is the source working. An empty one
+        # is the update sweep's "degraded" case -- drifted markup or a soft
+        # block answering 200 -- and resetting a failure streak on it would
+        # clear a blocked source every time a reader opened it.
+        if chapters:
+            self._traffic_ok(source_id)
         return [_serialize_chapter(chapter, source_id) for chapter in chapters]
 
     def get_chapter_pages(self, source_id: str, chapter_id: str) -> list[dict[str, object]]:
@@ -1230,16 +1306,22 @@ class BrowseService:
         connector = self._get_connector(source_id)
         normalized_chapter_id = _normalize_source_chapter_id(chapter_id)
         series_id = fully_unquote(series_id)
-        series = connector.get_series(series_id)
-        if series is None:
-            raise AppError(
-                "Series not found.",
-                code="series_not_found",
-                status_code=404,
-            )
-        self._require_visible_series(series, connector, source_id)
+        # The series page and its chapter list are the same evidence here as in
+        # ``get_chapters``; the page fetch below is not, since one chapter's
+        # images failing says nothing about whether the site is up.
+        with self._observe_traffic(source_id):
+            series = connector.get_series(series_id)
+            if series is None:
+                raise AppError(
+                    "Series not found.",
+                    code="series_not_found",
+                    status_code=404,
+                )
+            self._require_visible_series(series, connector, source_id)
 
-        chapters = connector.get_chapters(series_id)
+            chapters = connector.get_chapters(series_id)
+        if chapters:
+            self._traffic_ok(source_id)
         chapter = next((item for item in chapters if item.id == normalized_chapter_id), None)
         if chapter is None:
             raise AppError(
@@ -1392,11 +1474,14 @@ def get_browse_service(
     and the reader in one place.
 
     The session is carried too, for source health only (read on every listing,
-    written by the search fan-out when a source's state actually changes).
+    written by the search fan-out when a source's state actually changes, and by
+    this reader's own series, chapter and search requests -- which is why
+    ``record_traffic_health`` is on here and nowhere else).
     """
     return BrowseService(
         mature_enabled=resolve_mature_gate(db, ctx.profile_id, ctx.user_id),
         db=db,
         user_id=ctx.user_id,
         profile_id=ctx.profile_id,
+        record_traffic_health=True,
     )
