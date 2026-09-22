@@ -40,7 +40,17 @@ REPROBE_INTERVAL = timedelta(hours=24)
 #: A source at the failure ceiling has earned a longer rest. Re-asking a site
 #: that has failed ten times running, every day, is traffic spent to learn
 #: nothing — but never re-asking is how one ends up wrong for a fortnight.
-DEAD_BACKOFF = timedelta(days=7)
+#:
+#: Two days, not the seven this started at. The rest is also exactly how long a
+#: source that has come BACK stays labelled dead, and for a source nobody
+#: follows this re-probe is the only thing that can clear it: manhuanext hit
+#: the ceiling on 2026-09-20, answered list, search, series and chapters from
+#: the VPS on 2026-09-23, and would have read "dead" until 2026-09-27. The
+#: saving a week bought was small, because dead sources do not stay registered
+#: here (one that fails end to end is deleted), so the ceiling only ever holds
+#: a handful, and each probe is one listing page: two days costs a few requests
+#: a week against days of a working source shown as gone.
+DEAD_BACKOFF = timedelta(days=2)
 
 #: Sources per tick. Small on purpose: this is background work with no reader
 #: waiting on it, and the box is shared.

@@ -54,7 +54,8 @@ def test_a_source_at_the_ceiling_waits_longer_but_not_forever(db_session):
     # Re-asking a site that failed ten times running, every day, is traffic
     # spent to learn nothing. Never re-asking is how one stays wrong for a
     # fortnight, which is precisely what happened.
-    _fail(db_session, "dead", times=MAX_STREAK + 2, when=NOW - timedelta(days=2))
+    # 30 hours: long enough that a source below the ceiling would be due.
+    _fail(db_session, "dead", times=MAX_STREAK + 2, when=NOW - timedelta(hours=30))
     state = load_states(db_session)["dead"]
     assert state.consecutive_failures >= MAX_STREAK
 
@@ -62,6 +63,38 @@ def test_a_source_at_the_ceiling_waits_longer_but_not_forever(db_session):
 
     later = NOW + timedelta(days=8)
     assert probe.select_reprobe_targets(db_session, ["dead"], now=later) == ["dead"]
+
+
+def test_a_dead_source_that_came_back_is_cleared_within_days_not_a_week(
+    db_session, monkeypatch
+):
+    # manhuanext, 2026-09-23: at the ceiling since a re-probe failed on
+    # 2026-09-20, and answering list, search, series and 90 chapters from the
+    # VPS three days later. Nobody follows it, so the re-probe is its only
+    # recovery path, and a seven-day rest kept a working source labelled dead
+    # until 2026-09-27.
+    _fail(db_session, "manhuanext", times=MAX_STREAK, when=NOW - timedelta(days=3))
+    assert load_states(db_session)["manhuanext"].status == "dead"
+
+    class _Listing:
+        items = [object()]
+
+    monkeypatch.setattr(
+        probe,
+        "list_installed_connectors",
+        lambda **_: [type("D", (), {"source_type": "manhuanext"})()],
+    )
+    monkeypatch.setattr(
+        probe, "create_connector", lambda _s: type("C", (), {"get_series_list": lambda self, p: _Listing()})()
+    )
+
+    out = probe.reprobe_sources(db_session, now=NOW)
+
+    assert out == {"manhuanext": None}
+    state = load_states(db_session)["manhuanext"]
+    assert state.status == "ok"
+    assert state.consecutive_failures == 0
+    assert state.last_ok_at == NOW
 
 
 def test_the_batch_is_capped(db_session):
