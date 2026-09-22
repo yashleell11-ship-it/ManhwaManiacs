@@ -68,6 +68,18 @@ services:
       # closed, so "live" means visible to him after login. Flipping this to
       # false hides every novel source and unmounts the /novels router.
       - MM_NOVELS_ENABLED=true
+      # Novel attribution + AI reading suggestions. Read by deepseek_client.py
+      # via os.getenv ONLY -- never through Settings, which is written back to
+      # settings.json and would land the key in every DB backup. `${...:-}`
+      # comes from an untracked `.env` in THIS file's own directory (verified
+      # against the real compose binary: it resolves relative to the compose
+      # file, same as the `../../backend` build contexts below, not to the
+      # caller's cwd -- deploy.sh cd's to the repo root first, which is not
+      # this directory). `.env` is in .gitignore, so this line commits with no
+      # key attached and both features degrade to "not configured" until one
+      # is placed on the box by hand: ops/vps/.env, one line,
+      # DEEPSEEK_API_KEY=..., then `docker compose ... up -d backend`.
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
     volumes:
       - /srv/manhwamaniacs/data:/data
       # APK / IPA drop-in (populated by the mobile build pipeline — 1c). Dirs
