@@ -20,6 +20,7 @@ dependencies = [
     "argon2-cffi==25.1.0",
     "slowapi==0.1.10",
     "pillow==12.3.0",
+    "av==18.1.0",
 ]
 
 [project.optional-dependencies]

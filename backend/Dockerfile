@@ -13,7 +13,8 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
 # No system dependencies: everything ships as manylinux wheels (curl_cffi
-# bundles its own libcurl). OCR now runs on the client, not the server.
+# bundles its own libcurl, av its own libav* for the iOS narration m4a).
+# OCR now runs on the client, not the server.
 COPY requirements.txt ./
 RUN pip install -r requirements.txt
 

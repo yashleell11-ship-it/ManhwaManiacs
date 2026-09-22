@@ -13,3 +13,7 @@ slowapi==0.1.10
 # wheel with libwebp + libjpeg-turbo bundled, so the Dockerfile still needs no
 # apt packages; ~7 MB installed. See services/image_resize.py.
 pillow==12.3.0
+# Narration for iOS: Ogg Opus -> AAC/M4A (services/chapter_audio_m4a.py).
+# abi3 manylinux wheel with its own libav* bundled, so the Dockerfile still
+# needs no apt packages (no ffmpeg); ~100 MB installed.
+av==18.1.0
