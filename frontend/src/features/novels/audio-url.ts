@@ -24,14 +24,56 @@
 import { requestBlob, sourceChapterQuery } from "@/services/http";
 import type { ChapterId } from "@/types/api";
 
+/**
+ * The two containers the server can send a chapter's audio in.
+ *
+ * `ogg` is the stored Ogg Opus file and the smaller of the two. `m4a` is AAC
+ * in an MP4 container, made from it on the server, for the browsers that
+ * cannot read Ogg at all — Safari on iPhone and iPad among them, where the
+ * player would otherwise sit on a file it can never start.
+ */
+export type NovelAudioFormat = "ogg" | "m4a";
+
+/** What the browser is asked about: the stored file, exactly. */
+export const OGG_OPUS_MIME = "audio/ogg; codecs=opus";
+
+/**
+ * Which format to ask for, given what the browser said about Ogg Opus.
+ *
+ * `canPlayType` answers "probably", "maybe" or "" — and only the empty string
+ * is a no. "maybe" is what browsers commonly say about a container they do
+ * read, so treating it as a refusal would send them the transcoded file for
+ * nothing.
+ */
+export function pickNovelAudioFormat(oggOpusAnswer: string): NovelAudioFormat {
+  return oggOpusAnswer === "" ? "m4a" : "ogg";
+}
+
+/**
+ * The format this browser should ask for.
+ *
+ * Asked on the press of play, never during render: there is no `Audio` on the
+ * server, and the answer cannot change while the page is open.
+ */
+export function browserNovelAudioFormat(): NovelAudioFormat {
+  return pickNovelAudioFormat(new Audio().canPlayType(OGG_OPUS_MIME));
+}
+
 /** The path and query the audio lives at, shared by both clients. */
-export function novelAudioPath(ref: ChapterId): {
+export function novelAudioPath(
+  ref: ChapterId,
+  format: NovelAudioFormat,
+): {
   path: string;
   query: Record<string, string>;
 } {
   // Query parameters, never path segments: connector keys are opaque and
-  // routinely contain slashes and percent-encoding.
-  return { path: "/novels/audio/file", query: sourceChapterQuery(ref) };
+  // routinely contain slashes and percent-encoding. The format is always
+  // sent, even the default, so what was asked for is visible in the request.
+  return {
+    path: "/novels/audio/file",
+    query: { ...sourceChapterQuery(ref), format },
+  };
 }
 
 /**
@@ -43,12 +85,15 @@ export function novelAudioPath(ref: ChapterId): {
  * `signal` lets a reader who leaves the chapter mid-download stop paying for
  * the rest of it; see `latest-load.ts` for why the caller must still check it
  * after this resolves.
+ *
+ * `format` is `browserNovelAudioFormat()`'s answer. The blob keeps the
+ * response's media type, so the element is told what it has been given.
  */
 export async function loadNovelAudioObjectUrl(
   ref: ChapterId,
-  { signal }: { signal?: AbortSignal } = {},
+  { signal, format }: { signal?: AbortSignal; format: NovelAudioFormat },
 ): Promise<string> {
-  const { path, query } = novelAudioPath(ref);
+  const { path, query } = novelAudioPath(ref, format);
   const { blob } = await requestBlob(path, { query, signal });
   return URL.createObjectURL(blob);
 }

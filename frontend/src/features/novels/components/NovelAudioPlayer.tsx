@@ -2,7 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { loadNovelAudioObjectUrl } from "@/features/novels/audio-url";
+import {
+  browserNovelAudioFormat,
+  loadNovelAudioObjectUrl,
+} from "@/features/novels/audio-url";
 import {
   createLatestLoad,
   isPlaybackFailure,
@@ -122,7 +125,13 @@ export function NovelAudioPlayer({
       setFailed(false);
       let url: string;
       try {
-        url = await loadNovelAudioObjectUrl(chapter, { signal });
+        // Asked here rather than once at render: there is no `Audio` during
+        // server rendering, and a browser that cannot read Ogg (Safari on an
+        // iPhone) must get the m4a or it downloads a file it never plays.
+        url = await loadNovelAudioObjectUrl(chapter, {
+          signal,
+          format: browserNovelAudioFormat(),
+        });
       } catch {
         // Audio is an addition to the page. A failure here leaves the chapter
         // readable and says so, rather than breaking the reader. An abort is
