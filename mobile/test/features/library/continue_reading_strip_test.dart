@@ -51,13 +51,23 @@ Future<void> _pump(
       // The real route patterns, taken from the app's own constants, so a
       // change to either can never leave this test asserting a path that no
       // longer exists while still passing.
+      // Each echoes the location it was reached at too, so the position the
+      // link carried can be asserted as well as the branch.
       GoRoute(
         path: Routes.reader,
-        builder: (_, __) => const Scaffold(body: Text('PAGE READER')),
+        builder: (_, state) => Scaffold(
+          body: Column(
+            children: [const Text('PAGE READER'), Text('at ${state.uri}')],
+          ),
+        ),
       ),
       GoRoute(
         path: Routes.novelReader,
-        builder: (_, __) => const Scaffold(body: Text('NOVEL READER')),
+        builder: (_, state) => Scaffold(
+          body: Column(
+            children: [const Text('NOVEL READER'), Text('at ${state.uri}')],
+          ),
+        ),
       ),
     ],
   );
@@ -138,6 +148,50 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('PAGE READER'), findsOneWidget);
+    });
+
+    testWidgets('reopens a manga row at its stored page', (tester) async {
+      // Neither reader restores a server-side position by itself, so a link
+      // without `?page=` opened a chapter read on another device at page 1.
+      await _pump(tester, items: [_item()]);
+
+      await tester.tap(find.text('Page 7 of 20'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text(
+          'at /library/read/asurascans/series%2Fone/'
+          'series%2Fone%2Fchapters%2F12?page=7',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('reopens a novel row at its stored bucket', (tester) async {
+      // The novel reader starts at the top of the chapter without `?page=`.
+      await _pump(
+        tester,
+        items: [
+          _item(
+            sourceId: 'novelarchive',
+            seriesKey: 'book',
+            chapterKey: 'ch-3',
+            lastPage: 60,
+            pageCount: 100,
+          ),
+        ],
+        mode: ContentMode.novel,
+        index: const {'novelarchive': ContentMode.novel},
+        novelsEnabled: true,
+      );
+
+      await tester.tap(find.text('60% through'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('at /novels/read/novelarchive/book/ch-3?page=60'),
+        findsOneWidget,
+      );
     });
 
     testWidgets('opens the NOVEL reader for a novel row', (tester) async {

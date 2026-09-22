@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -9,8 +11,12 @@ import 'package:manhwamaniacs/core/utils/responsive.dart';
 import 'package:manhwamaniacs/features/content_mode/content_mode.dart';
 import 'package:manhwamaniacs/features/content_mode/content_mode_controller.dart';
 import 'package:manhwamaniacs/features/content_mode/widgets/content_mode_chip.dart';
+import 'package:manhwamaniacs/features/library/models/reading_history_item.dart';
 import 'package:manhwamaniacs/features/library/providers/intelligence_providers.dart';
+import 'package:manhwamaniacs/features/library/utils/resume_location.dart';
 import 'package:manhwamaniacs/features/library/widgets/history/history_series_card.dart';
+import 'package:manhwamaniacs/features/sources/models/source_series.dart';
+import 'package:manhwamaniacs/shared/providers/repository_providers.dart';
 import 'package:manhwamaniacs/shared/widgets/empty_state.dart';
 import 'package:manhwamaniacs/shared/widgets/premium/hero_heading.dart';
 import 'package:manhwamaniacs/shared/widgets/skeleton_box.dart';
@@ -150,20 +156,13 @@ class ReadingHistoryScreen extends ConsumerWidget {
                               item.seriesKey,
                             ),
                           ),
-                          // And the play badge goes straight back into the
-                          // chapter, which is why somebody opened history.
-                          onContinue: () => context.push(
-                            isNovel
-                                ? RoutePaths.novelReader(
-                                    item.sourceId,
-                                    item.seriesKey,
-                                    item.chapterKey,
-                                  )
-                                : RoutePaths.reader(
-                                    item.sourceId,
-                                    item.seriesKey,
-                                    item.chapterKey,
-                                  ),
+                          // And the play badge picks up where the reader
+                          // stopped, which is why somebody opened history.
+                          onContinue: () => _continue(
+                            context,
+                            ref,
+                            item,
+                            isNovel: isNovel,
                           ),
                         );
                       },
@@ -178,5 +177,50 @@ class ReadingHistoryScreen extends ConsumerWidget {
         },
       ),
     );
+  }
+
+  /// Continue, by the one rule the continue-reading strip shares
+  /// (`resume_location.dart`): an unfinished chapter reopens at its stored
+  /// position, a finished one moves on to the chapter after it.
+  ///
+  /// It used to push the bare chapter path. Neither reader restores a server
+  /// position by itself, so a novel at 60% opened at the top, a manga chapter
+  /// read on another device opened at page 1, and a chapter the reader had
+  /// just FINISHED — the row a history shelf most often leads with — was
+  /// reopened from the start instead of moving on.
+  ///
+  /// Only a finished chapter needs the chapter list, so only that case waits
+  /// on a request. When the list cannot name a next chapter (caught up, a
+  /// stale key, or the request failed) the book's page opens instead: it
+  /// shows every chapter, which beats reopening a finished one or guessing.
+  static Future<void> _continue(
+    BuildContext context,
+    WidgetRef ref,
+    ReadingHistoryItem item, {
+    required bool isNovel,
+  }) async {
+    var chapters = const <SourceChapterSummary>[];
+    if (item.isCompleted) {
+      final result = await ref
+          .read(sourcesRepositoryProvider)
+          .getChapters(item.sourceId, item.seriesKey);
+      if (result.isOk) chapters = result.value;
+    }
+    if (!context.mounted) return;
+    final point = resumePointFor(
+      chapterKey: item.chapterKey,
+      lastPage: item.lastPage,
+      isCompleted: item.isCompleted,
+      chapters: chapters,
+    );
+    final target = point == null
+        ? RoutePaths.sourceSeriesDetail(item.sourceId, item.seriesKey)
+        : resumeLocation(
+            sourceId: item.sourceId,
+            seriesKey: item.seriesKey,
+            point: point,
+            isNovel: isNovel,
+          );
+    unawaited(context.push(target));
   }
 }

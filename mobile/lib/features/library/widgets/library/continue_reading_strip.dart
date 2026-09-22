@@ -1,13 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:manhwamaniacs/app/router/routes.dart';
 import 'package:manhwamaniacs/app/theme/app_colors.dart';
 import 'package:manhwamaniacs/app/theme/app_presets.dart';
 import 'package:manhwamaniacs/features/content_mode/content_mode.dart';
 import 'package:manhwamaniacs/features/content_mode/content_mode_controller.dart';
 import 'package:manhwamaniacs/features/library/models/continue_reading_item.dart';
 import 'package:manhwamaniacs/features/library/providers/dashboard_providers.dart';
+import 'package:manhwamaniacs/features/library/utils/resume_location.dart';
 import 'package:manhwamaniacs/features/sources/utils/chapter_label.dart';
 import 'package:manhwamaniacs/shared/widgets/glass_card.dart';
 
@@ -97,23 +97,27 @@ class _ContinueCard extends StatelessWidget {
       width: _cardWidth,
       child: GlassCard(
         padding: EdgeInsets.all(context.space.sm),
-        // No page or position on the link, matching every other screen that
-        // opens a chapter here. Both readers restore their own position, and
-        // the two units are not interchangeable: a novel's `last_page` is a
-        // progress BUCKET (1-100), so handing it to the page reader as a page
-        // would open the wrong place with total confidence.
+        // The stored position rides `?page=`, by the rule history's Continue
+        // shares (`resume_location.dart`). This used to leave it off on the
+        // belief that both readers restore their own position; neither does
+        // from the server — the novel reader opened a 60%-read chapter at the
+        // top, and the page reader only remembers an offset saved on this
+        // device. Each route reads `?page=` in the unit its reader saved it
+        // in (a page, or a novel's progress BUCKET), and this link only ever
+        // carries a row back to the reader kind that wrote it, so the units
+        // never cross. A finished chapter is already moved on to the next one
+        // by the server (`continue_reading`), arriving here as page 1.
         onTap: () => context.push(
-          isNovel
-              ? RoutePaths.novelReader(
-                  item.sourceId,
-                  item.seriesKey,
-                  item.chapterKey,
-                )
-              : RoutePaths.reader(
-                  item.sourceId,
-                  item.seriesKey,
-                  item.chapterKey,
-                ),
+          resumeLocation(
+            sourceId: item.sourceId,
+            seriesKey: item.seriesKey,
+            point: resumePointFor(
+              chapterKey: item.chapterKey,
+              lastPage: item.lastPage,
+              isCompleted: false,
+            )!,
+            isNovel: isNovel,
+          ),
         ),
         child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
