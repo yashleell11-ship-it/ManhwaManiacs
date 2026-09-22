@@ -286,6 +286,7 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
     );
     _follower = NovelAudioFollower(widget.chapter.paragraphs);
     _follower.range.addListener(_onSpeakingChanged);
+    _follower.voicing.addListener(_onVoicingChanged);
     _scrollController.addListener(_onScroll);
     applyReadingSystemUiMode();
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -302,6 +303,7 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
     _scrollController.dispose();
     _bucket.dispose();
     _follower.range.removeListener(_onSpeakingChanged);
+    _follower.voicing.removeListener(_onVoicingChanged);
     _follower.dispose();
     // Symmetric with initState: leaving a chapter restores exactly what the
     // app launched with rather than permanently changing its shape.
@@ -626,7 +628,10 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
     // top of the screen: follow-scroll gets there while there is still voice
     // left, and advancing would cut the reader off mid-sentence. The stop
     // tick calls back in through [_onSpeakingChanged].
-    if (_follower.range.value != null) {
+    //
+    // [NovelAudioFollower.voicing] as well as the range: audio the page
+    // cannot follow plays with nothing lit, and is just as unfinished.
+    if (_follower.range.value != null || _follower.voicing.value) {
       _autoNextTimer?.cancel();
       _autoNextTimer = null;
       return;
@@ -775,6 +780,13 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
         );
       },
     );
+  }
+
+  /// The voice started or stopped, lit or not. Stopping is where a chapter
+  /// listened to WITHOUT follow-along gets to continue: its range never
+  /// moves, so [_onSpeakingChanged] never hears of it.
+  void _onVoicingChanged() {
+    if (!_follower.voicing.value) _maybeScheduleAutoNext();
   }
 
   /// The voice moved to another paragraph, or stopped.
@@ -1062,24 +1074,40 @@ class _ChapterHeading extends StatelessWidget {
               final playable =
                   ref.watch(playableNovelAudioProvider(key)).valueOrNull;
               if (playable == null) return const SizedBox.shrink();
+              final note =
+                  novelFollowAlongNote(playable.audio, chapter.paragraphs);
               return Padding(
                 padding: const EdgeInsets.only(top: 18),
-                child: Center(
-                  child: OutlinedButton.icon(
-                    onPressed: onListen,
-                    icon: const Icon(Icons.headphones_rounded, size: 18),
-                    // "saved" so a chapter says it will play with the network
-                    // off before anybody tries it on a plane.
-                    label: Text(
-                      'Listen to this chapter'
-                      '${_spoken(playable.audio.totalMs)}'
-                      '${playable.file != null ? ' · saved' : ''}',
+                child: Column(
+                  children: [
+                    Center(
+                      child: OutlinedButton.icon(
+                        onPressed: onListen,
+                        icon: const Icon(Icons.headphones_rounded, size: 18),
+                        // "saved" so a chapter says it will play with the
+                        // network off before anybody tries it on a plane.
+                        label: Text(
+                          'Listen to this chapter'
+                          '${_spoken(playable.audio.totalMs)}'
+                          '${playable.file != null ? ' · saved' : ''}',
+                        ),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: surface.ink,
+                          side: BorderSide(color: surface.rule),
+                        ),
+                      ),
                     ),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: surface.ink,
-                      side: BorderSide(color: surface.rule),
-                    ),
-                  ),
+                    if (note != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(
+                          note,
+                          key: const Key('novel-audio-only-note'),
+                          textAlign: TextAlign.center,
+                          style: TextStyle(fontSize: 12, color: surface.muted),
+                        ),
+                      ),
+                  ],
                 ),
               );
             },

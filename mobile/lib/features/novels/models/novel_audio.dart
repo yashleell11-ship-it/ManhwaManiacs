@@ -69,6 +69,7 @@ class NovelAudio {
     required this.totalMs,
     required this.bytes,
     required this.segments,
+    required this.highlightSafe,
   });
 
   factory NovelAudio.fromJson(Map<String, dynamic> json) {
@@ -77,6 +78,10 @@ class NovelAudio {
       available: json['available'] == true,
       totalMs: (json['total_ms'] as num?)?.toInt() ?? 0,
       bytes: (json['bytes'] as num?)?.toInt() ?? 0,
+      // Only an explicit true. Absent means a server — or a map saved on the
+      // phone — from before the flag existed, which cannot say whether the
+      // words still match, and "cannot be known" is not "yes".
+      highlightSafe: json['highlight_safe'] == true,
       segments: raw is List
           ? raw
               .whereType<Map<String, dynamic>>()
@@ -98,6 +103,7 @@ class NovelAudio {
         'total_ms': totalMs,
         'bytes': bytes,
         'segments': [for (final segment in segments) segment.toJson()],
+        'highlight_safe': highlightSafe,
       };
 
   static const NovelAudio none = NovelAudio(
@@ -105,12 +111,24 @@ class NovelAudio {
     totalMs: 0,
     bytes: 0,
     segments: <NovelAudioSegment>[],
+    highlightSafe: false,
   );
 
   final bool available;
   final int totalMs;
   final int bytes;
   final List<NovelAudioSegment> segments;
+
+  /// Whether the server could PROVE the text this audio was rendered from is
+  /// the text it serves for the chapter now.
+  ///
+  /// The map's offsets point into the text as it was at render time. A
+  /// chapter re-fetched since — a source that fixed a typo, re-split a
+  /// paragraph, or renumbered its chapters — can still pass [matchesText]
+  /// (every range lands inside SOME paragraph) while lighting the wrong
+  /// words. Only the server knows what the render read, so when it cannot
+  /// vouch for it the audio still plays and nothing follows along.
+  final bool highlightSafe;
 
   /// Index into [segments] of the sentence being spoken at [positionMs], or
   /// -1 for none.
@@ -145,6 +163,16 @@ class NovelAudio {
     // it means "highlight nothing", which is always a safe answer.
     return -1;
   }
+
+  /// Whether the page should follow this audio: the server vouches for the
+  /// text it was rendered from AND every range fits [paragraphs].
+  ///
+  /// Both, because they guard different things. [highlightSafe] is the
+  /// server's answer about its own copy; [matchesText] is the last check
+  /// against the words actually on this screen, which may be a copy saved on
+  /// the phone.
+  bool followsText(List<String> paragraphs) =>
+      highlightSafe && matchesText(paragraphs);
 
   /// Whether this map still describes [paragraphs].
   ///

@@ -192,6 +192,7 @@ void main() {
           totalMs: 4000,
           bytes: 1024,
           segments: segments,
+          highlightSafe: true,
         );
 
     final good = audioFor([
@@ -320,6 +321,58 @@ void main() {
       follower.onPosition(99999, good);
 
       expect(follower.range.value, isNull);
+    });
+
+    /// The same render as [good], but the server cannot vouch that the text
+    /// it was made from is the text served now. Its ranges still land inside
+    /// these paragraphs — which is exactly why [NovelAudio.matchesText]
+    /// alone cannot catch it.
+    NovelAudio unvouched() => NovelAudio(
+          available: true,
+          totalMs: good.totalMs,
+          bytes: good.bytes,
+          segments: good.segments,
+          highlightSafe: false,
+        );
+
+    test('lights nothing when the server cannot vouch for the text', () {
+      final follower = NovelAudioFollower(paragraphs);
+      addTearDown(follower.dispose);
+      final audio = unvouched();
+      expect(audio.matchesText(paragraphs), isTrue);
+
+      follower.onPosition(500, audio);
+      follower.onPosition(2500, audio);
+
+      // No range means no highlight and no follow-scroll: both hang off it.
+      expect(follower.range.value, isNull);
+    });
+
+    test('still says the voice is reading when nothing is lit', () {
+      // Auto-next waits on this. Without it, audio the page cannot follow
+      // would look like silence and the reader would move on mid-sentence.
+      final follower = NovelAudioFollower(paragraphs);
+      addTearDown(follower.dispose);
+      final audio = unvouched();
+
+      expect(follower.voicing.value, isFalse);
+      follower.onPosition(500, audio);
+      expect(follower.voicing.value, isTrue);
+      expect(follower.range.value, isNull);
+      follower.onPosition(null, audio);
+      expect(follower.voicing.value, isFalse);
+    });
+
+    test('says so under Listen when it will not follow, and only then', () {
+      expect(novelFollowAlongNote(good, paragraphs), isNull);
+      expect(
+        novelFollowAlongNote(unvouched(), paragraphs),
+        'Audio only: this narration may not match the text on the page, '
+        'so the page will not follow along.',
+      );
+      // A map that does not fit the words on screen is the same promise
+      // broken from the other side.
+      expect(novelFollowAlongNote(good, const ['Short.']), isNotNull);
     });
   });
 }

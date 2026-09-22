@@ -116,6 +116,18 @@ List<NovelSpokenRun> _unmarked(List<NovelRun> runs) => [
         (text: run.text, style: run.style, mark: NovelSpeechMark.none),
     ];
 
+/// What the chapter says under "Listen" when the page will NOT follow the
+/// voice, or null when it will.
+///
+/// The highlight is the feature a reader has learned to expect from a
+/// narrated chapter, so its absence is said out loud rather than left to
+/// look like a bug the moment play is pressed.
+String? novelFollowAlongNote(NovelAudio audio, List<String> paragraphs) =>
+    audio.followsText(paragraphs)
+        ? null
+        : 'Audio only: this narration may not match the text on the page, '
+            'so the page will not follow along.';
+
 /// Turns a stream of playhead positions into "these words, in this paragraph".
 ///
 /// Deliberately not a widget and deliberately not `setState`: `just_audio`'s
@@ -131,12 +143,21 @@ class NovelAudioFollower {
   final ValueNotifier<NovelSpeakingRange?> range =
       ValueNotifier<NovelSpeakingRange?>(null);
 
+  /// Whether a voice is reading this chapter — playing, or paused part way —
+  /// whether or not anything on the page is lit.
+  ///
+  /// Not the same question as [range]. Audio the page cannot follow (see
+  /// [NovelAudio.followsText]) plays with no range at all, and a reader that
+  /// took "nothing lit" for "nothing playing" would continue to the next
+  /// chapter under a listener who is mid-sentence.
+  final ValueNotifier<bool> voicing = ValueNotifier<bool>(false);
+
   /// The last segment published. The cheapest possible no-op: the playhead
   /// reports the same sentence many times before it moves on, and every one of
   /// those ticks would otherwise notify a paragraph into rebuilding.
   int _segment = -1;
 
-  /// [NovelAudio.matchesText] walks every segment — several hundred on a long
+  /// [NovelAudio.followsText] walks every segment — several hundred on a long
   /// chapter — so it is answered once per map instance rather than once per
   /// tick. The provider hands out the same instance until it refetches, and a
   /// refetch is exactly when the answer can change.
@@ -144,6 +165,7 @@ class NovelAudioFollower {
   bool _follows = false;
 
   void onPosition(int? positionMs, NovelAudio audio) {
+    voicing.value = positionMs != null;
     if (positionMs == null || !_canFollow(audio)) {
       _publish(-1, audio);
       return;
@@ -154,7 +176,7 @@ class NovelAudioFollower {
   bool _canFollow(NovelAudio audio) {
     if (!identical(audio, _checked)) {
       _checked = audio;
-      _follows = audio.matchesText(_paragraphs);
+      _follows = audio.followsText(_paragraphs);
     }
     return _follows;
   }
@@ -174,5 +196,8 @@ class NovelAudioFollower {
     );
   }
 
-  void dispose() => range.dispose();
+  void dispose() {
+    range.dispose();
+    voicing.dispose();
+  }
 }

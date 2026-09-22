@@ -23,6 +23,7 @@ NovelAudio mapOf(List<NovelAudioSegment> segments) {
     totalMs: segments.isEmpty ? 0 : segments.last.endMs,
     bytes: 1,
     segments: segments,
+    highlightSafe: true,
   );
 }
 
@@ -154,6 +155,43 @@ void main() {
 
       expect(parsed.available, isFalse);
       expect(parsed.segments, isEmpty);
+    });
+
+    test('follows along only when the server vouches for the text', () {
+      Map<String, dynamic> payload(Object? safe) => {
+            'available': true,
+            'total_ms': 1200,
+            'bytes': 10,
+            if (safe != null) 'highlight_safe': safe,
+            'segments': [
+              {'i': 0, 'start_ms': 0, 'end_ms': 1200, 'p': 0, 's': 0, 'e': 5},
+            ],
+          };
+
+      expect(NovelAudio.fromJson(payload(true)).highlightSafe, isTrue);
+      expect(NovelAudio.fromJson(payload(false)).highlightSafe, isFalse);
+      // A server — or a map saved on the phone — from before the flag cannot
+      // say, and "cannot be known" is not "yes".
+      expect(NovelAudio.fromJson(payload(null)).highlightSafe, isFalse);
+      expect(NovelAudio.fromJson(payload('true')).highlightSafe, isFalse);
+
+      const text = ['Hello there.'];
+      expect(NovelAudio.fromJson(payload(true)).followsText(text), isTrue);
+      expect(NovelAudio.fromJson(payload(false)).followsText(text), isFalse);
+    });
+
+    test('a saved map keeps its verdict', () {
+      // The map is saved beside offline audio and read back with no server
+      // to ask again.
+      final saved = NovelAudio.fromJson(
+        NovelAudio.fromJson(const {
+          'available': true,
+          'highlight_safe': true,
+          'segments': <dynamic>[],
+        }).toJson(),
+      );
+      expect(saved.highlightSafe, isTrue);
+      expect(NovelAudio.none.highlightSafe, isFalse);
     });
 
     test('a malformed payload degrades to no audio rather than throwing', () {
