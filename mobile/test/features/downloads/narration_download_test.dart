@@ -9,7 +9,9 @@
 library;
 
 import 'dart:async';
+import 'dart:io';
 
+import 'package:flutter/foundation.dart' show debugDefaultTargetPlatformOverride;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -30,8 +32,10 @@ import 'package:manhwamaniacs/features/downloads/services/device_storage_info.da
 import 'package:manhwamaniacs/features/downloads/services/retention_maintenance.dart';
 import 'package:manhwamaniacs/features/downloads/store/downloads_store.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_audio.dart';
+import 'package:manhwamaniacs/features/novels/models/novel_audio_format.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter.dart';
 import 'package:manhwamaniacs/features/novels/providers/novel_audio_provider.dart';
+import 'package:manhwamaniacs/features/novels/utils/narration_playback.dart';
 import 'package:manhwamaniacs/features/novels/widgets/audiobook_picker_sheet.dart';
 import 'package:manhwamaniacs/features/novels/widgets/narration_save_button.dart';
 import 'package:manhwamaniacs/features/reader/repositories/reader_repository.dart';
@@ -51,6 +55,7 @@ final _timing = NovelAudio.fromJson({
   'available': true,
   'total_ms': 4200,
   'bytes': 2048,
+  'highlight_safe': true,
   'segments': [
     {'i': 0, 'start_ms': 0, 'end_ms': 2000, 'p': 0, 's': 0, 'e': 9, 'speech': false},
     {
@@ -66,7 +71,19 @@ final _timing = NovelAudio.fromJson({
   ],
 });
 
-final _opus = List<int>.generate(2048, (i) => i % 251);
+/// A narration as the server stores it: an Ogg page first, which is what
+/// the queue and the reader recognise it by.
+final _opus = [
+  ...'OggS'.codeUnits,
+  ...List<int>.generate(2044, (i) => i % 251),
+];
+
+/// The same narration as `format=m4a` answers it: an MP4 file, whose first
+/// box is `ftyp` at offset 4.
+final _m4a = [
+  0, 0, 0, 0x20, ...'ftypM4A '.codeUnits,
+  ...List<int>.generate(2036, (i) => (i * 7) % 251),
+];
 
 class _ReaderSpy extends Mock implements ReaderRepository {}
 
@@ -135,6 +152,9 @@ void main() {
         deviceStorageInfoProvider.overrideWithValue(_FixedDeviceStorageInfo()),
         storageCapProvider.overrideWith(_FixedStorageCapNotifier.new),
         downloadConcurrencyOverride(),
+        narrationPlaybackCacheProvider.overrideWith(
+          (ref) async => Directory('${harness.tempDir.path}/playback'),
+        ),
       ];
 
   ProviderContainer container() {
@@ -286,6 +306,94 @@ void main() {
     });
   });
 
+  /// An iPhone's player cannot open Ogg at all, and takes a local file's type
+  /// from its name. Everything below failed on every iPhone before: the save
+  /// was Ogg, and the file had no extension to say otherwise.
+  group('on an iPhone', () {
+    setUp(() {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      repo.audioBytesByChapter = {'c120': _m4a};
+    });
+    tearDown(() => debugDefaultTargetPlatformOverride = null);
+
+    test('the queue asks for MP4, and Android still asks for Ogg', () async {
+      await saveNarration(container());
+      expect(repo.audioBytesFormats, [NovelAudioFormat.m4a]);
+
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      repo
+        ..audioBytesByChapter = {'c121': _opus}
+        ..audioByChapter = {'c121': _timing};
+      final c = container();
+      final queue = c.read(downloadQueueControllerProvider.notifier);
+      await queue.enqueueChapters(
+        narrationDownloadRequests(
+          chapter: (
+            sourceId: _chapter.sourceId,
+            seriesKey: _chapter.seriesKey,
+            chapterKey: 'c121',
+          ),
+        ),
+      );
+      await queue.debugWaitUntilIdle();
+      expect(repo.audioBytesFormats, [
+        NovelAudioFormat.m4a,
+        NovelAudioFormat.ogg,
+      ]);
+    });
+
+    test('plays the save from a path named .m4a, with the same bytes',
+        () async {
+      final c = container();
+      await saveNarration(c);
+
+      final playable =
+          await c.read(playableNovelAudioProvider(_chapter).future);
+
+      final file = playable!.file!;
+      expect(file.path, endsWith('.m4a'));
+      expect(file.path, startsWith('${harness.tempDir.path}/playback/'));
+      expect(await file.readAsBytes(), _m4a);
+      // The saved blob itself is untouched and still has no extension.
+      final saved =
+          await harness.storeFor('u1p1').readSavedNarration(_chapter);
+      expect(saved!.audio.path, isNot(endsWith('.m4a')));
+      expect(await saved.audio.readAsBytes(), _m4a);
+    });
+
+    test('a server that ignores format=m4a leaves nothing saved', () async {
+      // It answers Ogg, which this phone would then "have" and never play.
+      repo.audioBytesByChapter = {'c120': _opus};
+      await saveNarration(container());
+
+      final store = harness.storeFor('u1p1');
+      final row = await store.getChapter(audioIdentity(_chapter));
+      expect(row!.state, DownloadChapterState.failed);
+      expect(row.error, 'The server sent audio this phone cannot play.');
+      expect(await store.readSavedNarration(_chapter), isNull);
+    });
+
+    test('an Ogg save from before is streamed instead, and says so',
+        () async {
+      // Saved while the phone still asked for the default.
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      repo.audioBytesByChapter = {'c120': _opus};
+      final c = container();
+      await saveNarration(c);
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      repo.audioRequests.clear();
+
+      final saved = await c.read(savedNarrationProvider(_chapter).future);
+      expect(saved!.playable, isFalse);
+
+      final playable =
+          await c.read(playableNovelAudioProvider(_chapter).future);
+      expect(playable!.file, isNull);
+      expect(playable.audio.totalMs, 4200);
+      expect(repo.audioRequests, ['c120']);
+    });
+  });
+
   group('listing', () {
     test('a narration is not a chapter everywhere else', () async {
       final c = container();
@@ -419,6 +527,57 @@ void main() {
       expect(find.byKey(const Key('narration-save')), findsNothing);
     });
 
+    testWidgets('an unplayable save asks to be saved again, and is',
+        (tester) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            downloadsStoreProvider.overrideWithValue(
+              DownloadsStore(
+                scopeId: 'u1p1',
+                database: Completer<Database>().future,
+                blobStore: Completer<BlobStore>().future,
+              ),
+            ),
+            novelsRepositoryProvider.overrideWithValue(repo),
+            downloadQueueControllerProvider.overrideWith(() => queue),
+            seriesNarrationStatusProvider(_series).overrideWith(
+              (ref) async => const {
+                'c120': (state: DownloadChapterState.complete, error: null),
+              },
+            ),
+            savedNarrationProvider(_chapter).overrideWith(
+              (ref) async => (
+                file: File('saved-before'),
+                audio: _timing,
+                playable: false,
+              ),
+            ),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.dark,
+            home: const Scaffold(
+              body: NarrationSaveButton(chapter: _chapter, color: Colors.white),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      // The copy is only examined once the row is known to be complete.
+      await tester.pump();
+
+      expect(find.byKey(const Key('narration-saved')), findsNothing);
+      await tester.tap(find.byKey(const Key('narration-resave')));
+      await tester.pump();
+
+      // The old copy goes, then the chapter is saved afresh.
+      expect(queue.cancelled, [audioIdentity(_chapter)]);
+      expect(
+        queue.requests.map((r) => (r.id.chapterKey, r.kind)),
+        [('c120', DownloadKind.novel), ('c120:audio', DownloadKind.audio)],
+      );
+    });
+
     testWidgets('a failed save offers a retry', (tester) async {
       await pump(
         tester,
@@ -511,8 +670,15 @@ void main() {
 class _RecordingQueue extends DownloadQueueController {
   final List<ChapterQueueRequest> requests = [];
 
+  final List<ChapterIdentity> cancelled = [];
+
   @override
   Future<void> enqueueChapters(Iterable<ChapterQueueRequest> chapters) async {
     requests.addAll(chapters);
+  }
+
+  @override
+  Future<void> cancelChapter(ChapterIdentity id) async {
+    cancelled.add(id);
   }
 }

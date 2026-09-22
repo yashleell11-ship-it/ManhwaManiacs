@@ -1,6 +1,7 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/foundation.dart'
+    show defaultTargetPlatform, visibleForTesting;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:manhwamaniacs/core/error/app_error.dart';
 import 'package:manhwamaniacs/features/downloads/models/chapter_identity.dart';
@@ -13,6 +14,7 @@ import 'package:manhwamaniacs/features/downloads/queue/download_request_gate.dar
 import 'package:manhwamaniacs/features/downloads/services/chapter_page_fetcher.dart';
 import 'package:manhwamaniacs/features/downloads/services/device_storage_info.dart';
 import 'package:manhwamaniacs/features/downloads/store/downloads_store.dart';
+import 'package:manhwamaniacs/features/novels/models/novel_audio_format.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter.dart';
 import 'package:manhwamaniacs/features/reader/models/chapter_manifest.dart';
 import 'package:manhwamaniacs/shared/providers/repository_providers.dart';
@@ -669,6 +671,12 @@ class DownloadQueueController extends Notifier<DownloadQueueState> {
   /// phone is offline, and a later re-render on the server would hand back a
   /// map that no longer matches these bytes.
   ///
+  /// The bytes are asked for in the container this phone's player reads —
+  /// MP4 on an iPhone, whose player cannot open Ogg at all — and checked
+  /// before they are kept. A server that predates the `format` parameter
+  /// answers Ogg whatever is asked, and a saved file nothing can play is
+  /// worse than a failed save: it says "saved" and then plays nothing.
+  ///
   /// Nothing else in the queue learns a new shape: the same request gate, the
   /// same retry bound, the same completeness guard, the same blob store with
   /// its refcounting and storage cap.
@@ -696,11 +704,13 @@ class DownloadQueueController extends Notifier<DownloadQueueState> {
       );
     }
 
+    final platform = defaultTargetPlatform;
     final result = await _gate.run(
       () => ref.read(novelsRepositoryProvider).audioBytes(
             sourceId: text.sourceId,
             seriesKey: text.seriesKey,
             chapterKey: text.chapterKey,
+            format: novelAudioFormatFor(platform),
           ),
     );
     if (result.isErr) {
@@ -710,6 +720,11 @@ class DownloadQueueController extends Notifier<DownloadQueueState> {
     if (bytes.isEmpty) {
       return _recordChapterFailure(
         store, chapter, 'This chapter has not been narrated yet.',
+      );
+    }
+    if (!canPlayNovelAudio(sniffNovelAudioFormat(bytes), platform)) {
+      return _recordChapterFailure(
+        store, chapter, 'The server sent audio this phone cannot play.',
       );
     }
 

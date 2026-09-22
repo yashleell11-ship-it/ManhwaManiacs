@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:manhwamaniacs/core/error/app_error.dart';
 import 'package:manhwamaniacs/core/utils/result.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_audio.dart';
+import 'package:manhwamaniacs/features/novels/models/novel_audio_format.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_cast.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter_window.dart';
@@ -86,15 +87,17 @@ class NovelsRepositoryImpl implements NovelsRepository {
     required String sourceId,
     required String seriesKey,
     required String chapterKey,
+    required NovelAudioFormat format,
   }) async {
     try {
       final r = await _dio.get<List<int>>(
         '/novels/audio/file',
-        queryParameters: {
-          'source': sourceId,
-          'series': seriesKey,
-          'chapter': chapterKey,
-        },
+        queryParameters: novelAudioFileQuery(
+          sourceId: sourceId,
+          seriesKey: seriesKey,
+          chapterKey: chapterKey,
+          format: format,
+        ),
         options: Options(responseType: ResponseType.bytes),
       );
       return Ok(r.data ?? const <int>[]);

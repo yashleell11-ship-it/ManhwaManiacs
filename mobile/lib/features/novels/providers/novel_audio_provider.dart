@@ -1,10 +1,13 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:manhwamaniacs/features/downloads/providers/downloads_scope.dart';
 import 'package:manhwamaniacs/features/downloads/queue/download_queue_controller.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_audio.dart';
+import 'package:manhwamaniacs/features/novels/models/novel_audio_format.dart';
 import 'package:manhwamaniacs/features/novels/providers/novel_chapter_provider.dart';
+import 'package:manhwamaniacs/features/novels/utils/narration_playback.dart';
 import 'package:manhwamaniacs/shared/providers/repository_providers.dart';
 
 /// Whether this chapter has been rendered, and the map to follow along with.
@@ -28,7 +31,12 @@ final novelAudioProvider = FutureProvider.autoDispose
 
 /// A chapter's narration as it is saved on this phone: the file to play and
 /// the timing map it was rendered with.
-typedef SavedNarration = ({File file, NovelAudio audio});
+///
+/// [playable] false is a save this phone's player cannot open — an Ogg file
+/// saved on an iPhone before the server could send anything else. It is
+/// still reported, rather than read as "not saved", so the chapter can say
+/// it needs saving again instead of claiming a copy that plays nothing.
+typedef SavedNarration = ({File file, NovelAudio audio, bool playable});
 
 /// This chapter's saved narration, or null when there is none — not saved,
 /// still downloading, no active profile, or a file deleted by hand.
@@ -36,6 +44,11 @@ typedef SavedNarration = ({File file, NovelAudio audio});
 /// Re-reads whenever a download finishes (the queue's revision moves), so a
 /// narration that lands while its chapter is open is picked up for the next
 /// press of play without leaving the reader.
+///
+/// What the file IS is read from its first bytes, not assumed: nothing
+/// recorded the format of a save made before formats existed. On an iPhone
+/// the file is then handed over as a copy named `.m4a`, because AVPlayer
+/// takes a local file's type from its name and a saved blob has none.
 final savedNarrationProvider = FutureProvider.autoDispose
     .family<SavedNarration?, NovelChapterKey>((ref, key) async {
   final store = ref.watch(downloadsStoreProvider);
@@ -43,12 +56,35 @@ final savedNarrationProvider = FutureProvider.autoDispose
   if (store == null) return null;
   final saved = await store.readSavedNarration(key);
   if (saved == null) return null;
+  final NovelAudio audio;
   try {
-    final audio = NovelAudio.fromJson(saved.timing);
-    return audio.available ? (file: saved.audio, audio: audio) : null;
+    audio = NovelAudio.fromJson(saved.timing);
   } catch (_) {
     // A map that will not parse is not a narration anyone can follow; the
     // reader falls back to streaming rather than to an error.
+    return null;
+  }
+  if (!audio.available) return null;
+
+  final platform = defaultTargetPlatform;
+  final format = await sniffNovelAudioFile(saved.audio);
+  if (format == null || !canPlayNovelAudio(format, platform)) {
+    return (file: saved.audio, audio: audio, playable: false);
+  }
+  if (!playsByExtension(platform)) {
+    return (file: saved.audio, audio: audio, playable: true);
+  }
+  try {
+    final cache = await ref.watch(narrationPlaybackCacheProvider.future);
+    final file = await narrationPlaybackFile(
+      blob: saved.audio,
+      format: format,
+      cache: cache,
+    );
+    return (file: file, audio: audio, playable: true);
+  } catch (_) {
+    // No copy, no way to hand AVPlayer the file. Streaming still works, and
+    // the save is still good — it is this play that could not use it.
     return null;
   }
 });
@@ -64,7 +100,11 @@ typedef PlayableNovelAudio = ({NovelAudio audio, File? file});
 final playableNovelAudioProvider = FutureProvider.autoDispose
     .family<PlayableNovelAudio?, NovelChapterKey>((ref, key) async {
   final saved = await ref.watch(savedNarrationProvider(key).future);
-  if (saved != null) return (audio: saved.audio, file: saved.file);
+  // A save this phone cannot play is passed over for the stream, which asks
+  // for a format it can.
+  if (saved != null && saved.playable) {
+    return (audio: saved.audio, file: saved.file);
+  }
   final remote = await ref.watch(novelAudioProvider(key).future);
   return remote.available ? (audio: remote, file: null) : null;
 });

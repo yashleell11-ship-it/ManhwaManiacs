@@ -5,6 +5,7 @@ import 'package:manhwamaniacs/features/downloads/models/download_chapter_state.d
 import 'package:manhwamaniacs/features/downloads/providers/downloads_scope.dart';
 import 'package:manhwamaniacs/features/downloads/providers/series_download_status_provider.dart';
 import 'package:manhwamaniacs/features/downloads/queue/download_queue_controller.dart';
+import 'package:manhwamaniacs/features/novels/providers/novel_audio_provider.dart';
 
 /// Keep this chapter's narration on the phone, and show that it is kept.
 ///
@@ -57,6 +58,29 @@ class NarrationSaveButton extends ConsumerWidget {
             seriesTitle: seriesTitle,
           ),
         );
+
+    // A complete save this phone cannot play: Ogg, saved on an iPhone before
+    // the server could send anything its player reads. The reader streams in
+    // its place, so the one thing left to say is that the copy needs
+    // replacing — "saved" would promise a plane ride it cannot deliver.
+    final unplayable = status?.state == DownloadChapterState.complete &&
+        ref.watch(savedNarrationProvider(chapter)).valueOrNull?.playable ==
+            false;
+    if (unplayable) {
+      return IconButton(
+        key: const Key('narration-resave'),
+        tooltip: 'The saved audio cannot play on this phone — tap to save it '
+            'again',
+        onPressed: () async {
+          // The old row has to go first: saving onto a complete row keeps
+          // the bytes it already has, which are the ones that do not play.
+          final queue = ref.read(downloadQueueControllerProvider.notifier);
+          await queue.cancelChapter(audioIdentity(chapter));
+          save();
+        },
+        icon: Icon(Icons.sync_problem_rounded, color: color),
+      );
+    }
 
     return switch (status?.state) {
       null => IconButton(

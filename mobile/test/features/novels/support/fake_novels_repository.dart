@@ -1,6 +1,7 @@
 import 'package:manhwamaniacs/core/error/app_error.dart';
 import 'package:manhwamaniacs/core/utils/result.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_audio.dart';
+import 'package:manhwamaniacs/features/novels/models/novel_audio_format.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_cast.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter_window.dart';
@@ -35,6 +36,9 @@ class FakeNovelsRepository implements NovelsRepository {
 
   final List<String> audioRequests = [];
   final List<String> audioBytesRequests = [];
+
+  /// The `format` each `GET /novels/audio/file` asked for, in order.
+  final List<NovelAudioFormat> audioBytesFormats = [];
   int seriesAudioCalls = 0;
   int audioJobsCalls = 0;
   final List<List<String>> renderRequests = [];
@@ -55,8 +59,10 @@ class FakeNovelsRepository implements NovelsRepository {
     required String sourceId,
     required String seriesKey,
     required String chapterKey,
+    required NovelAudioFormat format,
   }) async {
     audioBytesRequests.add(chapterKey);
+    audioBytesFormats.add(format);
     return Ok(audioBytesByChapter[chapterKey] ?? const <int>[]);
   }
 

@@ -15,6 +15,7 @@ import 'package:manhwamaniacs/features/downloads/services/device_storage_info.da
 import 'package:manhwamaniacs/features/downloads/services/offline_novel_reader.dart';
 import 'package:manhwamaniacs/features/downloads/services/retention_maintenance.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_audio.dart';
+import 'package:manhwamaniacs/features/novels/models/novel_audio_format.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_cast.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter_window.dart';
@@ -70,6 +71,7 @@ class _WindowingNovelsRepository implements NovelsRepository {
     required String sourceId,
     required String seriesKey,
     required String chapterKey,
+    required NovelAudioFormat format,
   }) async => const Ok(<int>[]);
 
   @override

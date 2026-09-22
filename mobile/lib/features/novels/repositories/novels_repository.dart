@@ -1,5 +1,6 @@
 import 'package:manhwamaniacs/core/utils/result.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_audio.dart';
+import 'package:manhwamaniacs/features/novels/models/novel_audio_format.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_cast.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter_window.dart';
@@ -74,10 +75,15 @@ abstract class NovelsRepository {
   /// Separate from streaming it: the player sets a URL and lets the platform
   /// pull ranges, which is right for listening and useless for saving.
   /// Answers empty when the chapter has not been narrated.
+  ///
+  /// [format] is the container to ask for — see [novelAudioFormatFor]. A
+  /// server from before the parameter existed answers Ogg whatever is asked,
+  /// so a caller that cares checks the bytes with [sniffNovelAudioFormat].
   Future<Result<List<int>>> audioBytes({
     required String sourceId,
     required String seriesKey,
     required String chapterKey,
+    required NovelAudioFormat format,
   });
 
   /// Which chapters of this book already have audio, and which COULD.

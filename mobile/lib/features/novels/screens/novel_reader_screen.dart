@@ -1,5 +1,6 @@
 
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -11,6 +12,7 @@ import 'package:manhwamaniacs/features/downloads/providers/bookmark_outbox_provi
 import 'package:manhwamaniacs/features/downloads/providers/downloads_scope.dart';
 import 'package:manhwamaniacs/features/downloads/providers/progress_outbox_provider.dart';
 import 'package:manhwamaniacs/features/downloads/widgets/open_chapter_scope.dart';
+import 'package:manhwamaniacs/features/novels/models/novel_audio_format.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_palette.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_typography.dart';
@@ -729,14 +731,15 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
           final base = ref.read(apiBaseUrlProvider);
           final trimmed =
               base.endsWith('/') ? base.substring(0, base.length - 1) : base;
-          // Query parameters, never path segments: connector keys are opaque
-          // and routinely contain slashes.
+          // In the container this phone's player reads: an iPhone's cannot
+          // open Ogg at all, so it asks for MP4.
           final query = Uri(
-            queryParameters: {
-              'source': chapter.sourceId,
-              'series': chapter.seriesKey,
-              'chapter': chapter.chapterKey,
-            },
+            queryParameters: novelAudioFileQuery(
+              sourceId: chapter.sourceId,
+              seriesKey: chapter.seriesKey,
+              chapterKey: chapter.chapterKey,
+              format: novelAudioFormatFor(defaultTargetPlatform),
+            ),
           ).query;
           url = '$trimmed/novels/audio/file?$query';
           headers = {'Authorization': 'Bearer $token'};
