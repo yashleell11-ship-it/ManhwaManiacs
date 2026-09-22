@@ -20,6 +20,7 @@ import 'package:manhwamaniacs/core/network/interceptors/error_interceptor.dart';
 import 'package:manhwamaniacs/core/utils/result.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_cast.dart';
 import 'package:manhwamaniacs/features/novels/providers/series_audio_provider.dart';
+import 'package:manhwamaniacs/features/novels/repositories/novels_repository.dart';
 import 'package:manhwamaniacs/features/novels/repositories/novels_repository_impl.dart';
 import 'package:manhwamaniacs/features/novels/widgets/audiobook_picker_sheet.dart';
 import 'package:manhwamaniacs/features/novels/widgets/novel_series_detail_view.dart';
@@ -163,6 +164,28 @@ void main() {
       // A job queued before the worker went away is not "in progress".
       expect(seen.last, isEmpty);
     });
+
+    test('a failed coverage fetch is unknown, and a running render is still '
+        'watched', () async {
+      // The dropped-signal case again, one request earlier: if the book's
+      // audio fetch fails as the page opens, that says nothing about whether
+      // the server has a worker. Reading it as "no worker" stopped the watch
+      // on a render already under way.
+      final repo = FakeNovelsRepository()
+        ..seriesAudioResult = const Err<NovelSeriesAudio>(
+          NetworkError(message: 'connection reset'),
+        )
+        ..audioJobsResults = [
+          Ok([_job('rendering')]),
+          const Ok(<NovelAudioJob>[]),
+        ];
+      final container = _container(repo);
+      final seen = _record(container);
+
+      await _until(() => repo.audioJobsCalls >= 1);
+      await _until(() => seen.isNotEmpty);
+      expect(seen.first.single.status, 'rendering');
+    });
   });
 
   group('the words on the button', () {
@@ -254,7 +277,7 @@ void main() {
   });
 
   group('GET /novels/audio/series', () {
-    Future<bool> canRenderFrom(Map<String, dynamic> body) async {
+    Future<bool?> canRenderFrom(Map<String, dynamic> body) async {
       final dio = Dio(BaseOptions(baseUrl: 'https://mm.test'))
         ..httpClientAdapter = _JsonAdapter(body)
         ..interceptors.add(ErrorInterceptor());

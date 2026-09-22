@@ -17,10 +17,15 @@ import 'package:manhwamaniacs/features/novels/models/novel_chapter_window.dart';
 /// when a render worker is configured. Without one a request queues and
 /// never runs, so the app must not offer it, and a queued job must not be
 /// polled or shown as in progress forever.
+///
+/// `null` means the phone could not ask: the request failed. That is NOT the
+/// server saying no. Reading a dropped signal as "no worker" hid the button
+/// and stopped watching a render that was already running, on a server that
+/// had a worker all along. Only an explicit `false` means "cannot render".
 typedef NovelSeriesAudio = ({
   Set<String> rendered,
   Set<String> narratable,
-  bool canRender,
+  bool? canRender,
 });
 
 abstract class NovelsRepository {

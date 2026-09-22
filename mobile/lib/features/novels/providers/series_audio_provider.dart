@@ -15,16 +15,20 @@ typedef NovelSeriesKey = ({String sourceId, String seriesKey});
 ///
 /// A failure resolves to "none" rather than throwing. The table of contents
 /// is readable with or without this; an error screen over a decoration would
-/// be a worse page than one that simply does not mark anything. That includes
-/// `canRender: false` — a server the phone cannot reach cannot take a request
-/// either, so not offering one is the true answer for as long as that lasts.
+/// be a worse page than one that simply does not mark anything.
+///
+/// Except `canRender`, which a failure leaves UNKNOWN (`null`), never `false`.
+/// "The server has no render worker" and "this one request did not get
+/// through" call for opposite things: the first stops watching jobs and says
+/// narration is unavailable, the second must keep watching a render that may
+/// be running right now.
 final seriesAudioProvider = FutureProvider.autoDispose
     .family<NovelSeriesAudio, NovelSeriesKey>((ref, key) async {
       final result = await ref
           .watch(novelsRepositoryProvider)
           .seriesAudio(sourceId: key.sourceId, seriesKey: key.seriesKey);
       return result.isErr
-          ? (rendered: <String>{}, narratable: <String>{}, canRender: false)
+          ? (rendered: <String>{}, narratable: <String>{}, canRender: null)
           : result.value;
     });
 
@@ -77,7 +81,9 @@ final novelAudioJobsProvider = StreamProvider.autoDispose
         seriesAudioProvider(key).selectAsync((audio) => audio.canRender),
       );
       if (disposed) return;
-      if (!canRender) {
+      // Only the server saying so stops the watch. Unknown (the fetch failed)
+      // falls through to the loop below, which already survives failures.
+      if (canRender == false) {
         // Nothing can move, so there is nothing to watch — and a job queued
         // before the worker went away is not "in progress" either.
         yield const <NovelAudioJob>[];
