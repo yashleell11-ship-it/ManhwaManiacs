@@ -172,22 +172,63 @@ export function useFederatedSearch(params: FederatedSearchParams) {
   // Only once tier 1 has said there IS more. A server that does not know the
   // parameter returns the whole search with next_tier undefined, and this
   // second request never fires — which is what keeps an older backend working.
-  const rest = useQuery({
-    queryKey: federatedSearchQueryKey(params, 2),
-    queryFn: () => sourcesApi.federatedSearch({ ...params, tier: 2 }),
-    enabled: params.q.length > 0 && first.data?.next_tier === 2,
-    placeholderData: (previous) => previous,
-    staleTime: SEARCH_STALE_MS,
-  });
-
-  const data = first.data ? mergeSearchTiers(first.data, rest.data) : undefined;
+  const rest = useQuery(federatedSearchRestOptions(params, first.data));
 
   return {
     ...first,
-    data,
+    ...resolveSearchTiers(first.data, rest),
+  };
+}
+
+/**
+ * Tier 2's query options, pulled out so the absence of `placeholderData` can be
+ * pinned by a test against a real QueryClient.
+ *
+ * No `placeholderData` here, unlike tier 1. Tier 2's key changes with every
+ * new term, and TanStack serves a placeholder from the observer's last data
+ * whatever its key or `enabled` — so the previous term's results from ~87
+ * sources were folded into the new term's tier 1 the moment it settled, and
+ * shown as the finished answer ("N results found") for the eight seconds until
+ * the new tier 2 landed. When the new term had no tier 2 at all, they stayed
+ * until the next search. A refetch of the SAME term keeps its own cached data,
+ * so dropping the placeholder costs no flicker there.
+ */
+export function federatedSearchRestOptions(
+  params: FederatedSearchParams,
+  first: GlobalSearchResponse | undefined,
+) {
+  return {
+    queryKey: federatedSearchQueryKey(params, 2),
+    queryFn: () => sourcesApi.federatedSearch({ ...params, tier: 2 }),
+    enabled: params.q.length > 0 && first?.next_tier === 2,
+    staleTime: SEARCH_STALE_MS,
+  };
+}
+
+/**
+ * Fold what the two tier queries currently hold into what the screen shows.
+ *
+ * Tier 2 data that is only a placeholder is never merged: it belongs to some
+ * other query, and since the tiers ask disjoint sources the source-keyed
+ * dedupe in `mergeSearchTiers` cannot catch it. A placeholder also counts as
+ * still loading: it reports status 'success', so `isPending` alone read "done"
+ * while the real answer was still seconds out.
+ */
+export function resolveSearchTiers(
+  first: GlobalSearchResponse | undefined,
+  rest: {
+    data: GlobalSearchResponse | undefined;
+    isPending: boolean;
+    isPlaceholderData: boolean;
+  },
+): { data: GlobalSearchResponse | undefined; isLoadingRest: boolean } {
+  const second = rest.isPlaceholderData ? undefined : rest.data;
+  return {
+    data: first ? mergeSearchTiers(first, second) : undefined,
     // True while the rest is still arriving, so a caller can say "searching
     // 87 more sources" rather than pretending the answer is complete.
-    isLoadingRest: first.data?.next_tier === 2 && rest.isPending,
+    isLoadingRest:
+      first?.next_tier === 2 && (rest.isPending || rest.isPlaceholderData),
   };
 }
 

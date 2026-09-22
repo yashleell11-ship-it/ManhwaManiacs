@@ -40,6 +40,7 @@ import {
   subscribeRecentSearches,
   writeRecentSearch,
 } from "@/features/library/recent-searches";
+import { searchResultsHeader } from "@/features/library/search-header";
 import { GlobalSearchGroupSection } from "./GlobalSearchGroupSection";
 import { SearchResultCardSkeleton } from "./GlobalSearchResultCard";
 
@@ -349,9 +350,12 @@ export function SearchView() {
             {viewState === "content" || viewState === "empty" ? (
               <div className="mb-4">
                 <p className="text-sm text-muted">
-                  {searching
-                    ? "Searching sources…"
-                    : `${resultCount.toLocaleString()} ${resultCount === 1 ? "result" : "results"} found`}
+                  {searchResultsHeader({
+                    searching,
+                    isLoadingRest: searchQuery.isLoadingRest,
+                    resultCount,
+                    sourcesDeferred: searchQuery.data?.sources_deferred,
+                  })}
                 </p>
                 {!searching && scopeLabel ? (
                   <p className="mt-0.5 text-xs text-muted/70">{scopeLabel}</p>
