@@ -147,8 +147,7 @@ _RELEASE_NOTES: list[ChangelogEntry] = [
             "with a row for every chapter. Tap a cover for the book's page, or "
             "the play button on it to go straight back to where you stopped",
             "A novel chapter that has audio can be started from the top of the "
-            "chapter, and saved to the phone to listen to offline. Deleting the "
-            "chapter deletes its audio too",
+            "chapter, instead of from a button at the very end of it",
             "LilyManga is gone. It listed and searched fine, but every page image "
             "came from a server of theirs that no longer answers, so chapters "
             "opened to nothing",
