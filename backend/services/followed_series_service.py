@@ -745,8 +745,13 @@ class FollowedSeriesService:
             ).all()
         }
 
-        followed_keys = {(r.source_id, r.series_key) for r in rows}
-        keys = list(followed_keys | set(depth))
+        # Built once so the loop below is an O(1) lookup per key rather than
+        # an O(n) scan of `rows` repeated for every key — every other bulk
+        # lookup in this file was deliberately de-quadraticized the same way
+        # (`_series_cache_rows` chunks its IN, `depth` above is one grouped
+        # statement); a linear scan here was the one that got missed.
+        rows_by_key = {(r.source_id, r.series_key): r for r in rows}
+        keys = list(rows_by_key.keys() | depth.keys())
         cached = self._series_cache_rows(keys)
 
         gate_open = self._gate_open()
@@ -764,7 +769,7 @@ class FollowedSeriesService:
                 # the actual leak: a series the reader hand-flagged 18+ and
                 # then hid was being re-admitted as if it were merely unread.
                 continue
-            row = next((r for r in rows if (r.source_id, r.series_key) == key), None)
+            row = rows_by_key.get(key)
             title, genres, cache_rating = cached.get(key, ("", [], None))
             if row is not None:
                 title = row.title or title
@@ -831,8 +836,23 @@ class FollowedSeriesService:
                 }
                 for e in entries[:max_titles]
             ],
-            "followed_titles": sorted(
-                {e["title"] for e in entries if e["followed"]}
+            # Every title this reader has followed or read, for a caller that
+            # must never suggest the same book back. The identity pair alone
+            # cannot do that: `source_series_cache` is GLOBAL across every
+            # connector, so one work is routinely cached under several
+            # `source_id`s, and a follow on one source does not exclude the
+            # identical title cached from another. Title matching is the only
+            # signal that survives that.
+            #
+            # Includes follows the gate is hiding right now (`all_rows`, not
+            # `rows`). That is safe because this set is only ever used to
+            # FILTER locally and is never put in a prompt; and it is needed,
+            # because otherwise a book the reader followed and marked 18+
+            # could come back as a suggestion from a second source whose
+            # copy of it carries no rating.
+            "excluded_titles": sorted(
+                {e["title"] for e in entries}
+                | {r.title for r in all_rows if r.title}
             ),
             "gate_open": gate_open,
         }

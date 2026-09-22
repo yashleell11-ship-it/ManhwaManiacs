@@ -32,6 +32,7 @@ from services.suggestion_service import SuggestionService
 from tests._fakes import FakeBrowse
 
 SRC = "mangadex"
+SRC2 = "asurascans"
 ADULT_SRC = "allporncomicsco"
 
 
@@ -234,6 +235,55 @@ def test_what_they_already_read_is_never_suggested_back(
     assert "Already Read" not in catalog
 
 
+def test_a_book_cached_under_a_second_source_is_still_excluded(
+    service, shelf, captured, seed_follow, acct
+):
+    # source_series_cache is GLOBAL across every connector, so the exact same
+    # book is routinely cached under several source_ids. Excluding only the
+    # (source_id, series_key) the reader actually follows would let the
+    # identical title come back on a different source as a "fresh discovery"
+    # — recommending, as new, the book they are deepest into.
+    uid, pid = acct
+    _fill_shelf(shelf)
+    shelf("sl-1", "Solo Leveling", ["action"], source_id=SRC)
+    shelf("sl-2", "Solo Leveling", ["action"], source_id=SRC2)
+    seed_follow(uid, pid, source_id=SRC, series_key="sl-1", title="Solo Leveling")
+
+    service.suggest("anything", base_url="http://x/")
+
+    catalog = captured["prompt"].split("SHELF")[-1]
+    assert "Solo Leveling" not in catalog
+
+
+def test_a_book_read_past_the_taste_cap_is_still_excluded(
+    service, shelf, captured, seed_progress, acct
+):
+    # taste_profile only puts the top `max_titles` (16) into the text the
+    # model actually reads, so a shelf-level check is the only thing that can
+    # close this for reader #17 onward — the model is never told the title,
+    # so an instruction like "don't suggest what they've read" cannot help.
+    uid, pid = acct
+    _fill_shelf(shelf)
+    shelf("buried", "Buried Under The Cap", ["action"])
+    seed_progress(uid, pid, source_id=SRC, series_key="buried", chapter_key="c1")
+    # 16 more, all deeper, all favourited-equivalent by weight, so "buried"
+    # is guaranteed to sort past the cap.
+    for i in range(16):
+        key = f"deep-{i}"
+        shelf(key, f"Deep Book {i}", ["action"])
+        seed_progress(uid, pid, source_id=SRC, series_key=key, chapter_key="c1")
+        seed_progress(uid, pid, source_id=SRC, series_key=key, chapter_key="c2")
+
+    service.suggest("anything", base_url="http://x/")
+
+    prompt = captured["prompt"]
+    assert "Buried Under The Cap" not in prompt.split("WHAT THEY HAVE READ")[1].split(
+        "GENRES"
+    )[0]
+    catalog = prompt.split("SHELF")[-1]
+    assert "Buried Under The Cap" not in catalog
+
+
 def test_the_reader_sentence_is_data_not_a_rule(service, shelf, captured):
     # It lands in its own labelled block under the rules, never spliced into
     # the system prompt — so "ignore the shelf" is a sentence about a reader,
@@ -334,6 +384,32 @@ def test_a_followed_series_hidden_by_mature_override_does_not_leak_via_reading_h
     service.suggest("anything", base_url="http://x/")
 
     assert "Hand-Flagged Adult" not in captured["prompt"]
+
+
+def test_a_hand_flagged_follow_does_not_return_from_another_source(
+    service, shelf, captured, seed_follow, acct
+):
+    # The same book, cached a second time from a source whose copy carries no
+    # rating. The reader followed it on the first source and marked it 18+, so
+    # the gate hides that follow -- and a title exclusion built only from what
+    # the gate lets through would never learn the book exists, leaving the
+    # unrated copy free to be suggested as a fresh discovery.
+    uid, pid = acct
+    _fill_shelf(shelf)
+    shelf("flagged", "Quietly Flagged", ["action"], source_id=SRC)
+    shelf("unrated-copy", "Quietly Flagged", ["action"], source_id=SRC2)
+    seed_follow(
+        uid,
+        pid,
+        source_id=SRC,
+        series_key="flagged",
+        title="Quietly Flagged",
+        mature_override=True,
+    )
+
+    service.suggest("anything", base_url="http://x/")
+
+    assert "Quietly Flagged" not in captured["prompt"]
 
 
 # --- spending -------------------------------------------------------------

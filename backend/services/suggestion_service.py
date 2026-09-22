@@ -212,8 +212,8 @@ class SuggestionService:
 
     # --- the shelf -----------------------------------------------------
 
-    def _excluded(self) -> set[tuple[str, str]]:
-        """What must never be suggested: already followed, or already read."""
+    def _excluded_keys(self) -> set[tuple[str, str]]:
+        """Identity pairs that must never be suggested: followed, or read."""
         library = self._library
         followed = set(
             self._db.execute(
@@ -246,7 +246,18 @@ class SuggestionService:
         the ranking; the ranking is the model's job.
         """
         gate_open = bool(taste.get("gate_open"))
-        excluded = self._excluded()
+        excluded = self._excluded_keys()
+        # `source_series_cache` is GLOBAL across every connector, so the same
+        # work is routinely cached under several `source_id`s — the identity
+        # pairs above only catch the exact source this reader used. A follow
+        # on asurascans does not exclude the identical title cached from
+        # novelarchive, so the shelf would otherwise recommend, as a fresh
+        # discovery, the book the reader is deepest into. `taste_profile`
+        # already computed every title this reader has followed or read;
+        # matched here by the same normalization `by_title` uses in
+        # `suggest()`, so a shelf row and a followed/read row that are the
+        # same book always compare equal regardless of casing or spacing.
+        excluded_titles = {_norm(t) for t in taste.get("excluded_titles", [])}
         words = _words(prompt)
         genres = [g["genre"] for g in taste.get("genres", [])[:6]]
 
@@ -256,12 +267,12 @@ class SuggestionService:
                 break
             if not terms:
                 continue
-            self._collect(terms, picked, excluded, gate_open, limit)
+            self._collect(terms, picked, excluded, excluded_titles, gate_open, limit)
 
         if len(picked) < limit:
             # A vague prompt from a reader with no genre history still needs a
             # shelf to choose from; fall back to whatever was browsed last.
-            self._collect(None, picked, excluded, gate_open, limit)
+            self._collect(None, picked, excluded, excluded_titles, gate_open, limit)
         return list(picked.values())
 
     def _collect(
@@ -269,6 +280,7 @@ class SuggestionService:
         terms: list[str] | None,
         picked: dict[tuple[str, str], dict[str, Any]],
         excluded: set[tuple[str, str]],
+        excluded_titles: set[str],
         gate_open: bool,
         limit: int,
     ) -> None:
@@ -300,7 +312,7 @@ class SuggestionService:
             stmt
         ).all():
             key = (source_id, series_key)
-            if key in picked or key in excluded:
+            if key in picked or key in excluded or _norm(title) in excluded_titles:
                 continue
             descriptor = descriptor_for_source(source_id)
             if descriptor is None:
