@@ -49,7 +49,7 @@ from connectors.catalog import MADARA_CATALOG
 from connectors.http.client import ConnectorHttpError
 from connectors.http.redirect_policy import host_matches_allowlist
 from connectors.madara.factory import build_madara_connector_class
-from connectors.registry import create_connector
+from connectors.registry import create_connector, list_installed_connectors
 
 SERIES_ID = "kanzen-kaihi-healer-no-kiseki"
 CHAPTER_ID = f"{SERIES_ID}/chapter-36-1"
@@ -665,6 +665,27 @@ def test_expired_manhuakey_domain_stays_withdrawn() -> None:
     """
     assert "manhuakey" not in {cfg.source_id for cfg in MADARA_CATALOG}
     assert "manhuakey.com" not in {cfg.site_host for cfg in MADARA_CATALOG}
+
+
+def test_cloudflare_challenged_linkmanga_stays_removed() -> None:
+    """linkmanga lists ten covers and then cannot open a single one of them.
+
+    Probed from the VPS 2026-09-23: the front page and /manga/ answer 200, but
+    every series page and every ?s= search is a Cloudflare managed challenge
+    (403, cf-mitigated: challenge) even through curl_cffi's chrome131
+    impersonation, so get_series is None and get_chapters is empty. The
+    re-probe only looks at the listing, which still passes, so re-adding the
+    entry would bring back a source that shows as healthy and cannot be read.
+    Re-probe series pages and search from the VPS before restoring it.
+    """
+    assert "linkmanga" not in {cfg.source_id for cfg in MADARA_CATALOG}
+    assert "linkmanga.com" not in {cfg.site_host for cfg in MADARA_CATALOG}
+    # The registry is what browse, search and the re-probe actually read.
+    installed = {
+        d.source_type
+        for d in list_installed_connectors(browsable_only=False, include_mature=True)
+    }
+    assert "linkmanga" not in installed
 
 
 def test_sources_that_failed_the_2026_09_05_read_path_stay_deleted() -> None:

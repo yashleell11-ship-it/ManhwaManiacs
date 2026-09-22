@@ -181,6 +181,18 @@ MADARA_CATALOG: tuple[MadaraSiteConfig, ...] = (
     # them at the top. It also shares works with hentaihand. Mixed ecchi
     # catalogue with no site-side signal, so it must sit behind the gate.
     _site("kokomangas", "KokoMangas", "kokomangas.com", mature=True),
+    # linkmanga removed 2026-09-23 after an end-to-end probe from the VPS.
+    # The front page and the /manga/ listing answer 200 with ten covers, but
+    # every series page and every ?s= search is a Cloudflare managed challenge
+    # (403, cf-mitigated: challenge, "Just a moment...") -- through curl_cffi's
+    # chrome131 impersonation as well as plain curl, and nothing in
+    # connectors/http solves challenges. So a reader saw covers that open onto
+    # an empty series with 0 chapters, and its health row had not been OK once
+    # since it appeared on 2026-09-13. The re-probe checks only the listing,
+    # so left registered it would soon have been recorded healthy as well.
+    # Restoring it is the commented line below if the challenge is lifted; the
+    # notes under it are from when it was added and still describe the site.
+    #
     # Madara under a renamed theme directory (themes/linkmanga), so it
     # fingerprints on wp-manga/page-item-detail, not on the theme path. Its
     # own ``{series}/ajax/chapters/`` soft-fails by returning the whole page,
@@ -193,7 +205,7 @@ MADARA_CATALOG: tuple[MadaraSiteConfig, ...] = (
     # f1link.linkmanga.com and those files are genuinely missing (nginx 404);
     # allowlisting the host keeps the SSRF guard from stacking a second,
     # more confusing failure on top of the 404.
-    _site("linkmanga", "LinkManga", "linkmanga.com", mature=True, extra_image_hosts=frozenset({"f1link.linkmanga.com"})),
+    #   _site("linkmanga", "LinkManga", "linkmanga.com", mature=True, extra_image_hosts=frozenset({"f1link.linkmanga.com"})),
     #
     # Shard 5 also probed these 2026-09-05 and DELIBERATELY NOT ADDED — every
     # one is reachable and has real content, but none is Madara, so a catalog
