@@ -106,8 +106,19 @@ def _install_voices(root, monkeypatch):
     voice_pack._cached.cache_clear()
 
 
-def seed(db, chapter_key="ch-1", *, attributed=True):
-    paragraphs = ['"Then we go," he said.', "He turned and ran."]
+PARAGRAPHS = ['"Then we go," he said.', "He turned and ran."]
+
+
+def seed(db, chapter_key="ch-1", *, attributed=True, attributed_against=None):
+    """A cached chapter and, unless told otherwise, its attribution.
+
+    The attribution's fingerprint is the real one for the cached text unless
+    ``attributed_against`` names other paragraphs: a claim refuses offsets
+    computed on text it is not about to render.
+    """
+    from services.novel_attribution_service import chapter_fingerprint
+
+    paragraphs = list(PARAGRAPHS)
     db.add(
         NovelChapterCache(
             source_id=STUB_SOURCE, series_key=SERIES, chapter_key=chapter_key,
@@ -119,7 +130,10 @@ def seed(db, chapter_key="ch-1", *, attributed=True):
         db.add(
             NovelChapterAttribution(
                 source_id=STUB_SOURCE, series_key=SERIES, chapter_key=chapter_key,
-                text_fingerprint="fp", paragraph_count=len(paragraphs),
+                text_fingerprint=chapter_fingerprint(
+                    attributed_against or paragraphs
+                ),
+                paragraph_count=len(paragraphs),
                 style="quoted",
                 spans=json.dumps([
                     {"p": 0, "s": 1, "e": 12, "ord": 0, "head": "Then we go,",
@@ -211,6 +225,65 @@ class TestClaim:
 
         assert first.status_code == 200
         assert second.status_code == 204
+
+    def test_the_claim_carries_the_fingerprint_of_the_text_it_planned(
+        self, worker, db_session
+    ):
+        # The worker copies this into the timing map, so it has to describe
+        # the paragraphs the plan's offsets were cut from.
+        from services.novel_attribution_service import chapter_fingerprint
+
+        seed(db_session)
+        queue(worker)
+
+        body = worker.post(
+            "/novels/render/claim", json={"worker_id": WORKER},
+            headers={"X-Render-Token": TOKEN},
+        ).json()
+
+        assert body["text_fingerprint"] == chapter_fingerprint(PARAGRAPHS)
+
+    def test_text_that_changed_since_it_was_queued_is_not_rendered(
+        self, worker, db_session
+    ):
+        # The text cache refetches. Rendering the new text under a job pinned
+        # to the old one would label the audio with a fingerprint it does not
+        # have, so the job stops and says why.
+        seed(db_session)
+        queue(worker)
+        row = db_session.query(NovelChapterCache).one()
+        row.paragraphs = json.dumps(["An ad line.", *PARAGRAPHS])
+        db_session.commit()
+
+        response = worker.post(
+            "/novels/render/claim", json={"worker_id": WORKER},
+            headers={"X-Render-Token": TOKEN},
+        )
+
+        assert response.status_code == 204
+        db_session.expire_all()
+        job = db_session.query(NovelAudioJob).one()
+        assert (job.status, job.error_code) == ("failed", "text_changed")
+
+    def test_an_attribution_of_other_text_is_not_trusted(
+        self, worker, db_session
+    ):
+        # Spans are offsets. Applied to paragraphs they were not computed on,
+        # they land on other sentences and the wrong characters read them,
+        # with nothing erroring. That is a stale attribution, not a missing
+        # one, and the job has to say so or nobody knows to re-run it.
+        seed(db_session, attributed_against=["An ad line.", *PARAGRAPHS])
+        queue(worker)
+
+        response = worker.post(
+            "/novels/render/claim", json={"worker_id": WORKER},
+            headers={"X-Render-Token": TOKEN},
+        )
+
+        assert response.status_code == 204
+        db_session.expire_all()
+        job = db_session.query(NovelAudioJob).one()
+        assert (job.status, job.error_code) == ("failed", "attribution_stale")
 
     def test_an_unattributed_chapter_is_failed_not_held(self, worker, db_session):
         # The worker cannot fix a missing attribution, so the job must not sit

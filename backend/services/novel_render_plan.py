@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from services.novel_attribution_service import (
     build_series_cast,
+    chapter_fingerprint,
     narrator_voice,
     read_attribution,
     series_pov,
@@ -32,6 +33,15 @@ from services.voice_pack import load_voices
 #: The most character voices one book gets. Beyond this a listener stops
 #: telling them apart, and the pack runs out anyway.
 VOICE_CEILING = 12
+
+
+class AttributionStale(Exception):
+    """The chapter IS attributed, but against different text.
+
+    Raised rather than answered with None, because None means "not attributed
+    yet" and the two call for different people: this one needs attribution
+    re-run on the new text, and calling it unattributed tells nobody that.
+    """
 
 
 def _flattest(gender: str) -> str | None:
@@ -63,10 +73,19 @@ def build_chapter_plan(
     Returns None rather than raising: an unattributed chapter is the ordinary
     state for almost the whole library, and the caller answers "nothing to do"
     rather than walking an error path.
+
+    Raises [AttributionStale] when the attribution was computed on other text.
+    Its spans are offsets into those paragraphs, and ``plan_chapter`` slices
+    tolerantly, so nothing would error: the spans would land on neighbouring
+    sentences and the wrong characters would read them.
     """
     record = read_attribution(db, source_id, series_key, chapter_key)
     if not record.get("attributed"):
         return None
+    if record.get("text_fingerprint") != chapter_fingerprint(paragraphs):
+        raise AttributionStale(
+            "this chapter was attributed against different text"
+        )
 
     cast = build_series_cast(db, source_id, series_key)
     pov = series_pov(db, source_id, series_key)

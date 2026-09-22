@@ -46,7 +46,12 @@ from core.config import get_settings
 from database.session import get_db
 from routes.novels import require_novels_enabled
 from services.chapter_audio_store import chapter_paths
-from services.novel_render_plan import build_chapter_plan, plan_digest
+from services.novel_attribution_service import chapter_fingerprint
+from services.novel_render_plan import (
+    AttributionStale,
+    build_chapter_plan,
+    plan_digest,
+)
 from services.voice_pack import load_voices
 from services.novel_render_queue import (
     LEASE,
@@ -122,6 +127,13 @@ def claim_render_job(
     A chapter with no attribution yet is failed back as ``not_attributed``
     rather than held — the worker cannot fix that, and a job that cannot
     progress should not occupy a lease.
+
+    Both fingerprints are checked here, because the text cache refetches and
+    nothing re-attributes when it does. Text that changed since the job was
+    queued fails as ``text_changed``; an attribution computed on other text
+    fails as ``attribution_stale``. Neither is retryable — the same claim
+    would fail the same way — and a failed job frees the chapter to be asked
+    for again.
     """
     from database.models import NovelChapterCache
     from sqlalchemy import select
@@ -156,9 +168,25 @@ def claim_render_job(
         return Response(status_code=204)
 
     paragraphs = json.loads(row) or []
-    plan = build_chapter_plan(
-        db, job.source_id, job.series_key, job.chapter_key, paragraphs
-    )
+    fingerprint = chapter_fingerprint(paragraphs)
+    if fingerprint != job.text_fingerprint:
+        fail(db, job.id, body.worker_id, "text_changed",
+             "the chapter's text changed after it was queued",
+             retryable=False)
+        db.commit()
+        return Response(status_code=204)
+
+    try:
+        plan = build_chapter_plan(
+            db, job.source_id, job.series_key, job.chapter_key, paragraphs
+        )
+    except AttributionStale:
+        fail(db, job.id, body.worker_id, "attribution_stale",
+             "this chapter was attributed against different text; "
+             "attribute it again before narrating it",
+             retryable=False)
+        db.commit()
+        return Response(status_code=204)
     if plan is None:
         fail(db, job.id, body.worker_id, "not_attributed",
              "this chapter has no attribution, so nobody can be cast in it",
@@ -175,7 +203,9 @@ def claim_render_job(
         "source_id": job.source_id,
         "series_key": job.series_key,
         "chapter_key": job.chapter_key,
-        "text_fingerprint": job.text_fingerprint,
+        # The text the plan was actually cut from. Equal to the job's own by
+        # the check above, but this is the value that is TRUE of the plan.
+        "text_fingerprint": fingerprint,
         "plan": plan,
         "plan_hash": plan_digest(plan),
     }
