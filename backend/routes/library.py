@@ -85,7 +85,12 @@ def list_series(
     reading_status: str | None = None,
     is_favorite: bool | None = None,
 ) -> dict[str, object]:
-    """Paginated list of the profile's followed series."""
+    """Paginated list of the profile's followed series.
+
+    Each item carries ``read_state`` — started or not, the furthest chapter
+    opened and how many lie past it — so a card can say where the reader is
+    without a request per series.
+    """
     return service.list_series(
         page=page,
         per_page=per_page,

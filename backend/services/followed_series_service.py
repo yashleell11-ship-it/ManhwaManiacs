@@ -101,6 +101,76 @@ def _next_known_chapter(
     return None
 
 
+def _reading_state(
+    chapters: list[dict[str, Any]],
+    progress_keys: list[str],
+    progress_number: float | None,
+) -> dict[str, Any]:
+    """Where a started series stands: the furthest chapter opened, of how many.
+
+    "Furthest" is by READING order — the rule ``_next_known_chapter`` uses —
+    not by recency and not by ``chapter_number``: a reader who goes back to
+    reread chapter 3 is still on chapter 40, and a connector that lists
+    newest-first must not turn the oldest chapter into the furthest one.
+    ``chapter_number`` is only what gets *printed*; position in the list is
+    what decides, because numbers repeat, skip and carry prologues (a series
+    whose keys run two ahead of its printed numbers would otherwise count
+    wrong).
+
+    ``new_count`` is the chapters after that one. When none of the opened
+    chapters is in the known list (a stale list, a chapter the source pulled)
+    the position cannot be known, so it and ``new_count`` are None rather
+    than a guess; ``chapter_number`` then falls back to the highest number the
+    progress rows themselves recorded.
+    """
+    indexed = [
+        (c, i) for i, c in enumerate(chapters) if isinstance(c, dict) and c.get("key")
+    ]
+
+    def _order(item: tuple[dict[str, Any], int]) -> tuple[int, float, int]:
+        number = item[0].get("number")
+        if isinstance(number, (int, float)):
+            return (0, float(number), item[1])
+        return (1, 0.0, item[1])
+
+    ordered = [c for c, _ in sorted(indexed, key=_order)]
+    position_of = {c["key"]: n for n, c in enumerate(ordered, start=1)}
+    positions = [position_of[k] for k in progress_keys if k in position_of]
+    total = len(ordered)
+    latest = ordered[-1].get("number") if ordered else None
+    state: dict[str, Any] = {
+        "started": True,
+        "chapter_key": None,
+        "chapter_number": progress_number,
+        "position": None,
+        "total": total,
+        "latest_number": latest if isinstance(latest, (int, float)) else None,
+        "new_count": None,
+    }
+    if positions:
+        furthest = ordered[max(positions) - 1]
+        number = furthest.get("number")
+        state.update(
+            chapter_key=furthest["key"],
+            chapter_number=number if isinstance(number, (int, float)) else None,
+            position=max(positions),
+            new_count=total - max(positions),
+        )
+    return state
+
+
+def _not_started(row: FollowedSeries) -> dict[str, Any]:
+    return {
+        "started": False,
+        "chapter_key": None,
+        "chapter_number": None,
+        "position": None,
+        "total": row.chapter_count,
+        "latest_number": None,
+        "new_count": None,
+    }
+
+
 class FollowedSeriesService:
     def __init__(
         self,
@@ -263,7 +333,7 @@ class FollowedSeriesService:
                 raise AppError(
                     "Series not found.", code="series_not_found", status_code=404
                 )
-            return self.serialize(existing)
+            return self._serialize_with_state(existing)
 
         # Follows are the row count the scheduled sweep walks (a live upstream
         # fetch per row, every interval), so they are capped per profile —
@@ -328,7 +398,8 @@ class FollowedSeriesService:
         self._db.refresh(row)
         if meta or chapters:
             self._cache.write_through(source_id, series_key, meta, chapters)
-        return self.serialize(row)
+        # Progress outlives an unfollow, so a re-follow can already be started.
+        return self._serialize_with_state(row)
 
     def unfollow(self, followed_id: int) -> None:
         self._require_owner()
@@ -359,9 +430,56 @@ class FollowedSeriesService:
         row.updated_at = utcnow()
         self._db.commit()
         self._db.refresh(row)
-        return self.serialize(row)
+        return self._serialize_with_state(row)
 
     # --- reads ------------------------------------------------------
+
+    def _read_states(self, rows: list[FollowedSeries]) -> dict[int, dict[str, Any]]:
+        """``followed_id -> read_state`` for ``rows``, in ONE statement.
+
+        The library can be hundreds of follows, so this is one grouped query
+        for the whole page, never one per card. The inner join returns only
+        the series this profile has opened a chapter of, and only those rows
+        bring their ``known_chapters`` blob (kilobytes each, and the reason
+        the list path defers it); a series with no progress is "not started"
+        without the blob ever leaving the database.
+
+        Progress is matched on the follow's own ``(user_id, profile_id)`` and
+        scoped again with ``_progress_scope``: one profile's reading must never
+        mark another profile's card as started. ``rows`` have already been
+        through the 18+ gate, so a hidden series is never asked about.
+        """
+        states = {row.id: _not_started(row) for row in rows}
+        ids = list(states)
+        if not ids:
+            return states
+        for start in range(0, len(ids), _IN_CHUNK):
+            stmt = self._progress_scope(
+                self._scope(
+                    select(
+                        FollowedSeries.id,
+                        FollowedSeries.known_chapters,
+                        func.json_group_array(ChapterProgress.chapter_key),
+                        func.max(ChapterProgress.chapter_number),
+                    )
+                    .join(
+                        ChapterProgress,
+                        and_(
+                            ChapterProgress.user_id == FollowedSeries.user_id,
+                            ChapterProgress.profile_id == FollowedSeries.profile_id,
+                            ChapterProgress.source_id == FollowedSeries.source_id,
+                            ChapterProgress.series_key == FollowedSeries.series_key,
+                        ),
+                    )
+                    .where(FollowedSeries.id.in_(ids[start : start + _IN_CHUNK]))
+                    .group_by(FollowedSeries.id)
+                )
+            )
+            for followed_id, known, keys, number in self._db.execute(stmt).all():
+                states[followed_id] = _reading_state(
+                    _loads(known) or [], _loads(keys) or [], number
+                )
+        return states
 
     def list_series(
         self,
@@ -401,9 +519,14 @@ class FollowedSeriesService:
         total = len(rows)
         start = (page - 1) * per_page
         window = rows[start : start + per_page]
+        # For the page only: the rows beyond it are never drawn.
+        read_states = self._read_states(window)
         return {
             "items": [
-                self.serialize(r, include_chapters=False) for r in window
+                self.serialize(
+                    r, include_chapters=False, read_state=read_states[r.id]
+                )
+                for r in window
             ],
             "total": total,
             "page": page,
@@ -1248,8 +1371,15 @@ class FollowedSeriesService:
 
     # --- serialization -------------------------------------------
 
+    def _serialize_with_state(self, row: FollowedSeries) -> dict[str, Any]:
+        return self.serialize(row, read_state=self._read_states([row])[row.id])
+
     def serialize(
-        self, row: FollowedSeries, *, include_chapters: bool = True
+        self,
+        row: FollowedSeries,
+        *,
+        include_chapters: bool = True,
+        read_state: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """One followed series as JSON.
 
@@ -1267,6 +1397,13 @@ class FollowedSeriesService:
         for how the two are kept in step. (This method used to run
         ``json.loads`` over the array *twice* per row: once for the payload,
         once to measure it.)
+
+        ``read_state`` is where this profile stands in the series ("not
+        started", "chapter X of Y", how many chapters lie past the furthest
+        one opened), computed by ``_read_states`` for a whole page at once.
+        It is sent by the list and by the two writes whose answer a client
+        puts back into its list (``follow``, ``patch``) — a card rebuilt from
+        a patch response without it would fall back to saying nothing.
         """
         payload: dict[str, Any] = {
             "id": row.id,
@@ -1291,6 +1428,8 @@ class FollowedSeriesService:
         }
         if include_chapters:
             payload["known_chapters"] = _loads(row.known_chapters) or []
+        if read_state is not None:
+            payload["read_state"] = read_state
         return payload
 
 
