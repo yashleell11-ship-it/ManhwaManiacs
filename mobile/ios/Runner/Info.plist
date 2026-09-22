@@ -66,6 +66,20 @@
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<!--
+		Novel narration. A chapter is about thirteen minutes of listening, and
+		the whole point is that the phone can go in a pocket. Without this
+		mode iOS suspends the process the moment the screen locks or another
+		app comes forward, so the voice stops within a second and the
+		follow-along highlight freezes on the last sentence. just_audio already
+		puts the session in the playback category (lib/main.dart configures it
+		for speech); the category alone is not enough without the mode.
+		A sideloaded build needs no entitlement for it.
+	-->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
+	<!--
 		On-device chapter store (1c-M3, spec Sec3b). iOS gives a sideloaded app
 		no safe user-chosen download folder (a security-scoped bookmark goes
 		stale across the 7-day re-sign this build lives under), so instead of a

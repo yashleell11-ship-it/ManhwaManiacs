@@ -31,6 +31,10 @@ dependencies:
   # the whole file through the JSON client instead. Here the server's Range
   # support does what it was built for, and a seek pulls only what it needs.
   just_audio: ^0.9.40
+  # just_audio's own session plugin, already a resolved transitive pod, so
+  # promoting it changes zero native build inputs. Direct only so main.dart
+  # can declare the narration as SPEECH (see novel_audio_session.dart).
+  audio_session: ^0.1.25
   connectivity_plus: ^6.0.5
 
   # Local storage

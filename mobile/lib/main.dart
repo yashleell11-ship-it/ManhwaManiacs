@@ -1,4 +1,6 @@
-﻿import 'package:flutter/material.dart';
+﻿import 'dart:async';
+
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:manhwamaniacs/app/app.dart';
 import 'package:manhwamaniacs/core/config/env.dart';
@@ -7,6 +9,7 @@ import 'package:manhwamaniacs/core/logging/app_logger.dart';
 import 'package:manhwamaniacs/core/platform/system_ui.dart';
 import 'package:manhwamaniacs/core/storage/preferences.dart';
 import 'package:manhwamaniacs/core/storage/secure_storage.dart';
+import 'package:manhwamaniacs/features/novels/utils/novel_audio_session.dart';
 import 'package:manhwamaniacs/shared/providers/core_providers.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -36,6 +39,11 @@ Future<void> main() async {
   );
   await systemUi;
   appLogger.i('API base URL: $apiUrl  flavor: ${Env.flavor}');
+
+  // Narration is spoken word, not music: an interruption pauses the chapter
+  // rather than talking over it. Not awaited — nothing plays before a reader
+  // presses play, and a platform that refuses it must not delay first frame.
+  unawaited(configureNovelAudioSession());
 
   runApp(
     ProviderScope(
