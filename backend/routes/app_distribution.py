@@ -134,6 +134,27 @@ class Changelog(BaseModel):
 # consume the exact same source of truth.
 _RELEASE_NOTES: list[ChangelogEntry] = [
     ChangelogEntry(
+        version="3.2.0",
+        build=51,
+        date="September 2026",
+        highlights=[
+            "Describe what you feel like reading and get suggestions for it. "
+            "They are picked from books your sources actually carry, so every "
+            "one opens, and weighed against what you have already read — the "
+            "books you got furthest into count most. Nothing you already follow "
+            "or have read comes back, even when another source carries it",
+            "History is now a shelf of covers, one per book, instead of a list "
+            "with a row for every chapter. Tap a cover for the book's page, or "
+            "the play button on it to go straight back to where you stopped",
+            "A novel chapter that has audio can be started from the top of the "
+            "chapter, and saved to the phone to listen to offline. Deleting the "
+            "chapter deletes its audio too",
+            "LilyManga is gone. It listed and searched fine, but every page image "
+            "came from a server of theirs that no longer answers, so chapters "
+            "opened to nothing",
+        ],
+    ),
+    ChangelogEntry(
         version="3.1.0",
         build=50,
         date="September 2026",
