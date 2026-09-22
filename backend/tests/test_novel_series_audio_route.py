@@ -123,6 +123,51 @@ class TestCoverage:
         assert fetch(novels_on).json()["chapters"] == []
 
 
+class TestCanRender:
+    """Whether asking for narration can ever produce audio on this server.
+
+    With no render box configured a queued chapter is never claimed, and a
+    client that offers the button anyway shows "in progress" forever. This is
+    the flag a client hides that button on.
+    """
+
+    def test_no_render_token_means_narration_cannot_be_requested(
+        self, novels_on, db_session, monkeypatch
+    ):
+        from core.config import get_settings
+
+        monkeypatch.delenv("MM_RENDER_WORKER_TOKEN", raising=False)
+        get_settings.cache_clear()
+        cache_chapter(db_session, "ch-1")
+
+        body = fetch(novels_on).json()
+
+        assert body["can_render"] is False
+        # Listening to what already exists is unaffected.
+        assert body["narratable"] == ["ch-1"]
+
+    def test_a_blank_token_counts_as_none(
+        self, novels_on, db_session, monkeypatch
+    ):
+        # The same rule that decides whether the worker's routes are mounted.
+        from core.config import get_settings
+
+        monkeypatch.setenv("MM_RENDER_WORKER_TOKEN", "   ")
+        get_settings.cache_clear()
+
+        assert fetch(novels_on).json()["can_render"] is False
+
+    def test_a_configured_render_box_means_it_can(
+        self, novels_on, db_session, monkeypatch
+    ):
+        from core.config import get_settings
+
+        monkeypatch.setenv("MM_RENDER_WORKER_TOKEN", "a-render-token")
+        get_settings.cache_clear()
+
+        assert fetch(novels_on).json()["can_render"] is True
+
+
 class TestFlagOff:
     def test_it_is_a_stock_404_when_novels_are_off(self, novels_off):
         assert fetch(novels_off).status_code == 404

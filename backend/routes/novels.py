@@ -210,6 +210,14 @@ def get_novel_series_audio(
         # the client needs this to grey out what it cannot ask for, rather
         # than offering it and having the request refused.
         "narratable": sorted(keys),
+        # Whether a render box is configured at all. Without one a queued
+        # chapter is never claimed and would read "in progress" forever, so
+        # the client hides the request instead of offering it. Configuration
+        # rather than a heartbeat because nothing records a heartbeat; this
+        # is the same test that decides whether the box's routes are mounted.
+        "can_render": bool(
+            str(getattr(get_settings(), "render_worker_token", "") or "")
+        ),
     }
 
 
