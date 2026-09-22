@@ -251,7 +251,13 @@ MADARA_CATALOG: tuple[MadaraSiteConfig, ...] = (
         extra_image_hosts=frozenset({"manhwaclub.net"}),
     ),
     _site("cucumbermanga", "CucumberManga", "cucumbermanga.com", mature=True, use_cf=False),
-    _site("lilymanga", "LilyManga", "lilymanga.net", url_segment="gl", mature=True, use_cf=False),
+    # lilymanga removed 2026-09-22 after an end-to-end probe from the VPS.
+    # It browses, searches and lists chapters perfectly — and then every page
+    # image is a 522 from its own CDN (glcomic.lilymanga.net), three times in
+    # a row, while lilymanga.net itself answers 200. The site is serving URLs
+    # to an origin that no longer responds, so a reader can open a chapter and
+    # never see a panel. Registered, that is a source which looks alive and
+    # cannot be read; restoring it is this one line if their CDN returns.
     _site("mangadistrict", "MangaDistrict", "mangadistrict.com", url_segment="series", listing_post_type="wp-manga", mature=True, use_cf=False),
     # Added 2026-09-05 after an end-to-end probe from the VPS. Three sibling
     # installs from one operator (identical Madara title template) whose
