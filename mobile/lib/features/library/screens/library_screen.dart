@@ -16,6 +16,7 @@ import 'package:manhwamaniacs/features/library/providers/library_display_provide
 import 'package:manhwamaniacs/features/library/providers/library_list_provider.dart';
 import 'package:manhwamaniacs/features/library/providers/library_selection_provider.dart';
 import 'package:manhwamaniacs/features/library/utils/library_shelf.dart';
+import 'package:manhwamaniacs/features/library/utils/read_state_label.dart';
 import 'package:manhwamaniacs/features/library/widgets/library/library_skeleton.dart';
 import 'package:manhwamaniacs/features/library/widgets/library/library_toolbar.dart';
 import 'package:manhwamaniacs/features/library/widgets/library/series_actions_sheet.dart';
@@ -405,7 +406,11 @@ class _LibraryBody extends ConsumerWidget {
               return libraryShelfBook(
                 series,
                 apiBaseUrl: baseUrl,
-                note: readingStatusNote(series.readingStatus),
+                // Where the reader is, rather than the follow's
+                // reading_status — "reading" for every follow, opened or not.
+                note: readStateLabel(series.readState) ??
+                    readingStatusNote(series.readingStatus),
+                unreadCount: readStateNewCount(series.readState),
                 selected: selectedIds.contains(series.id),
                 onTap: () => onSeriesTap(series),
                 onLongPress: onSeriesLongPress == null

@@ -1,5 +1,6 @@
 import 'package:manhwamaniacs/core/time/server_instant.dart';
 import 'package:manhwamaniacs/features/library/models/known_chapter.dart';
+import 'package:manhwamaniacs/features/library/models/read_state.dart';
 
 /// A followed series — `backend/services/followed_series_service.py`'s
 /// `FollowedSeriesService.serialize`. A series is in the library iff a
@@ -26,6 +27,7 @@ class FollowedSeries {
     this.lastCheckedAt,
     this.createdAt,
     this.updatedAt,
+    this.readState,
   });
 
   final int id;
@@ -52,6 +54,11 @@ class FollowedSeries {
   final DateTime? createdAt;
   final DateTime? updatedAt;
 
+  /// Where this profile stands in the series. Sent by the list, `follow` and
+  /// `patch`; null on the detail payload (which has its own progress overlay)
+  /// and in a library cache written by an older build.
+  final ReadState? readState;
+
   FollowedSeries copyWith({bool? isFavorite, String? readingStatus, bool? notify}) {
     return FollowedSeries(
       id: id,
@@ -71,6 +78,7 @@ class FollowedSeries {
       lastCheckedAt: lastCheckedAt,
       createdAt: createdAt,
       updatedAt: updatedAt,
+      readState: readState,
     );
   }
 
@@ -94,6 +102,9 @@ class FollowedSeries {
         lastCheckedAt: serverInstant(json['last_checked_at']),
         createdAt: serverInstant(json['created_at']),
         updatedAt: serverInstant(json['updated_at']),
+        readState: json['read_state'] is Map<String, dynamic>
+            ? ReadState.fromJson(json['read_state'] as Map<String, dynamic>)
+            : null,
       );
 
   /// Round-trips through [FollowedSeries.fromJson]. Written to the offline
@@ -120,6 +131,7 @@ class FollowedSeries {
         'last_checked_at': lastCheckedAt?.toIso8601String(),
         'created_at': createdAt?.toIso8601String(),
         'updated_at': updatedAt?.toIso8601String(),
+        'read_state': readState?.toJson(),
       };
 }
 

@@ -12,6 +12,7 @@ import 'package:manhwamaniacs/features/content_mode/content_mode_controller.dart
 import 'package:manhwamaniacs/features/content_mode/widgets/content_mode_switch.dart';
 import 'package:manhwamaniacs/features/library/models/followed_series.dart';
 import 'package:manhwamaniacs/features/library/utils/library_shelf.dart';
+import 'package:manhwamaniacs/features/library/utils/read_state_label.dart';
 import 'package:manhwamaniacs/features/library/widgets/home/followed_series_card.dart';
 import 'package:manhwamaniacs/features/library/widgets/library/continue_reading_strip.dart';
 import 'package:manhwamaniacs/features/library/widgets/library/series_actions_sheet.dart';
@@ -257,8 +258,12 @@ class _FollowedShelf extends ConsumerWidget {
                 // What the grid card says in its one muted line, in the slot
                 // the shelf keeps for it — and beside a chapter count the row
                 // can now show as well, instead of choosing between them.
-                note: latestChapterNote(meta.latestChapterLabel),
-                unreadCount: meta.unreadCount,
+                note: readStateLabel(series.readState) ??
+                    latestChapterNote(meta.latestChapterLabel),
+                unreadCount: libraryCardNewCount(
+                  series.readState,
+                  unreadNotifications: meta.unreadCount,
+                ),
                 onTap: () => onOpenSeries(series),
                 onLongPress: () => onSeriesLongPress(series),
               );

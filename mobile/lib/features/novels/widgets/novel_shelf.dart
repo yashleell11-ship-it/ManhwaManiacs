@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:manhwamaniacs/app/theme/app_colors.dart';
 import 'package:manhwamaniacs/app/theme/app_presets.dart';
+import 'package:manhwamaniacs/features/library/utils/read_state_label.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_typography.dart';
 import 'package:manhwamaniacs/features/novels/utils/novel_book.dart';
 import 'package:manhwamaniacs/shared/widgets/scroll_reveal.dart';
@@ -309,7 +310,7 @@ class _UnreadBadge extends StatelessWidget {
         borderRadius: BorderRadius.circular(context.radii.pill),
       ),
       child: Text(
-        '$count NEW',
+        newCountBadgeText(count),
         style: TextStyle(
           fontSize: 10,
           fontWeight: FontWeight.w700,

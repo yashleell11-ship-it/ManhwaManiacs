@@ -7,6 +7,7 @@ import 'package:manhwamaniacs/core/utils/responsive.dart';
 import 'package:manhwamaniacs/features/library/models/followed_series.dart';
 import 'package:manhwamaniacs/features/library/models/library_query.dart';
 import 'package:manhwamaniacs/features/library/utils/cover_url.dart';
+import 'package:manhwamaniacs/features/library/utils/read_state_label.dart';
 import 'package:manhwamaniacs/features/library/utils/series_display.dart';
 import 'package:manhwamaniacs/shared/providers/core_providers.dart';
 import 'package:manhwamaniacs/shared/widgets/glass_card.dart';
@@ -266,7 +267,9 @@ class SeriesListTile extends ConsumerWidget {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  '${series.chapterCount} chapters',
+                  seriesCardMeta(series),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: context.text.caption.copyWith(color: context.colors.muted),
                 ),
               ],
@@ -391,16 +394,25 @@ class _ProgressLabel extends StatelessWidget {
         children: [
           Icon(Icons.star, size: 12, color: context.colors.warning),
           const SizedBox(width: 4),
-          Text(
-            'Favorite',
-            style: context.text.caption.copyWith(color: context.colors.warning),
+          Flexible(
+            child: Text(
+              readStateNote(series.readState) ?? 'Favorite',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style:
+                  context.text.caption.copyWith(color: context.colors.warning),
+            ),
           ),
         ],
       );
     }
 
+    // Where the reader is, rather than the follow's reading_status — which
+    // is "reading" for every follow, opened or not.
     return Text(
-      readingStatusLabel(series.readingStatus),
+      progressCardLabel(series),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
       style: context.text.caption.copyWith(color: context.colors.muted),
     );
   }

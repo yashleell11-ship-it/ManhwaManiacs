@@ -11,6 +11,7 @@ import 'package:manhwamaniacs/features/library/models/collection_detail.dart';
 import 'package:manhwamaniacs/features/library/models/continue_reading_item.dart';
 import 'package:manhwamaniacs/features/library/models/followed_series.dart';
 import 'package:manhwamaniacs/features/library/models/library_statistics.dart';
+import 'package:manhwamaniacs/features/library/models/read_state.dart';
 import 'package:manhwamaniacs/features/library/models/reading_history_item.dart';
 import 'package:manhwamaniacs/features/library/models/recommendation.dart';
 import 'package:manhwamaniacs/features/library/models/series_detail.dart';
@@ -51,6 +52,7 @@ FollowedSeries _followed({
   String seriesKey = 'solo-leveling',
   int chapterCount = 120,
   String coverUrl = '',
+  ReadState? readState,
 }) {
   return FollowedSeries(
     id: id,
@@ -65,8 +67,21 @@ FollowedSeries _followed({
     contentRating: 'safe',
     rating: 'safe',
     chapterCount: chapterCount,
+    readState: readState,
   );
 }
+
+const _notStarted = ReadState(started: false, total: 120);
+
+const _onChapter118 = ReadState(
+  started: true,
+  chapterKey: 'c118',
+  chapterNumber: 118,
+  position: 118,
+  total: 120,
+  latestNumber: 120,
+  newCount: 2,
+);
 
 UpdateNotification _notification({
   required int id,
@@ -540,6 +555,45 @@ void main() {
       expect(find.text('2 NEW'), findsOneWidget);
     });
 
+    testWidgets('says where the reader is instead of what was notified',
+        (tester) async {
+      tester.view.physicalSize = const Size(1080, 2400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      await tester.pumpWidget(
+        await _buildTestApp(
+          state: UpdatesState(
+            notifications: [
+              // Unread notifications for a series never opened: the pill
+              // used to count these, and they are not "new" to this reader.
+              _notification(id: 1, followedSeriesId: 1, chapterNumber: 120),
+              _notification(id: 2, followedSeriesId: 1, chapterNumber: 121),
+              _notification(id: 3, followedSeriesId: 1, chapterNumber: 122),
+            ],
+            unreadCount: 3,
+            followed: [
+              _followed(id: 1, title: 'Unopened', readState: _notStarted),
+              _followed(
+                id: 2,
+                title: 'Half read',
+                seriesKey: 'half-read',
+                readState: _onChapter118,
+              ),
+            ],
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text('Not started'), findsOneWidget);
+      expect(find.text('Ch 118 of 120'), findsOneWidget);
+      expect(find.text('2 NEW'), findsOneWidget);
+      expect(find.text('3 NEW'), findsNothing);
+      expect(find.textContaining('Latest:'), findsNothing);
+    });
+
     testWidgets('falls back to the known chapter count once it is populated',
         (tester) async {
       tester.view.physicalSize = const Size(1080, 2400);
@@ -703,6 +757,30 @@ void main() {
 
       expect(find.text('2 NEW'), findsOneWidget);
       expect(find.textContaining('Latest: Chapter 121'), findsOneWidget);
+    });
+
+    testWidgets('a shelved book says where the reader is, with its new count',
+        (tester) async {
+      await pumpShelf(
+        tester,
+        UpdatesState(
+          notifications: const [],
+          unreadCount: 0,
+          followed: [
+            _followed(id: 1, title: 'Dune', readState: _onChapter118),
+            _followed(
+              id: 2,
+              title: 'Unopened',
+              seriesKey: 'unopened',
+              readState: _notStarted,
+            ),
+          ],
+        ),
+      );
+
+      expect(find.textContaining('Ch 118 of 120'), findsOneWidget);
+      expect(find.text('2 NEW'), findsOneWidget);
+      expect(find.textContaining('Not started'), findsOneWidget);
     });
 
     testWidgets('shows length and latest chapter together, not one or other',

@@ -4,6 +4,7 @@ import 'package:manhwamaniacs/app/theme/app_colors.dart';
 import 'package:manhwamaniacs/app/theme/app_presets.dart';
 import 'package:manhwamaniacs/features/library/models/followed_series.dart';
 import 'package:manhwamaniacs/features/library/utils/cover_url.dart';
+import 'package:manhwamaniacs/features/library/utils/read_state_label.dart';
 import 'package:manhwamaniacs/features/sources/utils/chapter_label.dart';
 import 'package:manhwamaniacs/features/updates/models/update_notification.dart';
 import 'package:manhwamaniacs/shared/providers/core_providers.dart';
@@ -85,6 +86,23 @@ class FollowedSeriesMeta {
   }
 }
 
+/// The card's one muted line: where the reader is ("Not started", "Ch 5 of
+/// 120") when the row carries a read state; else the latest chapter we
+/// actually know about, else a chapter count only when the checker has
+/// populated one, else nothing at all.
+String? followedSeriesCardSubtitle(
+  FollowedSeries series,
+  FollowedSeriesMeta meta,
+) {
+  final progress = readStateLabel(series.readState);
+  if (progress != null) return progress;
+  final latest = meta.latestChapterLabel;
+  if (latest != null) return 'Latest: $latest';
+  final known = series.chapterCount;
+  if (known <= 0) return null;
+  return known == 1 ? '1 chapter' : '$known chapters';
+}
+
 /// A cover-first Library grid card for one followed series.
 ///
 /// Matches the sources/search cards: cover, title, and a single muted meta
@@ -114,21 +132,15 @@ class FollowedSeriesCard extends ConsumerWidget {
   /// press has no haptic to answer with either.
   final VoidCallback? onLongPress;
 
-  /// One muted line: the latest chapter we actually know about, else a chapter
-  /// count only when the checker has populated one, else nothing at all.
-  String? get _subtitle {
-    final latest = meta.latestChapterLabel;
-    if (latest != null) return 'Latest: $latest';
-    final known = series.chapterCount;
-    if (known <= 0) return null;
-    return known == 1 ? '1 chapter' : '$known chapters';
-  }
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final baseUrl = ref.watch(apiBaseUrlProvider);
     final coverUrl = followedSeriesCoverUrl(baseUrl, series);
-    final subtitle = _subtitle;
+    final subtitle = followedSeriesCardSubtitle(series, meta);
+    final newCount = libraryCardNewCount(
+      series.readState,
+      unreadNotifications: meta.unreadCount,
+    );
 
     return Pressable(
       onTap: onTap,
@@ -150,11 +162,11 @@ class FollowedSeriesCard extends ConsumerWidget {
                       displayWidth: coverWidth,
                       borderRadius: context.radii.xl,
                     ),
-                  if (meta.unreadCount > 0)
+                  if (newCount > 0)
                     Positioned(
                       top: context.space.sm,
                       right: context.space.sm,
-                      child: _NewBadge(count: meta.unreadCount),
+                      child: _NewBadge(count: newCount),
                     ),
                 ],
               ),
@@ -186,7 +198,8 @@ class FollowedSeriesCard extends ConsumerWidget {
   }
 }
 
-/// Warm amber "N NEW" pill for unread new-chapter notifications.
+/// Warm amber "N NEW" pill: chapters past the furthest one read (or, for a
+/// row with no read state, unread new-chapter notifications).
 class _NewBadge extends StatelessWidget {
   const _NewBadge({required this.count});
 
@@ -204,7 +217,7 @@ class _NewBadge extends StatelessWidget {
         borderRadius: BorderRadius.circular(context.radii.pill),
       ),
       child: Text(
-        '$count NEW',
+        newCountBadgeText(count),
         style: context.text.caption.copyWith(
           color: context.colors.primaryFg,
           fontSize: 10,
