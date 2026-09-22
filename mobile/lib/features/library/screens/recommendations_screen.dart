@@ -11,6 +11,7 @@ import 'package:manhwamaniacs/features/library/models/suggestion.dart';
 import 'package:manhwamaniacs/features/library/providers/intelligence_providers.dart';
 import 'package:manhwamaniacs/features/library/providers/library_list_provider.dart';
 import 'package:manhwamaniacs/features/library/widgets/search/global_search_result_card.dart';
+import 'package:manhwamaniacs/shared/widgets/empty_state.dart';
 import 'package:manhwamaniacs/shared/widgets/premium/hero_heading.dart';
 import 'package:manhwamaniacs/shared/widgets/premium/primary_pill_button.dart';
 import 'package:manhwamaniacs/shared/widgets/skeleton_box.dart';
@@ -80,38 +81,57 @@ class _RecommendationsScreenState extends ConsumerState<RecommendationsScreen> {
         ),
         title: const Text('Find something to read'),
       ),
-      body: ListView(
-        padding: EdgeInsets.all(context.space.xl2),
-        children: [
-          const HeroHeading(text: 'What do you feel like?'),
-          SizedBox(height: context.space.xs),
-          Text(
-            canAsk
-                ? 'Describe it in your own words. Suggestions are weighed '
-                    'against what you already read.'
-                : budgetExhausted
-                    ? "You've used today's AI suggestions. They reset at "
-                        'midnight UTC — pick a genre below meanwhile.'
-                    : 'Pick a genre you read a lot of.',
-            style: context.text.body.copyWith(color: context.colors.muted),
-          ),
-          if (canAsk) ...[
-            SizedBox(height: context.space.xl),
-            _PromptBox(
-              controller: _controller,
-              onSubmit: _submit,
-              busy: suggestions.isLoading,
-              remainingToday: state?.remainingToday,
+      // Pull-to-refresh re-asks for the genres and for whether the box can
+      // run — the two things a flaky connection leaves stale. Never the
+      // suggestions: a pull is not a request to spend another AI call.
+      body: RefreshIndicator(
+        color: context.colors.primary,
+        onRefresh: () async {
+          ref
+            ..invalidate(recommendationsProvider)
+            ..invalidate(suggestAvailabilityProvider);
+          // Held until the genres answer, so the spinner means something. A
+          // failure is not rethrown: the section below draws it with Retry.
+          try {
+            await ref.read(recommendationsProvider.future);
+          } catch (_) {}
+        },
+        child: ListView(
+          // Short content still has to be pullable, or an error screen that
+          // fits on one page could never be refreshed.
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: EdgeInsets.all(context.space.xl2),
+          children: [
+            const HeroHeading(text: 'What do you feel like?'),
+            SizedBox(height: context.space.xs),
+            Text(
+              canAsk
+                  ? 'Describe it in your own words. Suggestions are weighed '
+                      'against what you already read.'
+                  : budgetExhausted
+                      ? "You've used today's AI suggestions. They reset at "
+                          'midnight UTC — pick a genre below meanwhile.'
+                      : 'Pick a genre you read a lot of.',
+              style: context.text.body.copyWith(color: context.colors.muted),
             ),
+            if (canAsk) ...[
+              SizedBox(height: context.space.xl),
+              _PromptBox(
+                controller: _controller,
+                onSubmit: _submit,
+                busy: suggestions.isLoading,
+                remainingToday: state?.remainingToday,
+              ),
+            ],
+            SizedBox(height: context.space.xl2),
+            _SuggestionsSection(
+              suggestions: suggestions,
+              onOpen: _openItem,
+              onRetry: _submit,
+            ),
+            _GenreSection(genresAsync: genresAsync),
           ],
-          SizedBox(height: context.space.xl2),
-          _SuggestionsSection(
-            suggestions: suggestions,
-            onOpen: _openItem,
-            onRetry: _submit,
-          ),
-          _GenreSection(genresAsync: genresAsync),
-        ],
+        ),
       ),
     );
   }
@@ -310,6 +330,14 @@ class _SuggestionsSection extends StatelessWidget {
   }
 }
 
+/// The genre chips, with every state the request can be in.
+///
+/// It used to render only the data case and `SizedBox.shrink()` for the rest,
+/// so loading, a failed request and a profile with no genres all looked the
+/// same: nothing. Offline, with the prompt box hidden too, the screen was a
+/// heading and a sentence pointing at a section that never appeared, with no
+/// error and no way to retry. These are the states the web page has always
+/// drawn, and the ones this screen drew before the suggestions rewrite.
 class _GenreSection extends ConsumerWidget {
   const _GenreSection({required this.genresAsync});
 
@@ -317,9 +345,45 @@ class _GenreSection extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    return genresAsync.maybeWhen(
+    return genresAsync.when(
+      // Chip-shaped, so the section does not jump when the real ones land.
+      loading: () => Wrap(
+        key: const Key('genres-loading'),
+        spacing: context.space.sm,
+        runSpacing: context.space.sm,
+        children: [
+          for (var i = 0; i < 6; i++)
+            const SkeletonBox(width: 96, height: 36, borderRadius: 999),
+        ],
+      ),
+      error: (error, _) => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            error is AppError
+                ? error.userMessage
+                : "Couldn't load recommendations.",
+            style: context.text.body.copyWith(color: context.colors.danger),
+          ),
+          SizedBox(height: context.space.md),
+          FilledButton(
+            onPressed: () => ref.invalidate(recommendationsProvider),
+            child: const Text('Retry'),
+          ),
+        ],
+      ),
       data: (genres) {
-        if (genres.isEmpty) return const SizedBox.shrink();
+        if (genres.isEmpty) {
+          return EmptyState(
+            icon: Icons.auto_awesome_outlined,
+            message: 'No recommendations yet',
+            subtitle: 'Follow a few series and their genres will show up here.',
+            action: PrimaryPillButton(
+              label: 'Browse Sources',
+              onPressed: () => context.go(Routes.sources),
+            ),
+          );
+        }
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -346,7 +410,6 @@ class _GenreSection extends ConsumerWidget {
           ],
         );
       },
-      orElse: () => const SizedBox.shrink(),
     );
   }
 }
