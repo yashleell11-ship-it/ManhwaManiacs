@@ -70,13 +70,29 @@ def shelf(db_session):
     return _add
 
 
+@pytest.fixture(autouse=True)
+def _ledgers(tmp_path, monkeypatch):
+    """Both spend ledgers on a throwaway path. They default to beside the
+    real settings.json, which no test may write to or read from."""
+    monkeypatch.setattr(
+        suggestion_service, "BUDGET_PATH", tmp_path / "suggest-usage.json"
+    )
+    monkeypatch.setattr(
+        suggestion_service,
+        "ACCOUNT_BUDGET_PATH",
+        tmp_path / "suggest-accounts.json",
+    )
+
+
 @pytest.fixture
 def service(db_session, acct):
+    """The owner's view: an admin, bounded only by the server-wide ceiling.
+    The account share has tests of its own below."""
     uid, pid = acct
     library = FollowedSeriesService(
         db_session, FakeBrowse({}), user_id=uid, profile_id=pid
     )
-    return SuggestionService(db_session, library)
+    return SuggestionService(db_session, library, is_admin=True)
 
 
 def _answer(*titles: str) -> Completion:
@@ -487,6 +503,205 @@ def test_suggestions_spend_from_their_own_ledger(service, shelf, captured):
     assert captured["kwargs"]["ceiling"] == suggestion_service.DAILY_CEILING
 
 
+# --- no one account can spend the day ------------------------------------
+#
+# Registration is open, and the ceiling used to be one server-wide counter:
+# the first account to find the button could spend all 60, and the owner got
+# "used up for today" until midnight UTC. These run the REAL client against
+# a mock transport, so the ledgers on disk are the outcome being checked.
+
+
+@pytest.fixture
+def paid(monkeypatch):
+    """The real ``complete_json``, answered by a mock DeepSeek."""
+    import httpx
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-not-a-real-key-0000000000")
+    seen: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        body = {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {"suggestions": [{"title": "Filler Book 0", "why": "b"}]}
+                        )
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 10},
+            "model": "deepseek-flash",
+        }
+        return httpx.Response(200, json=body)
+
+    transport = httpx.MockTransport(handle)
+    real = deepseek_client.complete_json
+    monkeypatch.setattr(
+        suggestion_service.deepseek_client,
+        "complete_json",
+        lambda *a, **k: real(*a, transport=transport, **k),
+    )
+    return seen
+
+
+@pytest.fixture
+def member_of(db_session, make_user, make_profile):
+    """A service for a fresh non-admin account, as the route builds one."""
+
+    def _make(name: str) -> SuggestionService:
+        user = make_user(name)
+        profile = make_profile(user.id, "Main")
+        library = FollowedSeriesService(
+            db_session, FakeBrowse({}), user_id=user.id, profile_id=profile.id
+        )
+        return SuggestionService(db_session, library, is_admin=False)
+
+    return _make
+
+
+def _ledger(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _spend_global(n: int) -> None:
+    suggestion_service.BUDGET_PATH.write_text(
+        json.dumps({"date": deepseek_client._today(), "requests": n}),
+        encoding="utf-8",
+    )
+
+
+def test_one_account_cannot_spend_past_its_own_share(
+    service, member_of, shelf, paid
+):
+    _fill_shelf(shelf)
+    member = member_of("greedy")
+    share = suggestion_service.ACCOUNT_DAILY_CEILING
+
+    for _ in range(share):
+        member.suggest("anything", base_url="http://x/")
+
+    with pytest.raises(AppError) as exc:
+        member.suggest("anything", base_url="http://x/")
+    assert exc.value.status_code == 429
+    assert exc.value.code == "ai_budget_exhausted"
+    # Refused BEFORE it was sent: nothing was paid for the refused one.
+    assert len(paid) == share
+    assert _ledger(suggestion_service.BUDGET_PATH)["requests"] == share
+    uid = str(member._library._user_id)
+    assert _ledger(suggestion_service.ACCOUNT_BUDGET_PATH)["accounts"] == {
+        uid: share
+    }
+    assert member.availability()["remaining_today"] == 0
+    assert member.availability()["reason"] == "budget_exhausted"
+
+    # And the owner is untouched by it.
+    service.suggest("anything", base_url="http://x/")
+    assert len(paid) == share + 1
+    assert service.availability()["remaining_today"] == (
+        suggestion_service.DAILY_CEILING - share - 1
+    )
+
+
+def test_accounts_together_leave_the_owner_a_reserve(
+    service, member_of, shelf, paid
+):
+    """However many accounts spend their share, the shared pool closes
+    ADMIN_RESERVE short of the ceiling, and the owner still has that."""
+    _fill_shelf(shelf)
+    _spend_global(
+        suggestion_service.DAILY_CEILING - suggestion_service.ADMIN_RESERVE
+    )
+    fresh = member_of("latecomer")
+
+    assert fresh.availability()["remaining_today"] == 0
+    with pytest.raises(AppError) as exc:
+        fresh.suggest("anything", base_url="http://x/")
+    assert exc.value.status_code == 429
+    assert paid == []
+
+    assert (
+        service.availability()["remaining_today"]
+        == suggestion_service.ADMIN_RESERVE
+    )
+    service.suggest("anything", base_url="http://x/")
+    assert len(paid) == 1
+
+
+def test_the_global_ceiling_is_still_the_backstop_for_the_owner(
+    service, shelf, paid
+):
+    _fill_shelf(shelf)
+    _spend_global(suggestion_service.DAILY_CEILING)
+
+    assert service.availability()["remaining_today"] == 0
+    with pytest.raises(AppError) as exc:
+        service.suggest("anything", base_url="http://x/")
+    assert exc.value.status_code == 429
+    assert paid == []
+
+
+def test_availability_is_the_callers_own_count(service, member_of, shelf, paid):
+    _fill_shelf(shelf)
+    spender, bystander = member_of("spender"), member_of("bystander")
+    share = suggestion_service.ACCOUNT_DAILY_CEILING
+
+    for _ in range(3):
+        spender.suggest("anything", base_url="http://x/")
+
+    assert spender.availability() == {
+        "available": True,
+        "reason": "ok",
+        "remaining_today": share - 3,
+        "daily_ceiling": share,
+    }
+    assert bystander.availability()["remaining_today"] == share
+    assert service.availability()["remaining_today"] == (
+        suggestion_service.DAILY_CEILING - 3
+    )
+    assert service.availability()["daily_ceiling"] == (
+        suggestion_service.DAILY_CEILING
+    )
+
+
+def test_the_answer_reports_what_the_caller_has_left(member_of, shelf, paid):
+    _fill_shelf(shelf)
+    member = member_of("counter")
+
+    result = member.suggest("anything", base_url="http://x/")
+
+    assert result["remaining_today"] == (
+        suggestion_service.ACCOUNT_DAILY_CEILING - 1
+    )
+
+
+def test_an_unreadable_account_ledger_refuses_every_account(
+    service, member_of, shelf, paid
+):
+    """Fail closed, as the global ledger does: a ledger that cannot prove
+    what an account spent does not hand every account a fresh day. The owner
+    spends from the global ledger alone and is not locked out by it."""
+    _fill_shelf(shelf)
+    suggestion_service.ACCOUNT_BUDGET_PATH.write_text("{trunc", encoding="utf-8")
+    member = member_of("anyone")
+
+    assert member.availability()["remaining_today"] == 0
+    with pytest.raises(AppError) as exc:
+        member.suggest("anything", base_url="http://x/")
+    assert exc.value.status_code == 429
+    assert paid == []
+    # Left as found, for a human to look at.
+    assert (
+        suggestion_service.ACCOUNT_BUDGET_PATH.read_text(encoding="utf-8")
+        == "{trunc"
+    )
+
+    service.suggest("anything", base_url="http://x/")
+    assert len(paid) == 1
+
+
 # --- over HTTP ------------------------------------------------------------
 
 
@@ -528,6 +743,34 @@ def test_suggest_round_trips(api, as_user, acct, shelf, captured):
     assert body["items"][0]["title"] == "Over The Wire"
     assert body["items"][0]["why"] == "because"
     assert body["model"] == "deepseek-flash"
+
+
+def test_the_route_holds_a_member_to_a_share_and_not_an_admin(
+    api, as_user, make_user, make_profile, monkeypatch
+):
+    """The admin flag has to reach the service from the session, or every
+    caller would silently get one allowance or the other."""
+    monkeypatch.setattr(
+        suggestion_service.deepseek_client, "is_configured", lambda: True
+    )
+    admin = make_user("the-owner", is_admin=True)
+    member = make_user("a-reader")
+    make_profile(member.id, "Main")
+
+    owner_view = api.get("/library/suggest/availability", headers=as_user(admin.id))
+    member_view = api.get(
+        "/library/suggest/availability", headers=as_user(member.id)
+    )
+
+    assert owner_view.status_code == 200, owner_view.text
+    assert owner_view.json()["daily_ceiling"] == suggestion_service.DAILY_CEILING
+    assert member_view.status_code == 200, member_view.text
+    assert member_view.json()["daily_ceiling"] == (
+        suggestion_service.ACCOUNT_DAILY_CEILING
+    )
+    assert member_view.json()["remaining_today"] == (
+        suggestion_service.ACCOUNT_DAILY_CEILING
+    )
 
 
 # --- the zero-scrape property, as a structural fact ----------------------

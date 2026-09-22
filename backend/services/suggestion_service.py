@@ -55,9 +55,15 @@ from core.content_rating import (
 )
 from core.connector_directory import descriptor_for_source
 from core.errors import AppError
-from database.models import ChapterProgress, FollowedSeries, SourceSeriesCache
+from database.models import (
+    ChapterProgress,
+    FollowedSeries,
+    SourceSeriesCache,
+    User,
+)
 from database.session import get_db
 from services import deepseek_client
+from services.auth_service import get_optional_user
 from services.followed_series_service import (
     FollowedSeriesService,
     get_followed_series_service,
@@ -75,6 +81,27 @@ DAILY_CEILING = 60
 
 #: Separate file for the same reason the ceiling is separate.
 BUDGET_PATH = SETTINGS_PATH.parent / "deepseek-suggest-usage.json"
+
+#: DAILY_CEILING is one server-wide number, and registration is open: on its
+#: own it let the first account to find the button spend the whole day's
+#: allowance, after which the owner and everyone else got "used up for today"
+#: until midnight UTC. It stays as the spend backstop; these two rules sit
+#: under it for every account that is not an admin.
+#:
+#: Each such account gets this many a day of its own -- plenty for a reader
+#: asking a few times, and four accounts' worth before the shared pool below
+#: is gone.
+ACCOUNT_DAILY_CEILING = 10
+
+#: And together they stop this far short of DAILY_CEILING, so however many
+#: accounts spend their share, an admin always has this many left. Checked
+#: against the global ledger, so it costs no extra bookkeeping.
+ADMIN_RESERVE = 20
+
+#: Each account's own count, on its own file. deepseek_client keeps it under
+#: the same rules as the global ledger: fail closed when unreadable, atomic
+#: writes, survives a restart.
+ACCOUNT_BUDGET_PATH = SETTINGS_PATH.parent / "deepseek-suggest-accounts.json"
 
 #: Shelf rows sent to the model. ~250 × (title + genres) lands near 4k prompt
 #: tokens; the model reads all of it and the cost is a tenth of a cent.
@@ -180,9 +207,48 @@ class SuggestionService:
         self,
         db: Session,
         library: FollowedSeriesService,
+        *,
+        is_admin: bool = False,
     ) -> None:
         self._db = db
         self._library = library
+        # Defaults to the smaller allowance: a caller that forgets to say is
+        # held to an account's share, never handed the admin's whole budget.
+        self._is_admin = is_admin
+
+    # --- the allowance -------------------------------------------------
+
+    def _global_ceiling(self) -> int:
+        """How far up the shared ledger this caller may spend."""
+        if self._is_admin:
+            return DAILY_CEILING
+        return DAILY_CEILING - ADMIN_RESERVE
+
+    def _account_budget(self) -> deepseek_client.AccountBudget | None:
+        if self._is_admin:
+            return None
+        return deepseek_client.AccountBudget(
+            path=ACCOUNT_BUDGET_PATH,
+            account=str(self._library._user_id),
+            ceiling=ACCOUNT_DAILY_CEILING,
+        )
+
+    def _remaining_today(self) -> int:
+        """What THIS caller can still ask for today: the smaller of what the
+        shared ledger has left for them and what their own share has left."""
+        remaining = self._global_ceiling() - deepseek_client.spent_today(
+            BUDGET_PATH
+        )
+        budget = self._account_budget()
+        if budget is not None:
+            own = budget.ceiling - deepseek_client.account_spent_today(
+                budget.path, budget.account
+            )
+            remaining = min(remaining, own)
+        return max(0, remaining)
+
+    def _daily_ceiling(self) -> int:
+        return DAILY_CEILING if self._is_admin else ACCOUNT_DAILY_CEILING
 
     # --- availability --------------------------------------------------
 
@@ -192,6 +258,10 @@ class SuggestionService:
         A missing key is a deployment state, not a bug — the same posture
         ``deepseek_client`` takes — so the clients hide the prompt box rather
         than offering something that will 503 on tap.
+
+        ``remaining_today`` and ``daily_ceiling`` are the CALLER's: an account
+        that has spent its share is told so even while the server has budget
+        left, because that is what its next tap will get.
         """
         self._library._require_owner()
         if not deepseek_client.is_configured():
@@ -199,15 +269,14 @@ class SuggestionService:
                 "available": False,
                 "reason": "not_configured",
                 "remaining_today": 0,
-                "daily_ceiling": DAILY_CEILING,
+                "daily_ceiling": self._daily_ceiling(),
             }
-        spent = deepseek_client.spent_today(BUDGET_PATH)
-        remaining = max(0, DAILY_CEILING - spent)
+        remaining = self._remaining_today()
         return {
             "available": remaining > 0,
             "reason": "ok" if remaining > 0 else "budget_exhausted",
             "remaining_today": remaining,
-            "daily_ceiling": DAILY_CEILING,
+            "daily_ceiling": self._daily_ceiling(),
         }
 
     # --- the shelf -----------------------------------------------------
@@ -373,8 +442,9 @@ class SuggestionService:
                 max_tokens=MAX_TOKENS,
                 temperature=TEMPERATURE,
                 timeout=TIMEOUT_SECONDS,
-                ceiling=DAILY_CEILING,
+                ceiling=self._global_ceiling(),
                 budget_path=BUDGET_PATH,
+                account_budget=self._account_budget(),
             )
         except LLMBudgetExhausted as exc:
             raise AppError(
@@ -512,9 +582,7 @@ class SuggestionService:
             "items": items,
             "dropped": dropped,
             "model": completion.model,
-            "remaining_today": max(
-                0, DAILY_CEILING - deepseek_client.spent_today(BUDGET_PATH)
-            ),
+            "remaining_today": self._remaining_today(),
         }
 
 
@@ -523,5 +591,10 @@ def get_suggestion_service(
     library: Annotated[
         FollowedSeriesService, Depends(get_followed_series_service)
     ],
+    # Already resolved for this request by the session gate; FastAPI caches a
+    # dependency per request, so asking again costs no query.
+    user: Annotated[User | None, Depends(get_optional_user)] = None,
 ) -> SuggestionService:
-    return SuggestionService(db, library)
+    return SuggestionService(
+        db, library, is_admin=bool(user is not None and user.is_admin)
+    )
