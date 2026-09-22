@@ -105,6 +105,46 @@ class TestEnqueue:
             {"chapter_key": "ch-1", "reason": "already_rendered"}
         ]
 
+    def test_force_renders_a_chapter_again(
+        self, novels_on, db_session, tmp_path, monkeypatch
+    ):
+        # After a recast or a new narrator the old audio is simply wrong, and
+        # without this there was no way to ask for it again: the file check
+        # refused before the (deliberately partial) unique index was reached.
+        from services.chapter_audio_store import chapter_paths
+
+        cache_chapter(db_session, "ch-1")
+        monkeypatch.setenv("MM_AUDIO_DIR", str(tmp_path))
+        audio, _ = chapter_paths(STUB_SOURCE, SERIES, "ch-1")
+        audio.parent.mkdir(parents=True, exist_ok=True)
+        audio.write_bytes(b"OggS")
+
+        body = ask(novels_on, ["ch-1"], force=True).json()
+
+        assert [q["chapter_key"] for q in body["queued"]] == ["ch-1"]
+        assert body["skipped"] == []
+        db_session.expire_all()
+        row = db_session.query(NovelAudioJob).one()
+        assert (row.chapter_key, row.status) == ("ch-1", "queued")
+        assert row.id == body["queued"][0]["job_id"]
+        # The existing audio keeps playing until the new render replaces it.
+        assert audio.read_bytes() == b"OggS"
+
+    def test_force_still_cannot_queue_a_chapter_twice(
+        self, novels_on, db_session
+    ):
+        # Force skips the "already has audio" check, not the in-flight one:
+        # two renders racing for one file is never what anybody wants.
+        cache_chapter(db_session, "ch-1")
+        ask(novels_on, ["ch-1"])
+
+        body = ask(novels_on, ["ch-1"], force=True).json()
+
+        assert body["skipped"] == [
+            {"chapter_key": "ch-1", "reason": "already_queued"}
+        ]
+        assert db_session.query(NovelAudioJob).count() == 1
+
     def test_a_mixed_batch_answers_for_every_chapter(self, novels_on, db_session):
         # Asking for a whole book normally finds some of it already done.
         # Reporting that as a failure would be wrong.

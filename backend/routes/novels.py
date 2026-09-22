@@ -228,6 +228,10 @@ class AudioRenderRequest(BaseModel):
     chapter_keys: list[str] = Field(min_length=1, max_length=200)
     priority: int = Field(default=0, ge=0, le=9)
 
+    #: Queue chapters that already have audio, e.g. after recasting. Off by
+    #: default so "narrate the whole book" never re-renders what is done.
+    force: bool = False
+
 
 @router.post("/audio/render", dependencies=OWNER_ONLY)
 @limiter.limit(sources_limit)
@@ -249,7 +253,7 @@ def request_novel_audio(
     """
     result = enqueue(
         db, body.source_id, body.series_key, body.chapter_keys,
-        priority=body.priority,
+        priority=body.priority, force=body.force,
     )
     db.commit()
     return {"queued": list(result.queued), "skipped": list(result.skipped)}

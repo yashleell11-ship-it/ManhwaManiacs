@@ -76,6 +76,7 @@ def enqueue(
     chapter_keys: list[str],
     *,
     priority: int = 0,
+    force: bool = False,
 ) -> Enqueued:
     """Ask for these chapters to be narrated.
 
@@ -83,6 +84,13 @@ def enqueue(
     skipped with a reason the UI can show. A partial success is the ordinary
     outcome — asking for a whole book will usually find some chapters already
     rendered — and reporting it as a failure would be wrong.
+
+    ``force`` queues a chapter even though it already has audio. That is the
+    case the partial unique index was made partial for: a chapter rendered
+    last week must be askable again after the cast or the narrator changed,
+    or the new choice never reaches the audio. The old file keeps playing
+    until ``complete`` replaces it atomically. It does NOT bypass the
+    in-flight guard — two renders racing for one file is never wanted.
     """
     series_key = fully_unquote(series_key)
     queued: list[dict[str, str]] = []
@@ -92,7 +100,7 @@ def enqueue(
         key = fully_unquote(raw_key)
 
         audio, _timing = chapter_paths(source_id, series_key, key)
-        if audio.is_file():
+        if not force and audio.is_file():
             skipped.append({"chapter_key": key, "reason": "already_rendered"})
             continue
 
