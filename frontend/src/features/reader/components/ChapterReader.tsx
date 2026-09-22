@@ -62,6 +62,7 @@ import { useReaderSettings } from "../use-reader-settings";
 import { useReaderShortcuts } from "../use-reader-shortcuts";
 import type { StripEdge } from "../use-chapter-strip";
 import type { ReadingMode } from "../types";
+import { installWheelZoomArming } from "../wheel-zoom-arming";
 import {
   ContinuousStrip,
   READING_LINE_PX,
@@ -914,70 +915,20 @@ export function ChapterReader({
   // one the moment it sees a modifier. A mouse-wheel zoom arms on the
   // Control/Meta keydown before the first tick; a trackpad pinch synthesises
   // ctrlKey with no keydown, so it arms on the first tick and loses only that
-  // one to the browser's own zoom. It disarms when the modifier lifts.
+  // one to the browser's own zoom. A key-armed zoom disarms when the modifier
+  // lifts; a pinch, which has no keyup, when it goes idle. The arming itself
+  // lives in `installWheelZoomArming`, where it is tested.
   useEffect(() => {
     if (!scrollElement || !continuous) return;
-
-    let armed = false;
-    let disarmTimer: ReturnType<typeof setTimeout> | undefined;
-
-    const zoomFrom = (event: WheelEvent) => {
-      const steps = wheelZoomSteps(event);
-      if (steps !== 0) zoomSteps(steps);
-      return steps !== 0;
-    };
-
-    // Non-passive: the only listener allowed to cancel the browser's zoom, and
-    // only attached while a modifier is actually down.
-    const blocking = (event: WheelEvent) => {
-      if (!zoomFrom(event)) return;
-      event.preventDefault();
-    };
-
-    const arm = () => {
-      if (armed) return;
-      armed = true;
-      scrollElement.addEventListener("wheel", blocking, { passive: false });
-    };
-
-    const disarm = () => {
-      if (!armed) return;
-      armed = false;
-      scrollElement.removeEventListener("wheel", blocking);
-    };
-
-    const passive = (event: WheelEvent) => {
-      if (!(event.ctrlKey || event.metaKey)) return;
-      // A pinch arrives with no keydown to arm us, so arm here and keep the
-      // gesture alive on a short idle timer. This tick itself is NOT zoomed:
-      // once armed, `blocking` handles every subsequent tick and zooming here
-      // too would double-apply it. Losing the first tick of a pinch is the
-      // price of not blocking every ordinary scroll in the reader.
-      arm();
-      clearTimeout(disarmTimer);
-      disarmTimer = setTimeout(disarm, 500);
-    };
-
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Control" || event.key === "Meta") arm();
-    };
-    const onKeyUp = (event: KeyboardEvent) => {
-      if (event.key === "Control" || event.key === "Meta") disarm();
-    };
-
-    scrollElement.addEventListener("wheel", passive, { passive: true });
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("keyup", onKeyUp);
-    window.addEventListener("blur", disarm);
-
-    return () => {
-      clearTimeout(disarmTimer);
-      scrollElement.removeEventListener("wheel", passive);
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("keyup", onKeyUp);
-      window.removeEventListener("blur", disarm);
-      disarm();
-    };
+    return installWheelZoomArming({
+      scroller: scrollElement,
+      keys: window,
+      zoom: (event) => {
+        const steps = wheelZoomSteps(event);
+        if (steps !== 0) zoomSteps(steps);
+        return steps !== 0;
+      },
+    });
   }, [continuous, scrollElement, zoomSteps]);
 
   /**
