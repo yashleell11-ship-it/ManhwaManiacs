@@ -41,6 +41,7 @@ import { segmentAt, timingMatchesText } from "@/features/novels/audio-follow";
 import { useScrollContainer } from "@/lib/scroll-container";
 import { apiErrorMessage, resolveViewState } from "@/lib/view-state";
 import { isSceneBreak, splitDropCap, tocEntry } from "../book";
+import { voiceChangeError } from "../cast-labels";
 import { paletteSurface } from "../palettes";
 import {
   captureParagraphAnchor,
@@ -678,6 +679,7 @@ export function NovelChapterView({
               voices={voices?.voices}
               narratorVoiceId={attribution?.narrator_voice_id ?? null}
               saving={setVoice.isPending}
+              error={voiceChangeError(setVoice.error)}
               onChooseVoice={(name, voiceId) =>
                 setVoice.mutate({ name, voiceId })
               }

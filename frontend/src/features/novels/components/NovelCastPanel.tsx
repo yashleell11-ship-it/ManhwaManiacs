@@ -17,6 +17,7 @@
 
 import { useState } from "react";
 import { NovelVoicePicker } from "./NovelVoicePicker";
+import { AUTOMATIC, castVoiceLabel } from "../cast-labels";
 import type { NovelVoicePayload } from "../types";
 
 export type CastMember = {
@@ -39,6 +40,7 @@ export function NovelCastPanel({
   narratorVoiceId,
   onChooseVoice,
   saving,
+  error,
 }: {
   cast: readonly CastMember[];
   hues: ReadonlyMap<string, number>;
@@ -55,6 +57,8 @@ export function NovelCastPanel({
   /** `null` as the name means the narrator. Absent = read-only panel. */
   onChooseVoice?: (name: string | null, voiceId: string | null) => void;
   saving?: boolean;
+  /** Why the last voice change failed, in the server's words. */
+  error?: string | null;
 }) {
   // Which row has its picker open. One at a time: this panel sits inside the
   // page, and thirty voices under every character is a wall.
@@ -85,6 +89,12 @@ export function NovelCastPanel({
         </button>
       </div>
 
+      {error ? (
+        <p role="alert" className="mt-2 text-xs" style={{ color: surface.ink }}>
+          {error}
+        </p>
+      ) : null}
+
       {narrator ? (
         <p className="mt-2 text-xs" style={{ color: surface.muted }}>
           Narrated by <span style={{ color: surface.ink }}>{narrator}</span> — their
@@ -112,6 +122,7 @@ export function NovelCastPanel({
               voices={voices ?? []}
               selected={narratorVoiceId ?? null}
               label="the narration"
+              forNarration
               surface={surface}
               busy={Boolean(saving)}
               onChoose={(voiceId) => onChooseVoice?.(null, voiceId)}
@@ -158,7 +169,7 @@ export function NovelCastPanel({
                     className="font-mono text-[11px] tabular-nums underline-offset-2 hover:underline"
                     style={{ color: surface.muted }}
                   >
-                    {voiceName(member.voice_id) ?? "narrator"} · {lines}
+                    {castVoiceLabel(member.voice_id, voices)} · {lines}
                   </button>
                 ) : (
                   <span
@@ -166,7 +177,7 @@ export function NovelCastPanel({
                     style={{ color: surface.muted }}
                   >
                     {lines} {lines === 1 ? "line" : "lines"}
-                    {member.voice_id ? "" : " · narrator"}
+                    {member.voice_id ? "" : ` · ${AUTOMATIC}`}
                   </span>
                 )}
                 {open === member.name ? (

@@ -21,6 +21,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { novelsApi } from "../api";
+import { automaticVoiceOption } from "../cast-labels";
 import { createLatestLoad, keepLoadedUrl } from "../latest-load";
 import type { NovelVoicePayload } from "../types";
 
@@ -34,9 +35,10 @@ export function NovelVoicePicker({
   onChoose,
   onClose,
   busy,
+  forNarration = false,
 }: {
   voices: readonly NovelVoicePayload[];
-  /** The voice currently assigned, or null for "read as narrator". */
+  /** The voice currently pinned, or null for an automatic one. */
   selected: string | null;
   /** Who is being cast — a character's name, or the narrator. */
   label: string;
@@ -44,6 +46,8 @@ export function NovelVoicePicker({
   onChoose: (voiceId: string | null) => void;
   onClose: () => void;
   busy: boolean;
+  /** Casting the narration rather than a character: changes what "automatic" means. */
+  forNarration?: boolean;
 }) {
   const [playing, setPlaying] = useState<string | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
@@ -111,6 +115,8 @@ export function NovelVoicePicker({
     [playing, stop, loads],
   );
 
+  const automatic = automaticVoiceOption(forNarration);
+
   const grouped: Array<[string, NovelVoicePayload[]]> = [
     ["Male", voices.filter((v) => v.gender === "male")],
     ["Female", voices.filter((v) => v.gender === "female")],
@@ -149,8 +155,8 @@ export function NovelVoicePicker({
       <ul className="mt-2 flex flex-col gap-0.5">
         <li>
           <VoiceRow
-            title="Read as narrator"
-            detail="No voice of their own"
+            title={automatic.title}
+            detail={automatic.detail}
             chosen={selected === null}
             surface={surface}
             busy={busy}
