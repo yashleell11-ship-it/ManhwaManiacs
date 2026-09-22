@@ -61,6 +61,33 @@ export interface FollowedSeries {
   last_checked_at: string | null;
   created_at: string | null;
   updated_at: string | null;
+  /**
+   * Where this profile stands in the series. Sent by the list, `follow` and
+   * `patch`; absent elsewhere (the detail page has its own progress overlay).
+   * Render it through `read-state.ts`, never inline.
+   */
+  read_state?: ReadState;
+}
+
+/**
+ * `FollowedSeriesService._read_states` — this profile's reading of one
+ * followed series, computed for a whole list page in one query.
+ */
+export interface ReadState {
+  /** Whether this profile has opened any chapter of the series. */
+  started: boolean;
+  /** The furthest chapter opened, by reading order; null when not in the list. */
+  chapter_key: string | null;
+  /** That chapter's printed number, where the source numbers it. */
+  chapter_number: number | null;
+  /** 1-based position of that chapter in reading order; null when unknown. */
+  position: number | null;
+  /** How many chapters the known list holds. */
+  total: number;
+  /** The printed number of the last chapter in reading order, where known. */
+  latest_number: number | null;
+  /** Chapters past the furthest one opened; null when the position is unknown. */
+  new_count: number | null;
 }
 
 /** `GET /library/series` — paginated followed-series list. */

@@ -16,7 +16,7 @@ import { ContinueReading } from "./ContinueReading";
 import { LibraryToolbar } from "./LibraryToolbar";
 import { SeriesGrid } from "./SeriesGrid";
 import { libraryCoverUrl } from "../api";
-import { readingStatusLabel } from "../reading-stats";
+import { followedShelfNote } from "../read-state";
 import {
   getLibraryDensityServerSnapshot,
   getLibraryDensitySnapshot,
@@ -138,9 +138,7 @@ export function LibraryView() {
             coverUrl: coverPath(series.cover_url)
               ? libraryCoverUrl(series.cover_url, SHELF_PLATE_SIZES)
               : null,
-            note: series.reading_status
-              ? readingStatusLabel(series.reading_status)
-              : null,
+            note: followedShelfNote(series),
           }))
         : [],
     [isNovelMode, items],

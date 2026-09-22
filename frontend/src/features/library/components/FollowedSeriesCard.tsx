@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { libraryCoverUrl } from "../api";
+import { followedCardSubtitle, newCountLabel, readStateNewCount } from "../read-state";
 import type { FollowedSeries } from "../types";
 import { CoverImage } from "@/components/ui/cover-image";
 
@@ -16,15 +17,12 @@ const COVER_SIZES = "(max-width: 639px) calc(33.33vw - 21px), 180px";
 
 /**
  * A cover-first Library card for one followed series. Cover, title, and a single
- * muted meta line.
+ * muted meta line saying where the reader is ("Not started", "Ch 5 of 120"),
+ * with an "N new" pill on the cover for chapters past the furthest one read.
  */
 export function FollowedSeriesCard({ series }: { series: FollowedSeries }) {
-  const subtitle =
-    series.chapter_count > 0
-      ? series.chapter_count === 1
-        ? "1 chapter"
-        : `${series.chapter_count} chapters`
-      : null;
+  const subtitle = followedCardSubtitle(series);
+  const fresh = newCountLabel(readStateNewCount(series.read_state));
 
   return (
     <Link
@@ -40,6 +38,11 @@ export function FollowedSeriesCard({ series }: { series: FollowedSeries }) {
           sizes={COVER_SIZES}
           unoptimized
         />
+        {fresh ? (
+          <span className="absolute right-2 top-2 rounded-full bg-primary px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-primary-fg">
+            {fresh}
+          </span>
+        ) : null}
       </div>
 
       <h3 className="mt-2 line-clamp-2 text-sm font-semibold leading-tight text-fg">

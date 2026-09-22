@@ -10,6 +10,7 @@ import {
   densityCoverSizes,
 } from "@/features/library/density";
 import { useToggleFavorite } from "@/features/library/hooks";
+import { seriesCardMeta } from "@/features/library/read-state";
 import type { FollowedSeries } from "@/features/library/types";
 import { GRID_ITEM_ATTRIBUTE } from "@/lib/keyboard";
 import { cn } from "@/lib/cn";
@@ -189,8 +190,8 @@ function SeriesCardContent({
             {series.title}
           </h3>
           {density === "compact" ? null : (
-            <p className="mt-0.5 text-xs text-white/70">
-              {series.chapter_count} chapters
+            <p className="mt-0.5 truncate text-xs text-white/70">
+              {seriesCardMeta(series)}
             </p>
           )}
         </div>
@@ -352,7 +353,7 @@ export function SeriesListItem({ series, selection }: SeriesCardProps) {
             </span>
           ) : null}
         </div>
-        <p className="mt-1 text-xs text-muted">{series.chapter_count} chapters</p>
+        <p className="mt-1 text-xs text-muted">{seriesCardMeta(series)}</p>
       </div>
       {selection?.selecting ? null : (
         <div className="flex shrink-0 items-center gap-1.5">

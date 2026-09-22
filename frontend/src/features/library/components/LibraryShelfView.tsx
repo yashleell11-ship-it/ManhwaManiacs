@@ -18,7 +18,7 @@ import { libraryCoverUrl } from "../api";
 import { shelfCountLine } from "../count-line";
 import { continueReadingSeriesKey } from "../continue-reading";
 import { useContinueReading, useSeriesList } from "../hooks";
-import { readingStatusLabel } from "../reading-stats";
+import { followedShelfNote } from "../read-state";
 import { ContinueReadingStrip } from "./ContinueReading";
 import { FollowedSeriesCard } from "./FollowedSeriesCard";
 
@@ -82,9 +82,7 @@ export function LibraryShelfView() {
             coverUrl: coverPath(series.cover_url)
               ? libraryCoverUrl(series.cover_url, SHELF_PLATE_SIZES)
               : null,
-            note: series.reading_status
-              ? readingStatusLabel(series.reading_status)
-              : null,
+            note: followedShelfNote(series),
           }))
         : [],
     [followed, isNovelMode],
