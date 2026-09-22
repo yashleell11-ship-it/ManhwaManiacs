@@ -77,6 +77,23 @@ describe("keepLoadedUrl", () => {
     expect(played).toEqual(["blob:b"]);
     expect(revoked).toEqual(["blob:a"]);
   });
+
+  it("lets only the current clip's end stop playback", () => {
+    // The picker binds `ended` to each clip's own signal. A replaced clip
+    // finishing must not stop the one that replaced it mid-sentence.
+    const loads = createLatestLoad();
+    const stops: string[] = [];
+    const endedFor = (voice: string, signal: AbortSignal) => () => {
+      if (!signal.aborted) stops.push(voice);
+    };
+
+    const endedA = endedFor("a", loads.begin());
+    const endedB = endedFor("b", loads.begin());
+    endedA();
+    expect(stops).toEqual([]);
+    endedB();
+    expect(stops).toEqual(["b"]);
+  });
 });
 
 describe("isPlaybackFailure", () => {

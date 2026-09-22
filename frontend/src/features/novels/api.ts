@@ -118,11 +118,16 @@ export const novelsApi = {
    * session and loads a 401. A preview clip is tens of kilobytes, so the cost
    * that makes this a real trade-off for a whole chapter is not one here.
    *
-   * The caller owns the URL and must revoke it.
+   * The caller owns the URL and must revoke it. `signal` abandons a clip the
+   * reader has already moved past; see `latest-load.ts`.
    */
-  voiceSampleObjectUrl: async (voiceId: string) => {
+  voiceSampleObjectUrl: async (
+    voiceId: string,
+    { signal }: { signal?: AbortSignal } = {},
+  ) => {
     const { blob } = await requestBlob("/novels/voices/sample", {
       query: { voice: voiceId },
+      signal,
     });
     return URL.createObjectURL(blob);
   },

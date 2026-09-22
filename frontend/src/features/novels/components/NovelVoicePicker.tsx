@@ -21,6 +21,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { novelsApi } from "../api";
+import { createLatestLoad, keepLoadedUrl } from "../latest-load";
 import type { NovelVoicePayload } from "../types";
 
 type Surface = { bg: string; ink: string; muted: string; rule: string };
@@ -48,8 +49,14 @@ export function NovelVoicePicker({
   const [failed, setFailed] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const urlRef = useRef<string | null>(null);
+  // The clip being fetched. Stopping has to reach it too, not just the clip
+  // already playing: otherwise pressing two names in quick succession plays
+  // both at once, and a clip pressed just before "Done" plays after the
+  // picker has gone, with nothing left on screen to stop it.
+  const [loads] = useState(createLatestLoad);
 
   const stop = useCallback(() => {
+    loads.cancel();
     audioRef.current?.pause();
     audioRef.current = null;
     if (urlRef.current) {
@@ -59,7 +66,7 @@ export function NovelVoicePicker({
       urlRef.current = null;
     }
     setPlaying(null);
-  }, []);
+  }, [loads]);
 
   useEffect(() => stop, [stop]);
 
@@ -72,14 +79,28 @@ export function NovelVoicePicker({
       stop();
       setFailed(null);
       setPlaying(voiceId);
+      const signal = loads.begin();
       try {
-        const url = await novelsApi.voiceSampleObjectUrl(voiceId);
+        const url = await novelsApi.voiceSampleObjectUrl(voiceId, { signal });
+        // Another name was pressed, or the picker closed, while this clip
+        // was on its way.
+        if (!keepLoadedUrl(signal, url)) return;
         urlRef.current = url;
         const audio = new Audio(url);
         audioRef.current = audio;
-        audio.addEventListener("ended", stop, { once: true });
+        // Bound to THIS clip: one that has been replaced must not stop its
+        // successor, and cut it off mid-sentence, when it finishes.
+        audio.addEventListener(
+          "ended",
+          () => {
+            if (!signal.aborted) stop();
+          },
+          { once: true },
+        );
         await audio.play();
       } catch {
+        // Abandoned on purpose — a newer press owns the row state now.
+        if (signal.aborted) return;
         // A voice with no clip on disk is still a voice that renders; it just
         // cannot be auditioned. Say so on the row rather than blocking the
         // choice.
@@ -87,7 +108,7 @@ export function NovelVoicePicker({
         setPlaying(null);
       }
     },
-    [playing, stop],
+    [playing, stop, loads],
   );
 
   const grouped: Array<[string, NovelVoicePayload[]]> = [
