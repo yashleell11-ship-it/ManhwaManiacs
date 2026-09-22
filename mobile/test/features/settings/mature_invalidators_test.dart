@@ -40,6 +40,10 @@ const Map<String, List<String>> _providersByService = {
   ],
   'source_cache_service': ['sourcesListProvider'],
   'source_pin_service': ['sourcePinsProvider'],
+  // The last AI suggestion answer was picked from a gate-filtered shelf, so it
+  // is as stale as any other cached list when the switch flips. Availability
+  // is not listed: it reports a key and a counter, neither gated.
+  'suggestion_service': ['suggestionsProvider'],
   'update_service': ['updatesProvider'],
 };
 

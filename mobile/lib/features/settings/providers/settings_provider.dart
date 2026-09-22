@@ -96,6 +96,7 @@ const Set<String> kMatureGatedBackendServices = {
   'reading_stats_service',
   'source_cache_service',
   'source_pin_service',
+  'suggestion_service',
   'update_service',
 };
 
@@ -141,6 +142,11 @@ final List<void Function(Ref ref)> matureScopedInvalidators = [
   // rows come from the same followed-series read.
   (ref) => ref.invalidate(collectionsProvider),
   (ref) => ref.invalidate(collectionDetailProvider),
+  // The last AI suggestion answer (suggestion_service). It was chosen from a
+  // shelf filtered by the gate that was open when it was asked for, so closing
+  // the gate leaves adult titles on screen until the next submit — and the
+  // next submit is a paid request nobody is obliged to make.
+  (ref) => ref.invalidate(suggestionsProvider),
 ];
 
 // ── Theme ────────────────────────────────────────────────────────────────

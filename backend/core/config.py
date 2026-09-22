@@ -265,6 +265,13 @@ class Settings(BaseModel):
     # reader finishes, so 10/minute is far above real use and 200/hour caps a
     # sustained run at well under a gigabyte a day. MM_RATE_LIMIT_OCR.
     rate_limit_ocr: str = "10/minute;200/hour"
+    # POST /library/suggest spends real money: one accepted request is one
+    # paid DeepSeek completion. The ceiling in ``suggestion_service`` caps the
+    # day; this caps the minute, so a client stuck in a retry loop cannot burn
+    # the whole day's allowance in ten seconds. A person describes what they
+    # feel like reading a few times a sitting, never three times a minute.
+    # MM_RATE_LIMIT_SUGGEST.
+    rate_limit_suggest: str = "3/minute;30/hour"
     # The request header carrying the real client IP, written by the *outermost*
     # proxy and therefore not client-controlled. Cloudflare's CF-Connecting-IP
     # is the default because that is the edge in front of this deployment.
@@ -376,6 +383,7 @@ def get_settings() -> Settings:
         ("MM_RATE_LIMIT_SOURCES", "rate_limit_sources"),
         ("MM_RATE_LIMIT_BULK", "rate_limit_bulk"),
         ("MM_RATE_LIMIT_OCR", "rate_limit_ocr"),
+        ("MM_RATE_LIMIT_SUGGEST", "rate_limit_suggest"),
     ):
         value = os.getenv(env_key)
         if value and value.strip():

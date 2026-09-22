@@ -23,9 +23,11 @@ from core.config import get_settings
 from core.connector_directory import descriptor_for_source
 from core.content_rating import (
     TRACKER_RATING_MATURE,
+    hidden_by_gate,
     mature_tracker_case,
     rating_from_genres,
     resolve_mature_gate,
+    resolve_series_rating,
     resolve_tracker_rating,
 )
 from core.errors import AppError
@@ -682,6 +684,207 @@ class FollowedSeriesService:
         # followed set; return the top genres so the client can drive a browse.
         top = sorted(genre_counts.items(), key=lambda kv: kv[1], reverse=True)
         return [{"genre": g, "weight": n} for g, n in top[:limit]]
+
+    def taste_profile(
+        self, *, max_titles: int = 16, max_genres: int = 10
+    ) -> dict[str, Any]:
+        """What this reader demonstrably likes — for an AI suggestion prompt.
+
+        A follow is a weak signal. Following costs one tap and says nothing
+        about whether the thing was any good; plenty of libraries are mostly
+        bookmarks-with-hope. **How far somebody actually read is the strong
+        one** — eight chapters in is a verdict, chapter one is a glance. So
+        titles come back ordered by read depth first, and the genre histogram
+        is weighted by that same depth rather than counting every follow once.
+        A suggestion built on the flat follow list would be a suggestion built
+        on what the reader once clicked, which is exactly the "random" answer
+        this is meant to avoid.
+
+        Chapters read in series that were never followed count too — reading
+        ten chapters without tapping follow is still reading ten chapters — so
+        the two are merged on the identity pair and titles for the unfollowed
+        half come from the series cache.
+
+        Returns titles, genre names and counts. **Never descriptions.**
+        ``source_series_cache.description`` is text scraped from third-party
+        sites, and a prompt assembled out of it is a prompt partly written by
+        whoever runs those sites. Titles and genres are small, useful, and not
+        a place to hide instructions.
+        """
+        self._require_owner()
+        all_rows = list(
+            self._db.execute(
+                self._scope(select(FollowedSeries).options(*self._NO_CHAPTERS))
+            ).scalars().all()
+        )
+        rows = self._visible(all_rows)
+        # Every key the gate is CURRENTLY hiding from this follow list. Kept
+        # separately from `rows` rather than re-derived from it below: once a
+        # key is missing from `rows`, nothing left in this function can tell
+        # "never followed" apart from "followed but hidden right now" without
+        # this set, and the two must be judged by different rules (see below).
+        hidden_keys = {(r.source_id, r.series_key) for r in all_rows} - {
+            (r.source_id, r.series_key) for r in rows
+        }
+
+        # How many distinct chapters of each series this profile has a
+        # position in. One grouped statement, not one per series. Ungated: a
+        # reading position is not secret from its own owner, and gating it
+        # here would just mean the genuinely-unfollowed branch below has to
+        # re-derive it from nothing.
+        depth: dict[tuple[str, str], int] = {
+            (source_id, series_key): int(n)
+            for source_id, series_key, n in self._db.execute(
+                self._progress_scope(
+                    select(
+                        ChapterProgress.source_id,
+                        ChapterProgress.series_key,
+                        func.count().label("n"),
+                    )
+                ).group_by(ChapterProgress.source_id, ChapterProgress.series_key)
+            ).all()
+        }
+
+        followed_keys = {(r.source_id, r.series_key) for r in rows}
+        keys = list(followed_keys | set(depth))
+        cached = self._series_cache_rows(keys)
+
+        gate_open = self._gate_open()
+        entries: list[dict[str, Any]] = []
+        for key in keys:
+            if not gate_open and key in hidden_keys:
+                # A series the gate is hiding RIGHT NOW, reachable here only
+                # because it also has reading progress (`depth` is ungated,
+                # `rows` is not, and `keys` unions both). `_visible` already
+                # made the authoritative call on it -- reading
+                # `mature_override` and the content_rating captured at follow
+                # time, neither of which survives into a bare cache lookup --
+                # so it is dropped outright rather than re-judged by a weaker
+                # rule that cannot see either signal. Re-judging it here was
+                # the actual leak: a series the reader hand-flagged 18+ and
+                # then hid was being re-admitted as if it were merely unread.
+                continue
+            row = next((r for r in rows if (r.source_id, r.series_key) == key), None)
+            title, genres, cache_rating = cached.get(key, ("", [], None))
+            if row is not None:
+                title = row.title or title
+            if not title:
+                # Nothing to name it by; a bare series key tells the model
+                # nothing and burns prompt budget.
+                continue
+            if not gate_open and row is None:
+                # A genuinely unfollowed read: no follow row exists at all, so
+                # there is no mature_override to defer to. Judged by the same
+                # rule `SuggestionService._collect` applies to shelf rows --
+                # content_rating first, genres behind it -- so the two halves
+                # of one prompt cannot disagree about the same series. Unknown
+                # resolves to hidden: this string is about to leave the box.
+                descriptor = self._descriptor(key[0])
+                if descriptor is None:
+                    continue
+                rating = resolve_series_rating(
+                    cache_rating, genres, source_mature=descriptor.mature
+                )
+                if hidden_by_gate(rating, gate_open=False):
+                    continue
+            read = depth.get(key, 0)
+            entries.append(
+                {
+                    "title": title,
+                    "genres": [str(g) for g in genres],
+                    "chapters_read": read,
+                    "is_favorite": bool(row is not None and row.is_favorite),
+                    "followed": row is not None,
+                    "status": row.reading_status if row is not None else None,
+                }
+            )
+
+        def weight(entry: dict[str, Any]) -> int:
+            # Read depth dominates; a favourite is worth a few chapters of
+            # evidence on its own; a bare follow still counts for one.
+            return (
+                entry["chapters_read"] * 2
+                + (6 if entry["is_favorite"] else 0)
+                + (1 if entry["followed"] else 0)
+            )
+
+        entries.sort(key=lambda e: (-weight(e), e["title"].lower()))
+
+        genre_counts: dict[str, int] = {}
+        for entry in entries:
+            w = max(1, weight(entry))
+            for genre in entry["genres"]:
+                name = genre.strip().lower()
+                if name:
+                    genre_counts[name] = genre_counts.get(name, 0) + w
+
+        top_genres = sorted(
+            genre_counts.items(), key=lambda kv: (-kv[1], kv[0])
+        )[:max_genres]
+        return {
+            "genres": [{"genre": g, "weight": n} for g, n in top_genres],
+            "titles": [
+                {
+                    "title": e["title"],
+                    "chapters_read": e["chapters_read"],
+                    "is_favorite": e["is_favorite"],
+                }
+                for e in entries[:max_titles]
+            ],
+            "followed_titles": sorted(
+                {e["title"] for e in entries if e["followed"]}
+            ),
+            "gate_open": gate_open,
+        }
+
+    def _series_cache_rows(
+        self, keys: list[tuple[str, str]]
+    ) -> dict[tuple[str, str], tuple[str, list[str], str | None]]:
+        """``(source_id, series_key) -> (title, genres, content_rating)``.
+
+        Chunked row-value ``IN`` for the same reason every other bulk lookup
+        here is: one statement per 400 pairs instead of one per pair.
+
+        ``content_rating`` carries the source's OWN declared verdict when it
+        has one (``source_cache_service`` writes it from the connector before
+        falling back to genres) -- it is the primary signal
+        ``core.content_rating.resolve_series_rating`` reads, genres are only
+        the fallback. A caller that judges a cache row by genres alone is
+        reading the weaker half of that rule; this is why the column is
+        fetched even though ``recommendations()`` and the shelf never needed
+        it before ``taste_profile`` did.
+        """
+        out: dict[tuple[str, str], tuple[str, list[str], str | None]] = {}
+        for start in range(0, len(keys), _IN_CHUNK):
+            chunk = keys[start : start + _IN_CHUNK]
+            if not chunk:
+                continue
+            for (
+                source_id,
+                series_key,
+                title,
+                genres,
+                content_rating,
+            ) in self._db.execute(
+                select(
+                    SourceSeriesCache.source_id,
+                    SourceSeriesCache.series_key,
+                    SourceSeriesCache.title,
+                    SourceSeriesCache.genres,
+                    SourceSeriesCache.content_rating,
+                ).where(
+                    tuple_(
+                        SourceSeriesCache.source_id, SourceSeriesCache.series_key
+                    ).in_(chunk)
+                )
+            ).all():
+                parsed = _loads(genres) or []
+                out[(source_id, series_key)] = (
+                    title or "",
+                    [str(g) for g in parsed if str(g).strip()],
+                    content_rating,
+                )
+        return out
 
     def search(self, q: str, *, page: int = 1, per_page: int = 20) -> dict[str, Any]:
         return self.list_series(search=q, page=page, per_page=per_page)

@@ -14,6 +14,7 @@ import 'package:manhwamaniacs/features/library/models/library_statistics.dart';
 import 'package:manhwamaniacs/features/library/models/reading_history_item.dart';
 import 'package:manhwamaniacs/features/library/models/recommendation.dart';
 import 'package:manhwamaniacs/features/library/models/series_detail.dart';
+import 'package:manhwamaniacs/features/library/models/suggestion.dart';
 import 'package:manhwamaniacs/features/library/models/tag.dart';
 import 'package:manhwamaniacs/features/library/repositories/library_repository.dart';
 import 'package:manhwamaniacs/features/library/screens/library_screen.dart';
@@ -25,6 +26,7 @@ import 'package:manhwamaniacs/features/sources/providers/sources_provider.dart';
 import 'package:manhwamaniacs/shared/providers/core_providers.dart';
 import 'package:manhwamaniacs/shared/providers/repository_providers.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
 import '../../support/test_overrides.dart';
 
 /// `LibraryRepository` double for the Library (followed) browse screen. Only
@@ -258,6 +260,19 @@ class _FakeLibraryRepository implements LibraryRepository {
     required int tagId,
   }) =>
       throw UnimplementedError();
+
+  @override
+  Future<Result<SuggestionResult>> suggest(String prompt, {int limit = 6}) async =>
+      const Ok(SuggestionResult());
+
+  @override
+  Future<Result<SuggestionAvailability>> suggestAvailability() async => const Ok(
+        SuggestionAvailability(
+          available: false,
+          reason: 'not_configured',
+          remainingToday: 0,
+        ),
+      );
 }
 
 FollowedSeries _series({

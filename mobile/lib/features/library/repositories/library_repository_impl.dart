@@ -10,6 +10,7 @@ import 'package:manhwamaniacs/features/library/models/library_statistics.dart';
 import 'package:manhwamaniacs/features/library/models/reading_history_item.dart';
 import 'package:manhwamaniacs/features/library/models/recommendation.dart';
 import 'package:manhwamaniacs/features/library/models/series_detail.dart';
+import 'package:manhwamaniacs/features/library/models/suggestion.dart';
 import 'package:manhwamaniacs/features/library/models/tag.dart';
 import 'package:manhwamaniacs/features/library/repositories/library_repository.dart';
 
@@ -124,6 +125,29 @@ class LibraryRepositoryImpl implements LibraryRepository {
           queryParameters: {'limit': limit},
         ),
         RecommendationGenre.fromJson,
+      );
+
+  @override
+  Future<Result<SuggestionResult>> suggest(String prompt, {int limit = 6}) =>
+      _request(
+        () => _dio.post<Map<String, dynamic>>(
+          '/library/suggest',
+          data: {'prompt': prompt, 'limit': limit},
+          // The server's own timeout is 180s (suggestion_service.TIMEOUT_
+          // SECONDS — deepseek-flash bills its reasoning as output tokens
+          // before any visible answer, so this is a genuinely slow call, not
+          // a stuck one). This has to sit above that: a client timeout that
+          // fires first wastes a request that was already paid for and still
+          // running on the server.
+          options: Options(receiveTimeout: const Duration(seconds: 210)),
+        ),
+        SuggestionResult.fromJson,
+      );
+
+  @override
+  Future<Result<SuggestionAvailability>> suggestAvailability() => _request(
+        () => _dio.get<Map<String, dynamic>>('/library/suggest/availability'),
+        SuggestionAvailability.fromJson,
       );
 
   @override
