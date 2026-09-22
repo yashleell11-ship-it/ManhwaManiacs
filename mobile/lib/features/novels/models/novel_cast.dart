@@ -31,7 +31,9 @@ class NovelCastMember {
   /// speaks. `unknown` is a real value that routes to the narrator.
   final String gender;
 
-  /// Null means this character reads in the narrator's voice.
+  /// The voice pinned for this character, or null for none pinned — in
+  /// which case the renderer assigns one automatically when a chapter is
+  /// made. Null is NOT "reads as narrator"; the clients label it "Automatic".
   final String? voiceId;
 }
 

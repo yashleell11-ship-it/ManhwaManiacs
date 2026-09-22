@@ -1,4 +1,5 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:manhwamaniacs/core/error/app_error.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_cast.dart';
 import 'package:manhwamaniacs/features/novels/providers/novel_chapter_provider.dart';
 import 'package:manhwamaniacs/shared/providers/repository_providers.dart';
@@ -40,15 +41,19 @@ final novelVoicesProvider = FutureProvider<List<NovelVoice>>((ref) async {
 
 /// Pin a voice, for one character or for the series' narration.
 ///
-/// Returns whether it stuck, so the sheet can say so rather than silently
-/// showing a choice the server refused — a voice the renderer does not have
-/// would otherwise read as narrator with the UI still claiming otherwise.
+/// Answers null when it stuck, or the error when it did not, so the sheet can
+/// say WHY rather than silently showing a choice the server refused. Casting
+/// is an owner's decision — the server answers a non-admin with a 403 whose
+/// message says exactly that — and a panel that swallowed it would leave a
+/// reader tapping a voice that never changes, with no idea why.
 class NovelVoiceWriter {
   const NovelVoiceWriter(this._ref);
 
   final Ref _ref;
 
-  Future<bool> setCharacter(
+  /// [voiceId] null clears the pin: the character goes back to a voice the
+  /// renderer assigns automatically.
+  Future<AppError?> setCharacter(
     NovelChapterKey key,
     String name,
     String? voiceId,
@@ -61,12 +66,12 @@ class NovelVoiceWriter {
           name: name,
           voiceId: voiceId,
         );
-    if (result.isErr) return false;
+    if (result.isErr) return result.error;
     _ref.invalidate(novelAttributionProvider(key));
-    return true;
+    return null;
   }
 
-  Future<bool> setNarrator(NovelChapterKey key, String? voiceId) async {
+  Future<AppError?> setNarrator(NovelChapterKey key, String? voiceId) async {
     final result = await _ref
         .read(novelsRepositoryProvider)
         .setNarratorVoice(
@@ -74,9 +79,9 @@ class NovelVoiceWriter {
           seriesKey: key.seriesKey,
           voiceId: voiceId,
         );
-    if (result.isErr) return false;
+    if (result.isErr) return result.error;
     _ref.invalidate(novelAttributionProvider(key));
-    return true;
+    return null;
   }
 }
 

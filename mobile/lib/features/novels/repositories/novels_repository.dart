@@ -110,8 +110,10 @@ abstract class NovelsRepository {
 
   /// Pin a character's voice, and lock the row against the next recast.
   ///
-  /// `voiceId` null means "read as narrator", which is a real choice and not
-  /// a clear-the-field.
+  /// `voiceId` null is sent as an explicit JSON null, which CLEARS the pin:
+  /// the character goes back to an automatically assigned voice. Changing a
+  /// voice is an owner's decision, so a non-admin gets a 403 whose message
+  /// the caller shows.
   Future<Result<void>> setCastVoice({
     required String sourceId,
     required String seriesKey,

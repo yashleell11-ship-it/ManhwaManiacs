@@ -26,8 +26,8 @@ void main() {
       expect(got.narrator, 'Arthur');
       expect(got.narratorVoiceId, 'libritts-2803');
       expect(got.cast.map((m) => m.name), ['Tessia', 'Wren']);
-      // Null is "reads in the narrator's voice", a real state and not missing
-      // data.
+      // Null is "no voice pinned, assigned automatically", a real state and
+      // not missing data.
       expect(got.cast.last.voiceId, isNull);
     });
 
