@@ -155,6 +155,22 @@ def queue(client, chapter_key="ch-1"):
 
 
 class TestMounting:
+    def test_with_no_token_a_request_is_refused_not_queued(
+        self, tokenless, session_factory
+    ):
+        # Production's state. A phone that predates can_render still offers
+        # "Make audiobook"; queuing on its behalf would report chapters
+        # queued that nothing will ever claim.
+        response = queue(tokenless)
+
+        assert response.status_code == 503
+        assert response.json()["code"] == "narration_unavailable"
+        db = session_factory()
+        try:
+            assert db.query(NovelAudioJob).count() == 0
+        finally:
+            db.close()
+
     def test_with_no_token_the_routes_do_not_exist(self, tokenless):
         # Not 401 — 404. A render endpoint that exists and refuses is an
         # invitation to guess at; one that was never mounted is

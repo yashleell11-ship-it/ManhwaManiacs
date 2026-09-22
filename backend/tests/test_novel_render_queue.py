@@ -19,6 +19,9 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+from core.config import get_settings
 from database.models import NovelAudioJob, NovelChapterCache
 
 from tests.test_novels_flag import (  # noqa: F401
@@ -43,6 +46,17 @@ def cache_chapter(db, chapter_key, *, number=1.0, paragraphs=None):
         )
     )
     db.commit()
+
+
+@pytest.fixture(autouse=True)
+def _a_render_box_is_configured(monkeypatch):
+    """These tests are about the queue, so they run against a server that has
+    a render box. With none, the route refuses before queuing anything — that
+    is tested in test_novel_render_worker.py against production's own state."""
+    monkeypatch.setenv("MM_RENDER_WORKER_TOKEN", "a-render-token")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def ask(client, keys, **over):

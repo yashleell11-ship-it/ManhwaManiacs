@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from core.config import get_settings
+from core.errors import AppError
 from core.rate_limit import bulk_limit, limiter, sources_limit
 from database.session import get_db
 from services.auth_service import require_admin_user
@@ -215,10 +216,20 @@ def get_novel_series_audio(
         # the client hides the request instead of offering it. Configuration
         # rather than a heartbeat because nothing records a heartbeat; this
         # is the same test that decides whether the box's routes are mounted.
-        "can_render": bool(
-            str(getattr(get_settings(), "render_worker_token", "") or "")
-        ),
+        "can_render": _render_worker_configured(),
     }
+
+
+def _render_worker_configured() -> bool:
+    """Whether a render box can claim work from this server at all.
+
+    One definition, used both to tell clients whether to offer narration and
+    to refuse a request when they should not have — so the flag and the
+    refusal cannot disagree. Configuration rather than a heartbeat because
+    nothing records a heartbeat; this is the same test that decides whether
+    the box's routes are mounted.
+    """
+    return bool(str(getattr(get_settings(), "render_worker_token", "") or ""))
 
 
 class AudioRenderRequest(BaseModel):
@@ -258,7 +269,18 @@ def request_novel_audio(
     Every chapter is answered for — queued with an id, or skipped with a
     reason. Partial success is the ordinary outcome when somebody asks for a
     whole book, and calling it a failure would be wrong.
+
+    Refused outright when no render box is configured. New clients read
+    ``can_render`` and never offer this; the refusal is for clients that
+    predate the flag — 3.2.0 phones — which would otherwise report chapters
+    "queued" that nothing will ever claim, and show them waiting forever.
     """
+    if not _render_worker_configured():
+        raise AppError(
+            "Narration of new chapters is not available right now.",
+            code="narration_unavailable",
+            status_code=503,
+        )
     result = enqueue(
         db, body.source_id, body.series_key, body.chapter_keys,
         priority=body.priority, force=body.force,
