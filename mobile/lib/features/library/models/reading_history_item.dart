@@ -1,8 +1,13 @@
 import 'package:manhwamaniacs/core/time/server_instant.dart';
 
 /// `GET /reader/history` row — a stored reading-position row
-/// (`progress_service.py`'s `_serialize`, same shape as `ReadingProgress`).
-/// Carries no series/chapter title.
+/// (`progress_service.py`'s `_serialize`, same shape as `ReadingProgress`)
+/// plus the book it belongs to.
+///
+/// [seriesTitle] can be null: `source_series_cache` is a TTL cache, so a book
+/// read months ago may have aged out. The row still opens — it just cannot
+/// say which book it is, and the screen has to handle that rather than
+/// rendering a blank line.
 class ReadingHistoryItem {
   const ReadingHistoryItem({
     required this.id,
@@ -14,6 +19,8 @@ class ReadingHistoryItem {
     required this.pageCount,
     required this.isCompleted,
     this.lastReadAt,
+    this.seriesTitle,
+    this.coverUrl,
   });
 
   final int id;
@@ -26,6 +33,10 @@ class ReadingHistoryItem {
   final bool isCompleted;
   final DateTime? lastReadAt;
 
+  /// The book. Null when it has aged out of the server's series cache.
+  final String? seriesTitle;
+  final String? coverUrl;
+
   factory ReadingHistoryItem.fromJson(Map<String, dynamic> json) => ReadingHistoryItem(
         id: json['id'] as int,
         sourceId: json['source_id'] as String,
@@ -36,5 +47,9 @@ class ReadingHistoryItem {
         pageCount: (json['page_count'] as num?)?.toInt() ?? 0,
         isCompleted: json['is_completed'] as bool? ?? false,
         lastReadAt: serverInstant(json['last_read_at']),
+        seriesTitle: (json['series_title'] as String?)?.trim().isEmpty ?? true
+            ? null
+            : (json['series_title'] as String).trim(),
+        coverUrl: json['cover_url'] as String?,
       );
 }

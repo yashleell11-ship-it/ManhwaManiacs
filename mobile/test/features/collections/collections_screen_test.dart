@@ -140,6 +140,7 @@ class _FakeCollectionsRepository implements LibraryRepository {
   Future<Result<List<ReadingHistoryItem>>> readingHistory({
     int limit = 50,
     int offset = 0,
+    bool bySeries = true,
   }) =>
       throw UnimplementedError();
 

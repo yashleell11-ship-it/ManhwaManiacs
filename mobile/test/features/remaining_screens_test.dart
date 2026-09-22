@@ -83,6 +83,7 @@ class _FakeIntelligenceRepository implements LibraryRepository {
   Future<Result<List<ReadingHistoryItem>>> readingHistory({
     int limit = 50,
     int offset = 0,
+    bool bySeries = true,
   }) async =>
       Ok([
         ReadingHistoryItem(
@@ -95,6 +96,7 @@ class _FakeIntelligenceRepository implements LibraryRepository {
           pageCount: 12,
           isCompleted: true,
           lastReadAt: DateTime(2024, 6),
+          seriesTitle: 'Solo Leveling',
         ),
       ]);
 
@@ -476,7 +478,8 @@ void main() {
       expect(find.text('Action'), findsWidgets);
     });
 
-    testWidgets('ReadingHistoryScreen renders a chapter row', (tester) async {
+    testWidgets('ReadingHistoryScreen renders a book, not a position',
+        (tester) async {
       await tester.pumpWidget(
         await _wrap(
           const ReadingHistoryScreen(),
@@ -487,7 +490,12 @@ void main() {
       );
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
-      expect(find.text('Chapter 10'), findsWidgets);
+      // History is a shelf of books now: the title leads and the position is
+      // the caption under it. Asserting the title is what stops a regression
+      // to the old rows, which named a chapter over a raw connector id and
+      // never said which book it was.
+      expect(find.text('Solo Leveling'), findsWidgets);
+      expect(find.textContaining('Ch. 10'), findsWidgets);
     });
 
     testWidgets('UpdatesScreen renders notifications and followed series',

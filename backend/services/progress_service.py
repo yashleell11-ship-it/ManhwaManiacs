@@ -20,10 +20,10 @@ from time import sleep
 from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import Depends
-from sqlalchemy import and_, select, tuple_, update
+from sqlalchemy import and_, func, select, tuple_, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import aliased, Session
 
 from connectors.ids import fully_unquote
 from core.connector_directory import descriptor_for_source
@@ -40,6 +40,7 @@ from database.models import (
     ChapterProgress,
     FollowedSeries,
     ReadingSession,
+    SourceSeriesCache,
     UpdateNotification,
 )
 from database.session import get_db
@@ -909,7 +910,7 @@ class ProgressService:
         return [self._serialize(r) for r in rows]
 
     def reading_history(
-        self, *, limit: int = 50, offset: int = 0
+        self, *, limit: int = 50, offset: int = 0, collapse: str = "none"
     ) -> list[dict[str, Any]]:
         """The profile's own reading history, newest first.
 
@@ -931,6 +932,8 @@ class ProgressService:
         of its own history.
         """
         self._require_owner()
+        if collapse == "series":
+            return self._history_by_series(limit=limit, offset=offset)
         stmt = self._scope(select(ChapterProgress))
         if not self._gate_open():
             # Joined only when the gate is shut. The other 99% of requests are
@@ -943,7 +946,103 @@ class ProgressService:
             .limit(limit)
             .offset(offset)
         ).scalars().all()
-        return [self._serialize(r) for r in rows]
+        return self._with_titles(rows)
+
+    def _with_titles(self, rows: list[ChapterProgress]) -> list[dict[str, Any]]:
+        """Positions, each named by the book it is a position in.
+
+        A history row without its book is unreadable: it renders as a chapter
+        number over a connector id, so fifty books produce fifty rows that
+        look identical and none of them says what was being read.
+        """
+        titles = self._series_titles(rows)
+        out = []
+        for row in rows:
+            item = self._serialize(row)
+            known = titles.get((row.source_id, row.series_key))
+            item["series_title"] = known[0] if known else None
+            item["cover_url"] = known[1] if known else None
+            out.append(item)
+        return out
+
+    def _history_by_series(
+        self, *, limit: int, offset: int
+    ) -> list[dict[str, Any]]:
+        """One row per BOOK — the furthest-read chapter in each, newest first.
+
+        A history of positions repeats: read forty chapters of one book and
+        the ungrouped list is forty near-identical rows, and the book you read
+        before it is on page two. What somebody wants from this screen is the
+        shelf of things they have been reading, which is one entry per book.
+
+        Collapsed in SQL rather than in Python after the fact, for the reason
+        the gate filter already is: paging has to count the rows the caller
+        actually sees. Grouping a page of fifty positions client-side can
+        yield three books and then steps clean over the rest on the next
+        offset.
+        """
+        ranked = self._scope(
+            select(
+                ChapterProgress,
+                func.row_number()
+                .over(
+                    partition_by=(
+                        ChapterProgress.source_id,
+                        ChapterProgress.series_key,
+                    ),
+                    order_by=ChapterProgress.last_read_at.desc(),
+                )
+                .label("rank"),
+            )
+        )
+        if not self._gate_open():
+            ranked = self._follow_join(ranked).where(self._mature_case() == 0)
+        sub = ranked.subquery()
+        entity = aliased(ChapterProgress, sub)
+        rows = self._db.execute(
+            select(entity)
+            .where(sub.c.rank == 1)
+            .order_by(sub.c.last_read_at.desc())
+            .limit(limit)
+            .offset(offset)
+        ).scalars().all()
+        return self._with_titles(rows)
+
+    def _series_titles(
+        self, rows: list[ChapterProgress]
+    ) -> dict[tuple[str, str], tuple[str, str | None]]:
+        """Titles for the page of history being served, in ONE query.
+
+        Deliberately not folded into ``_serialize``: that runs on every
+        progress SAVE, and a reader turning pages would pay a title lookup per
+        save for something only this screen reads.
+
+        A miss is a miss, not an error. ``source_series_cache`` is a TTL cache,
+        so a book read months ago may have aged out — the row still opens, it
+        just shows what it can. Filling the gap would mean fetching from the
+        source on a history render, which is the kind of accidental scrape the
+        rest of this codebase is careful to avoid.
+        """
+        if not rows:
+            return {}
+        pairs = {(row.source_id, row.series_key) for row in rows}
+        found = self._db.execute(
+            select(
+                SourceSeriesCache.source_id,
+                SourceSeriesCache.series_key,
+                SourceSeriesCache.title,
+                SourceSeriesCache.cover_url,
+            ).where(
+                tuple_(
+                    SourceSeriesCache.source_id, SourceSeriesCache.series_key
+                ).in_(list(pairs))
+            )
+        ).all()
+        return {
+            (source_id, series_key): (title, cover)
+            for source_id, series_key, title, cover in found
+            if title
+        }
 
     # --- bookmarks -------------------------------------------------------
     #

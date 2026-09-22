@@ -151,6 +151,72 @@ def test_history_lists_recent_first(api, h):
     assert [r["chapter_key"] for r in hist] == ["c2", "c1"]
 
 
+def test_history_says_which_book_each_row_is(api, h, db_session):
+    """The reported bug: history rows were unreadable.
+
+    A row renders as a chapter number over a connector id, so fifty books
+    produce fifty rows that look identical and none of them says what you
+    were reading. The position is useless without the book.
+    """
+    from database.models import SourceSeriesCache
+
+    db_session.add(
+        SourceSeriesCache(
+            source_id=SRC,
+            series_key=SERIES,
+            title="The Beginning After The End",
+            cover_url="https://example.test/cover.jpg",
+        )
+    )
+    db_session.commit()
+    _save(api, h, chapter_key="c1", chapter_number=1.0, last_page=5)
+
+    row = api.get("/reader/history", headers=h).json()[0]
+
+    assert row["series_title"] == "The Beginning After The End"
+    assert row["cover_url"] == "https://example.test/cover.jpg"
+
+
+def test_history_without_a_cached_title_still_lists_the_row(api, h):
+    """A book read months ago may have aged out of the TTL cache.
+
+    The row still opens and still shows its position; it just cannot show a
+    title. Fetching one from the source on a history render would be an
+    accidental scrape per screenful.
+    """
+    _save(api, h, chapter_key="c9", chapter_number=9.0, last_page=2)
+
+    row = api.get("/reader/history", headers=h).json()[0]
+
+    assert row["series_title"] is None
+    assert row["chapter_key"] == "c9"
+
+
+def test_history_collapsed_gives_one_row_per_book(api, h):
+    """What the screen actually wants: books, not positions.
+
+    Reading forty chapters of one book should not be forty rows with the book
+    you read before it pushed onto page two.
+    """
+    _save(api, h, chapter_key="c1", chapter_number=1.0, last_page=5)
+    _save(api, h, chapter_key="c2", chapter_number=2.0, last_page=3)
+    _save(api, h, chapter_key="c3", chapter_number=3.0, last_page=9)
+
+    rows = api.get("/reader/history?collapse=series", headers=h).json()
+
+    assert len(rows) == 1
+    # The furthest-read one, which is where "continue" should take you.
+    assert rows[0]["chapter_key"] == "c3"
+
+
+def test_history_uncollapsed_is_unchanged(api, h):
+    # The raw position list stays available; collapsing is opt-in.
+    _save(api, h, chapter_key="c1", chapter_number=1.0, last_page=5)
+    _save(api, h, chapter_key="c2", chapter_number=2.0, last_page=3)
+
+    assert len(api.get("/reader/history", headers=h).json()) == 2
+
+
 def test_progress_isolated_between_profiles(api, h, as_user, acct, make_profile):
     uid, _pid = acct
     _save(api, h, last_page=7)

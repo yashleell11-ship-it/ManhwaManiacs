@@ -365,13 +365,20 @@ def reading_history(
     response: Response,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    collapse: str = Query("none", pattern="^(none|series)$"),
 ) -> list[dict[str, object]]:
     """The active profile's reading history, newest first.
 
     Gated rows are removed inside the query, so ``limit``/``offset`` page over
     what this profile can actually see rather than over the unfiltered table.
+
+    ``collapse=series`` answers one row per BOOK — the furthest-read chapter
+    in each — which is what a "what have I been reading" screen wants. Without
+    it, forty chapters of one book are forty rows and the book before it is on
+    page two. Opt-in rather than the default so the raw position list stays
+    available to anything that wants positions rather than books.
     """
-    items = service.reading_history(limit=limit, offset=offset)
+    items = service.reading_history(limit=limit, offset=offset, collapse=collapse)
     set_list_total_header(response, len(items))
     return items
 

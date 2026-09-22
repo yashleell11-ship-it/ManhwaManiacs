@@ -56,9 +56,15 @@ abstract interface class LibraryRepository {
 
   Future<Result<LibraryStatistics>> statistics();
 
+  /// Recently read, newest first.
+  ///
+  /// [bySeries] collapses to one row per BOOK — the furthest-read chapter in
+  /// each — which is what a "what have I been reading" screen wants. Pass
+  /// false for the raw position list.
   Future<Result<List<ReadingHistoryItem>>> readingHistory({
     int limit = 50,
     int offset = 0,
+    bool bySeries = true,
   });
 
   Future<Result<List<Collection>>> listCollections();

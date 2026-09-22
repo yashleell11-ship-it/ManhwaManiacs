@@ -163,11 +163,18 @@ class LibraryRepositoryImpl implements LibraryRepository {
   Future<Result<List<ReadingHistoryItem>>> readingHistory({
     int limit = 50,
     int offset = 0,
+    bool bySeries = true,
   }) =>
       _requestList(
         () => _dio.get<List<dynamic>>(
           '/reader/history',
-          queryParameters: {'limit': limit, 'offset': offset},
+          queryParameters: {
+            'limit': limit,
+            'offset': offset,
+            // One row per BOOK. Forty chapters of one book is forty rows
+            // otherwise, and the book before it lands on page two.
+            if (bySeries) 'collapse': 'series',
+          },
         ),
         ReadingHistoryItem.fromJson,
       );
