@@ -335,3 +335,138 @@ class TestDailyCeiling:
         siblings = list(ledger.parent.iterdir())
         assert siblings == [ledger]
         assert ds.spent_today(ledger) == 1
+
+
+class TestAccountShare:
+    """A per-account share under the global ceiling (``AccountBudget``).
+
+    The global ledger alone let one account spend a feature's whole day. The
+    share is a second ledger keyed by account, and it must keep every rule
+    the global one has: refuse before spending, survive a restart, write
+    atomically, and read a corrupt file as exhausted, never as fresh.
+    """
+
+    @pytest.fixture
+    def accounts(self, tmp_path):
+        return tmp_path / "accounts.json"
+
+    def _share(self, accounts, who="7", ceiling=2):
+        return ds.AccountBudget(path=accounts, account=who, ceiling=ceiling)
+
+    def test_each_answered_request_is_charged_to_both_ledgers(
+        self, ledger, accounts
+    ):
+        t = _transport(_reply())
+
+        ds.complete_json(
+            "p", budget_path=ledger, account_budget=self._share(accounts),
+            transport=t,
+        )
+
+        assert ds.spent_today(ledger) == 1
+        assert ds.account_spent_today(accounts, "7") == 1
+        on_disk = json.loads(accounts.read_text(encoding="utf-8"))
+        assert on_disk == {"date": ds._today(), "accounts": {"7": 1}}
+
+    def test_a_spent_share_refuses_before_spending_with_the_global_open(
+        self, ledger, accounts
+    ):
+        t = _transport(_reply())
+        share = self._share(accounts, ceiling=2)
+        for _ in range(2):
+            ds.complete_json(
+                "p", budget_path=ledger, account_budget=share, transport=t
+            )
+
+        with pytest.raises(ds.DeepSeekBudgetExhausted):
+            ds.complete_json(
+                "p", budget_path=ledger, account_budget=share, transport=t
+            )
+
+        assert len(t.seen) == 2  # type: ignore[attr-defined]
+        assert ds.spent_today(ledger) == 2
+
+    def test_one_accounts_spend_is_not_anothers(self, ledger, accounts):
+        t = _transport(_reply())
+        for _ in range(2):
+            ds.complete_json(
+                "p", budget_path=ledger,
+                account_budget=self._share(accounts, "1"), transport=t,
+            )
+
+        ds.complete_json(
+            "p", budget_path=ledger,
+            account_budget=self._share(accounts, "2"), transport=t,
+        )
+
+        assert ds.account_spent_today(accounts, "1") == 2
+        assert ds.account_spent_today(accounts, "2") == 1
+
+    def test_yesterdays_shares_do_not_count_against_today(self, accounts):
+        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+        accounts.write_text(
+            json.dumps({"date": yesterday, "accounts": {"7": 9, "8": 4}}),
+            encoding="utf-8",
+        )
+
+        assert ds.account_spent_today(accounts, "7") == 0
+        ds._record_account_request(self._share(accounts))
+        on_disk = json.loads(accounts.read_text(encoding="utf-8"))
+        # A new day starts every account at zero, not just the one charged.
+        assert on_disk == {"date": ds._today(), "accounts": {"7": 1}}
+
+    @pytest.mark.parametrize(
+        "content", ["{not json", "[1, 2]", '{"date": "x", "accounts": [1]}']
+    )
+    def test_an_unreadable_share_ledger_refuses_every_account(
+        self, ledger, accounts, content
+    ):
+        accounts.write_text(content, encoding="utf-8")
+        t = _transport(_reply())
+
+        assert ds.account_spent_today(accounts, "7") >= ds.DAILY_REQUEST_CEILING
+        assert ds.account_spent_today(accounts, "new") >= ds.DAILY_REQUEST_CEILING
+        with pytest.raises(ds.DeepSeekBudgetExhausted):
+            ds.complete_json(
+                "p", budget_path=ledger,
+                account_budget=self._share(accounts, ceiling=10), transport=t,
+            )
+        assert len(t.seen) == 0  # type: ignore[attr-defined]
+
+    def test_recording_never_rewrites_an_unreadable_share_ledger(self, accounts):
+        # Rewriting it from scratch would hand every account a fresh day and
+        # erase the one sign that a human needs to look.
+        accounts.write_text("{trunc", encoding="utf-8")
+
+        ds._record_account_request(self._share(accounts))
+
+        assert accounts.read_text(encoding="utf-8") == "{trunc"
+
+    def test_the_share_write_is_atomic_no_temp_file_survives(self, accounts):
+        ds._record_account_request(self._share(accounts))
+
+        assert list(accounts.parent.iterdir()) == [accounts]
+        assert ds.account_spent_today(accounts, "7") == 1
+
+    def test_concurrent_charges_to_different_accounts_are_all_kept(
+        self, accounts
+    ):
+        # One file holds every account. Two requests finishing together must
+        # not both read the same counts and have the second write drop the
+        # first one's tick.
+        import threading
+
+        def charge(who: str) -> None:
+            for _ in range(25):
+                ds._record_account_request(self._share(accounts, who))
+
+        threads = [
+            threading.Thread(target=charge, args=(str(n),)) for n in range(8)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        on_disk = json.loads(accounts.read_text(encoding="utf-8"))
+        assert on_disk["accounts"] == {str(n): 25 for n in range(8)}

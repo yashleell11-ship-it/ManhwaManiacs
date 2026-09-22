@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -186,6 +187,100 @@ def _record_request(path: Path) -> None:
         logger.error("could not record DeepSeek usage to %s", path)
 
 
+# --- per-account shares ----------------------------------------------------
+#
+# One ceiling per ledger is a spend backstop, not a fairness rule. With
+# registration open, the first account to find a paid button can spend all of
+# it, and everyone else -- the owner included -- is refused until midnight UTC.
+# So a caller can also name an ``AccountBudget``: a second ledger, keyed by
+# account, holding each account's own count for the day, checked before the
+# request and charged alongside the global one. It keeps the global ledger's
+# rules, for the global ledger's reasons: counted on disk so a restart cannot
+# reset it, replaced atomically so a crash cannot truncate it, and a file that
+# exists but cannot be read counts as EVERY account exhausted, never as every
+# account fresh.
+
+
+@dataclass(frozen=True)
+class AccountBudget:
+    """One account's share of a feature's daily allowance."""
+
+    path: Path
+    account: str
+    ceiling: int
+
+
+#: One file holds every account's count, so two requests finishing together
+#: would otherwise both read the same counts and the second write would drop
+#: the first one's tick. On the global ledger a lost tick is one request; here
+#: it is somebody else's request. In-process is enough: the backend is a
+#: single uvicorn process.
+_ACCOUNT_LEDGER_LOCK = threading.Lock()
+
+
+def _read_account_ledger(path: Path) -> tuple[str, dict[str, int]] | None:
+    """The ledger's ``(date, {account: requests})``, or None when it exists
+    but cannot be trusted. A missing file is a fresh day, exactly as for
+    ``_read_budget``; anything else that fails is not."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        counts = data.get("accounts", {})
+        if not isinstance(counts, dict):
+            raise TypeError("accounts is not an object")
+        return str(data.get("date", "")), {
+            str(k): int(v) for k, v in counts.items()
+        }
+    except FileNotFoundError:
+        return _today(), {}
+    except (OSError, ValueError, TypeError, AttributeError):
+        logger.error(
+            "DeepSeek per-account ledger at %s is unreadable; refusing "
+            "further spend by any account until it is restored or removed",
+            path,
+        )
+        return None
+
+
+def account_spent_today(path: Path, account: str) -> int:
+    """Requests this account made today; ``_UNREADABLE`` if that is unknown."""
+    ledger = _read_account_ledger(path)
+    if ledger is None:
+        return _UNREADABLE
+    date, counts = ledger
+    return counts.get(account, 0) if date == _today() else 0
+
+
+def _record_account_request(budget: AccountBudget) -> None:
+    with _ACCOUNT_LEDGER_LOCK:
+        ledger = _read_account_ledger(budget.path)
+        if ledger is None:
+            # Left exactly as it is. Rewriting it from what little could be
+            # read would erase the one signal that a human needs to look,
+            # and hand every other account a fresh day.
+            return
+        date, counts = ledger
+        if date != _today():
+            counts = {}
+        counts[budget.account] = counts.get(budget.account, 0) + 1
+        try:
+            budget.path.parent.mkdir(parents=True, exist_ok=True)
+            # Same temp-and-rename as `_record_request`, for the same reason:
+            # a truncated file is what a kill mid-write leaves behind.
+            tmp = budget.path.with_suffix(
+                f"{budget.path.suffix}.tmp-{os.getpid()}"
+            )
+            tmp.write_text(
+                json.dumps({"date": _today(), "accounts": counts}),
+                encoding="utf-8",
+            )
+            os.replace(tmp, budget.path)
+        except OSError:
+            # The previous file still stands (the rename never happened), so
+            # this account is under-counted by one request. The global ledger
+            # was charged first and still caps the total.
+            logger.error("could not record DeepSeek usage to %s", budget.path)
+
+
 def complete_json(
     prompt: str,
     *,
@@ -195,6 +290,7 @@ def complete_json(
     timeout: float = TIMEOUT_SECONDS,
     ceiling: int = DAILY_REQUEST_CEILING,
     budget_path: Path | None = None,
+    account_budget: AccountBudget | None = None,
     transport: httpx.BaseTransport | None = None,
 ) -> Completion:
     """One JSON-mode completion.
@@ -207,6 +303,11 @@ def complete_json(
     ``temperature=0`` because this is an extraction task with a right answer --
     sampling only adds a chance of a different wrong one, and makes the same
     chapter attribute differently on two runs.
+
+    ``account_budget``, when given, is the calling account's own share: it is
+    refused before spending once that account's count reaches its ceiling,
+    even with the global ledger still open, and every request the global
+    ledger is charged for is charged to it too.
     """
     key = api_key()
     if key is None:
@@ -221,6 +322,14 @@ def complete_json(
             f"daily DeepSeek ceiling reached ({used}/{ceiling} requests); "
             "refusing to spend more today"
         )
+    if account_budget is not None:
+        mine = account_spent_today(account_budget.path, account_budget.account)
+        if mine >= account_budget.ceiling:
+            raise DeepSeekBudgetExhausted(
+                f"this account's daily share is spent ({mine}/"
+                f"{account_budget.ceiling} requests); refusing to spend more "
+                "today"
+            )
 
     messages: list[dict[str, str]] = []
     if system:
@@ -266,6 +375,8 @@ def complete_json(
 
         # Paid for the moment it was answered, whatever the status.
         _record_request(path)
+        if account_budget is not None:
+            _record_account_request(account_budget)
 
         if response.status_code in (429, 500, 502, 503, 504) and attempt == 1:
             logger.warning("DeepSeek returned %d; retrying once", response.status_code)
