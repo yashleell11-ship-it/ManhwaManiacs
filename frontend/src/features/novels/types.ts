@@ -130,6 +130,13 @@ export type NovelAudioPayload = {
   bytes: number;
   total_ms: number;
   segments: NovelAudioSegmentPayload[];
+  /**
+   * True only when the server can show the text this audio was rendered from
+   * is the text it would serve now. False when it differs or cannot be known:
+   * the audio still plays, but nothing is highlighted or followed. Absent from
+   * a server that predates the flag, which is read the same as false.
+   */
+  highlight_safe?: boolean;
 };
 
 /**

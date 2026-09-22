@@ -91,3 +91,26 @@ export function timingMatchesText(
   }
   return true;
 }
+
+/**
+ * The timing map to follow along with, or null to play without following.
+ *
+ * Two checks, and both must pass. The server's `highlight_safe` is the one
+ * that can actually see the text the audio was rendered from; the range check
+ * above only proves the offsets land somewhere, and a chapter whose wording
+ * changed but whose paragraphs kept their lengths passes it while the voice
+ * reads different words. The range check still runs because the text on
+ * screen can be newer than the manifest.
+ *
+ * Only an explicit true counts. A missing flag is a server that cannot say,
+ * and "cannot say" is the case that has to fall back to a plain audiobook.
+ */
+export function followAlongTiming<T extends AudioSegment>(
+  audio:
+    | { available: boolean; segments: readonly T[]; highlight_safe?: boolean }
+    | undefined,
+  paragraphs: readonly string[],
+): readonly T[] | null {
+  if (!audio?.available || audio.highlight_safe !== true) return null;
+  return timingMatchesText(audio.segments, paragraphs) ? audio.segments : null;
+}

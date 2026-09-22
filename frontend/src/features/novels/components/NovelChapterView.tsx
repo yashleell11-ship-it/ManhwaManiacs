@@ -38,7 +38,7 @@ import {
 import { NovelAudioPlayer } from "@/features/novels/components/NovelAudioPlayer";
 import { NovelCastPanel } from "@/features/novels/components/NovelCastPanel";
 import { createHighlighter } from "@/features/novels/audio-highlight";
-import { segmentAt, timingMatchesText } from "@/features/novels/audio-follow";
+import { followAlongTiming, segmentAt } from "@/features/novels/audio-follow";
 import { useScrollContainer } from "@/lib/scroll-container";
 import { apiErrorMessage, resolveViewState } from "@/lib/view-state";
 import { isSceneBreak, splitDropCap, tocEntry } from "../book";
@@ -171,12 +171,12 @@ export function NovelChapterView({
   // Only trust a timing map that still describes the text on screen. The
   // chapter cache refetches, so a map will eventually point at words that have
   // moved — and a highlight on the wrong words is worse than no highlight.
-  const timing = useMemo(() => {
-    const segments = audio?.available ? audio.segments : [];
-    return segments.length && timingMatchesText(segments, paragraphs)
-      ? segments
-      : null;
-  }, [audio, paragraphs]);
+  // With no map the player still plays; it simply lights and scrolls nothing,
+  // and the speaker colours fall back to the attribution.
+  const timing = useMemo(
+    () => followAlongTiming(audio, paragraphs),
+    [audio, paragraphs],
+  );
 
   const spansByParagraph = useMemo(() => {
     const byParagraph = new Map<number, SpeakerSpan[]>();

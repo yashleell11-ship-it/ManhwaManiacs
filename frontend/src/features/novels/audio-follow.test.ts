@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  followAlongTiming,
   segmentAt,
   seekMsForParagraph,
   timingMatchesText,
@@ -118,5 +119,48 @@ describe("timingMatchesText", () => {
   it("treats an empty map as not matching", () => {
     // Nothing to follow along with is not the same as following along fine.
     expect(timingMatchesText([], paragraphs)).toBe(false);
+  });
+});
+
+/**
+ * The server is the only side that can see the text a chapter was narrated
+ * from. When it says that text is not provably what the reader has on screen,
+ * the chapter is still an audiobook — it plays — but nothing is lit up or
+ * followed, because the voice may be reading words the page no longer has.
+ */
+describe("followAlongTiming", () => {
+  const paragraphs = ["0123456789abc", "0123456789abc", "0123456789abc", "0123456789abc"];
+  const manifest = (highlight_safe?: boolean) => ({
+    available: true,
+    segments: MAP,
+    ...(highlight_safe === undefined ? {} : { highlight_safe }),
+  });
+
+  it("follows along when the server vouches for the text and the ranges fit", () => {
+    expect(followAlongTiming(manifest(true), paragraphs)).toBe(MAP);
+  });
+
+  it("follows nothing when the server says the text differs", () => {
+    // The ranges still fit here, so the client-side check alone would have
+    // highlighted: this is the case the flag exists for.
+    expect(timingMatchesText(MAP, paragraphs)).toBe(true);
+    expect(followAlongTiming(manifest(false), paragraphs)).toBeNull();
+  });
+
+  it("follows nothing when the server does not say", () => {
+    // A manifest without the flag cannot vouch for the text either.
+    expect(followAlongTiming(manifest(), paragraphs)).toBeNull();
+  });
+
+  it("still refuses a vouched-for map that no longer fits the page", () => {
+    // The page can hold newer text than the manifest was built against.
+    expect(followAlongTiming(manifest(true), ["short"])).toBeNull();
+  });
+
+  it("follows nothing when there is no audio, or no manifest yet", () => {
+    expect(
+      followAlongTiming({ available: false, segments: MAP, highlight_safe: true }, paragraphs),
+    ).toBeNull();
+    expect(followAlongTiming(undefined, paragraphs)).toBeNull();
   });
 });
