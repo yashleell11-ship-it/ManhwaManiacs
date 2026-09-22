@@ -158,6 +158,8 @@ class ReadingHistoryScreen extends ConsumerWidget {
                           ),
                           // And the play badge picks up where the reader
                           // stopped, which is why somebody opened history.
+                          // Returned, not fired and forgotten: the badge awaits
+                          // it to show a spinner and refuse a second tap.
                           onContinue: () => _continue(
                             context,
                             ref,

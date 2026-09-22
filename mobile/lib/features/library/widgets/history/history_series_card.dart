@@ -39,7 +39,11 @@ class HistorySeriesCard extends ConsumerWidget {
 
   /// Back to where the reader stopped — the stored position, or the next
   /// chapter when this one is finished. The reason somebody opens history.
-  final VoidCallback onContinue;
+  ///
+  /// A Future because a finished chapter has to fetch the chapter list first,
+  /// which scrapes upstream and can take seconds. The badge awaits it so it
+  /// can show that it is working and ignore a second tap meanwhile.
+  final Future<void> Function() onContinue;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -151,10 +155,45 @@ String relativeReadTime(DateTime when, {DateTime? now}) {
   return '${(gap.inDays / 365).floor()}y ago';
 }
 
-class _ContinueButton extends StatelessWidget {
+/// The play badge. Owns its busy state so the card does not have to.
+///
+/// Continue on a finished chapter waits on a chapter-list request before it
+/// knows where to go. With nothing on screen during that wait, the badge looked
+/// dead, and a second tap started a second request and pushed a second reader
+/// on top of the first.
+class _ContinueButton extends StatefulWidget {
   const _ContinueButton({required this.onPressed});
 
-  final VoidCallback onPressed;
+  final Future<void> Function() onPressed;
+
+  @override
+  State<_ContinueButton> createState() => _ContinueButtonState();
+}
+
+class _ContinueButtonState extends State<_ContinueButton> {
+  bool _busy = false;
+
+  Future<void> _press() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      await widget.onPressed();
+    } catch (error, stack) {
+      // The handler deals with its own request failures. One that escapes is
+      // reported the way the framework reports any error in a gesture, rather
+      // than thrown into the zone from a tap callback nobody awaits.
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stack,
+          library: 'history shelf',
+          context: ErrorDescription('while continuing from the history shelf'),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -163,10 +202,22 @@ class _ContinueButton extends StatelessWidget {
       shape: const CircleBorder(),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
-        onTap: onPressed,
-        child: const Padding(
-          padding: EdgeInsets.all(6),
-          child: Icon(Icons.play_arrow_rounded, size: 18, color: Colors.white),
+        onTap: _busy ? null : _press,
+        child: Padding(
+          padding: const EdgeInsets.all(6),
+          child: _busy
+              ? const SizedBox.square(
+                  dimension: 18,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.white,
+                  ),
+                )
+              : const Icon(
+                  Icons.play_arrow_rounded,
+                  size: 18,
+                  color: Colors.white,
+                ),
         ),
       ),
     );
