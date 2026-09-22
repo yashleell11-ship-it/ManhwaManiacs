@@ -108,14 +108,26 @@ def test_continue_reading_window_sort_is_index_ordered(db_session, seeded):
     ('USE TEMP B-TREE FOR LAST 2 TERMS OF ORDER BY'). Measured on 6k progress
     rows: 15.6 ms; with the index extended to (..., last_read_at DESC, id DESC)
     and the query driven from followed_series: 0.9 ms.
-    Fix: extend ix_chapter_progress_series with last_read_at DESC, id DESC."""
+    Fix: extend ix_chapter_progress_series with last_read_at DESC, id DESC.
+
+    Since 3.3.x the strip resumes at the FURTHEST chapter, not the newest
+    (production rows sent the owner back to chapter 1 after a re-read), so one
+    of its two windows now orders by chapter_number and sorts in a temp b-tree
+    by design. Re-measured on 6k rows across 300 follows: ~20 ms. What must
+    still hold is that the profile's rows are REACHED through the scope index
+    rather than by scanning every profile's history."""
     user, profile = seeded
     browse = BrowseService(mature_enabled=True, db=db_session, user_id=user.id, profile_id=profile.id)
     svc = FollowedSeriesService(db_session, browse, user_id=user.id, profile_id=profile.id)
     stmts = _capture(db_session, lambda: svc.continue_reading(limit=10))
     sql, params = next(s for s in stmts if "row_number" in s[0])
     plan = _plan(db_session, sql, params)
-    assert not any("LAST 2 TERMS OF ORDER BY" in line for line in plan), plan
+    assert any(
+        line.startswith("SEARCH chapter_progress USING INDEX ix_chapter_progress_series")
+        and "user_id=? AND profile_id=?" in line
+        for line in plan
+    ), plan
+    assert not any(line.startswith("SCAN chapter_progress") for line in plan), plan
 
 
 def test_profile_delete_cascade_does_not_scan_history_tables(db_session, seeded):

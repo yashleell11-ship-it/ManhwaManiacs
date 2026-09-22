@@ -15,7 +15,7 @@ from typing import Annotated, Any
 from urllib.parse import quote
 
 from fastapi import Depends
-from sqlalchemy import and_, func, select, tuple_
+from sqlalchemy import and_, func, or_, select, tuple_
 from sqlalchemy.orm import Session, defer
 
 from connectors.ids import fully_unquote
@@ -169,6 +169,33 @@ def _not_started(row: FollowedSeries) -> dict[str, Any]:
         "latest_number": None,
         "new_count": None,
     }
+
+
+def _resume_row(furthest: Any, newest: Any, chapters: list[dict[str, Any]]) -> Any:
+    """Which of a series' two candidate rows the strip resumes from.
+
+    ``furthest`` is the highest-numbered row, ``newest`` the one read last;
+    they are usually the same row. They differ in exactly two ways that
+    matter: the reader went back to an earlier chapter (``furthest`` wins —
+    see ``continue_reading``), or the newest row carries no number, which the
+    chapter list may still be able to place.
+    """
+    if newest is furthest or newest.chapter_number is not None:
+        return furthest
+    if furthest.chapter_number is None:
+        # Nothing in this series is numbered; the newest row is all there is.
+        return furthest
+    placed = next(
+        (
+            c.get("number")
+            for c in chapters
+            if isinstance(c, dict) and c.get("key") == newest.chapter_key
+        ),
+        None,
+    )
+    if not isinstance(placed, (int, float)):
+        return newest
+    return newest if placed > furthest.chapter_number else furthest
 
 
 class FollowedSeriesService:
@@ -588,12 +615,12 @@ class FollowedSeriesService:
         with its matching ``followed_series`` row, both as full ORM entities —
         and then throw all but ten away: 6,000 progress rows cost 318 ms to
         produce a ten-item strip, and the query grew with every chapter the
-        owner ever opened. A window function picks the latest chapter per
+        owner ever opened. A window function picks the one chapter per
         series inside the database, so the number of rows crossing into Python
         is the number of *series*, not chapters.
 
-        The row that speaks for a series is its NEWEST one, finished or not.
-        It used to be the newest *unfinished* one, and that is a rewind: the
+        The row that speaks for a series may be a finished one. It used to
+        have to be the newest *unfinished* one, and that is a rewind: the
         continuous feed completes a chapter only when its last page settles, so
         the chapters a reader scrolled through keep mid-chapter rows, and the
         moment the chapter actually being read is finished the strip fell back
@@ -602,13 +629,44 @@ class FollowedSeriesService:
         goes FORWARD, to the chapter after it in ``known_chapters``; with no
         next chapter to name the series is left out, which is what it always
         was once every touched chapter was finished, and never an older one.
+
+        "Newest" was still the wrong row, and the production history says so.
+        Reopening an early chapter — to check a name, or by a stray tap — made
+        it the newest row, so the strip sent the owner back to TBATE key 1
+        after he had finished key 122, and to Shadow Slave chapter 2 (finished
+        weeks before) after re-reading chapter 1, while chapter 5 sat half
+        read. The row that speaks for a series is therefore the FURTHEST one
+        in chapter order — the rule the library page, the series pages and the
+        history shelf all answer with (``resume-target.ts``,
+        ``history-continue.ts``, ``resume_location.dart``). For a novel
+        ``chapter_number`` is the row ordinal, so this is reading order there
+        too. A row with no number ranks below every numbered one, and a series
+        that numbers nothing falls back to its newest row, which is the best
+        a numberless list can say.
+
+        A NUMBERLESS NEWEST row is placed rather than ignored: the phone sends
+        ``chapter_number = null`` for a chapter whose number it never learned,
+        so a null here usually means "unknown", not "unordered". Such a row is
+        looked up in ``known_chapters``; it wins when the list puts it past the
+        furthest numbered row, and — when the list does not carry it at all —
+        it wins as the newest row always used to, because nothing proves the
+        reader is behind it.
+
+        The strip is still ORDERED by recency — the series read most recently
+        comes first — but by the series' newest read, not the resume row's:
+        re-reading chapter 1 is still reading that book today.
         """
         self._require_owner()
-        # (last_read_at DESC, id DESC): the old loop kept whichever row the
-        # database happened to return first within a last_read_at tie, so the
-        # tiebreak is new — but it is a *defined* one replacing an arbitrary
-        # one, and it matches the id ordering an insert sequence gives.
+        # Furthest first; within a chapter number (or among unnumbered rows)
+        # the newest, then the highest id, so the choice is always defined.
+        furthest_first = (
+            ChapterProgress.chapter_number.is_(None).asc(),
+            ChapterProgress.chapter_number.desc(),
+            ChapterProgress.last_read_at.desc(),
+            ChapterProgress.id.desc(),
+        )
         newest_first = (ChapterProgress.last_read_at.desc(), ChapterProgress.id.desc())
+        series_partition = (ChapterProgress.source_id, ChapterProgress.series_key)
         ranked = (
             self._progress_scope(
                 self._scope(
@@ -627,14 +685,16 @@ class FollowedSeriesService:
                         FollowedSeries.mature_override.label("mature_override"),
                         FollowedSeries.content_rating.label("content_rating"),
                         func.row_number()
-                        .over(
-                            partition_by=(
-                                ChapterProgress.source_id,
-                                ChapterProgress.series_key,
-                            ),
-                            order_by=newest_first,
-                        )
-                        .label("rank"),
+                        .over(partition_by=series_partition, order_by=furthest_first)
+                        .label("furthest_rank"),
+                        func.row_number()
+                        .over(partition_by=series_partition, order_by=newest_first)
+                        .label("newest_rank"),
+                        # When the SERIES was last read, whichever chapter it
+                        # was — what the strip is sorted by.
+                        func.max(ChapterProgress.last_read_at)
+                        .over(partition_by=series_partition)
+                        .label("series_read_at"),
                     ).join(
                         FollowedSeries,
                         and_(
@@ -650,33 +710,45 @@ class FollowedSeriesService:
         )
 
         gate_open = self._gate_open()
-        # No SQL limit: a rank-1 row that is completed with nothing known after
+        # No SQL limit: a chosen row that is completed with nothing known after
         # it is dropped below, and a limit applied before that drop would hand
         # back a short strip while series that belong on it wait beyond the
-        # cut. The row count is bounded by the profile's follow count, not by
-        # its history, which is what the window function bought.
+        # cut. At most two rows per series cross into Python (the furthest and
+        # the newest), so the count is bounded by the profile's follow count,
+        # not by its history, which is what the window function bought.
         stmt = (
             select(ranked)
-            .where(ranked.c.rank == 1)
-            .order_by(ranked.c.last_read_at.desc())
+            .where(or_(ranked.c.furthest_rank == 1, ranked.c.newest_rank == 1))
+            .order_by(ranked.c.series_read_at.desc())
         )
-        rows = [
-            row
-            for row in self._db.execute(stmt).all()
-            if gate_open or self._rating(row) != TRACKER_RATING_MATURE
-        ]
+        candidates: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in self._db.execute(stmt).all():
+            if not gate_open and self._rating(row) == TRACKER_RATING_MATURE:
+                continue
+            pair = candidates.setdefault((row.source_id, row.series_key), {})
+            if row.furthest_rank == 1:
+                pair["furthest"] = row
+            if row.newest_rank == 1:
+                pair["newest"] = row
 
-        # The chapter lists are fetched only for the series whose newest row is
-        # finished — ``known_chapters`` is kilobytes per series and most of the
+        # The chapter lists are fetched only for the series that need one — a
+        # finished candidate to move on from, or a numberless newest row to
+        # place. ``known_chapters`` is kilobytes per series and most of the
         # strip is mid-chapter, where the row itself is the answer.
-        finished = [(r.source_id, r.series_key) for r in rows if r.is_completed]
+        wanted = [
+            key
+            for key, pair in candidates.items()
+            if pair["furthest"].is_completed
+            or pair["newest"].is_completed
+            or pair["newest"].chapter_number is None
+        ]
         known: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        if finished:
+        if wanted:
             for follow in self._db.execute(
                 self._scope(
                     select(FollowedSeries).where(
                         tuple_(FollowedSeries.source_id, FollowedSeries.series_key).in_(
-                            finished
+                            wanted
                         )
                     )
                 )
@@ -685,9 +757,14 @@ class FollowedSeriesService:
                     _loads(follow.known_chapters) or []
                 )
 
+        rows = [
+            _resume_row(pair["furthest"], pair["newest"], known.get(key, []))
+            for key, pair in candidates.items()
+        ]
+
         out: list[dict[str, Any]] = []
         for row in rows:
-            last_read_at = row.last_read_at.isoformat() if row.last_read_at else None
+            last_read_at = row.series_read_at.isoformat() if row.series_read_at else None
             if not row.is_completed:
                 out.append(
                     {
