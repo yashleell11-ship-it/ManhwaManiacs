@@ -36,21 +36,59 @@ The one thing lost is timestamp precision: ``last_ok_at`` / ``last_checked_at``
 would otherwise freeze at the last state change, so :data:`REFRESH_INTERVAL`
 forces a refresh of an otherwise-unchanged row. Read those two columns as
 "accurate to within that interval", not to the second.
+
+Real traffic (why a reader's own request counts, and which failures do)
+----------------------------------------------------------------------
+The re-probe fetches one LISTING page, the sweep only reaches followed series,
+and search only exercises the search endpoint. A source blocked on its series
+pages alone (linkmanga was) answered all three and looked healthy forever,
+while every reader who opened a series from it got a 502. So a reader's own
+request for a series page, its chapter list, or a search on one source is
+evidence too -- recorded through :func:`record_traffic_outcome`, costing no
+request the reader was not already making.
+
+That evidence is narrower than the fan-out's on purpose, because it arrives one
+reader at a time and a streak demotes the source for everyone:
+
+* Only failures that are the SOURCE's count (:func:`source_side_failure`): an
+  HTTP 403 (a Cloudflare challenge is reported as one) or 5xx, or a connection
+  the site refused or a host that would not resolve. A timeout never counts --
+  it is as likely to be this box's own congestion as the site -- and neither
+  does any other 4xx, which is an answer about that one request.
+* A burst is one observation (:data:`TRAFFIC_FAILURE_SPACING`). Opening one
+  series fires its series and chapter requests together; without this, a single
+  tap on a blocked source would count twice and one retry would demote it.
 """
 
 from __future__ import annotations
 
 import logging
+import socket
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Iterable, Mapping
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from connectors.http.client import status_of
 from core.time_utils import utcnow
 from database.models import SourceHealth
+
+try:  # the Cloudflare-impersonating client's transport errors
+    from curl_cffi.const import CurlECode as _CurlECode
+    from curl_cffi.requests.exceptions import (
+        ConnectionError as _CurlConnectionError,
+        DNSError as _CurlDNSError,
+        Timeout as _CurlTimeout,
+    )
+except ImportError:  # pragma: no cover - curl_cffi is a hard dependency today
+    _CurlECode = None
+    _CurlConnectionError = _CurlDNSError = _CurlTimeout = None
 
 logger = logging.getLogger(__name__)
 
@@ -311,6 +349,155 @@ def record_outcomes(
                 exc_info=True,
             )
     return states
+
+
+# --- real traffic --------------------------------------------------------------
+# See "Real traffic" in the module docstring for why these exist.
+
+#: How long after a recorded traffic failure further failures of the SAME source
+#: are not counted again. Collapses one screen's burst (series + chapters, fired
+#: together) and an immediate retry into one observation, so a streak from
+#: traffic means what a streak from search means: separate occasions on which
+#: the source did not answer. Successes are never held back -- one clears the
+#: streak, exactly as it does for search.
+TRAFFIC_FAILURE_SPACING = timedelta(seconds=60)
+
+#: Fixed phrases, never ``str(exc)``: this row is GLOBAL and served to every
+#: account, and an upstream exception routinely embeds the full request URL --
+#: for a search, the reader's query string.
+TRAFFIC_BLOCKED = "Access blocked (403). This source may use Cloudflare or bot protection."
+TRAFFIC_SERVER_ERROR = "The source answered with a server error."
+TRAFFIC_UNREACHABLE = "The source could not be reached."
+
+_traffic_failed_at: dict[str, float] = {}
+_traffic_lock = threading.Lock()
+
+
+def reset_traffic_spacing() -> None:
+    """Forget when each source last failed a reader's request. For tests."""
+    with _traffic_lock:
+        _traffic_failed_at.clear()
+
+
+def _exception_chain(exc: BaseException) -> list[BaseException]:
+    """``exc`` and what it was raised from, outermost first.
+
+    Connector HTTP clients wrap every transport failure in a
+    ``ConnectorHttpError`` raised ``from`` the original, so the reason a request
+    failed (a refused connection, a timeout) is one link down. Follows the chain
+    Python itself would print, and stops on a cycle.
+    """
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    while current is not None and len(chain) < 8 and all(
+        current is not seen for seen in chain
+    ):
+        chain.append(current)
+        if current.__cause__ is not None:
+            current = current.__cause__
+        elif not current.__suppress_context__:
+            current = current.__context__
+        else:
+            current = None
+    return chain
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
+        return True
+    return _CurlTimeout is not None and isinstance(exc, _CurlTimeout)
+
+
+def _is_unreachable(exc: BaseException) -> bool:
+    """Connection refused, or a host that does not resolve -- and nothing else.
+
+    Deliberately not "any network error": a reset or a failed read mid-response
+    is as often this end's connection as the site's.
+    """
+    if isinstance(exc, (httpx.ConnectError, ConnectionRefusedError, socket.gaierror)):
+        return True
+    if _CurlDNSError is not None and isinstance(exc, _CurlDNSError):
+        return True
+    if _CurlConnectionError is not None and isinstance(exc, _CurlConnectionError):
+        return getattr(exc, "code", None) in {
+            _CurlECode.COULDNT_CONNECT,
+            _CurlECode.QUIC_CONNECT_ERROR,
+        }
+    return False
+
+
+def source_side_failure(exc: BaseException) -> str | None:
+    """The fixed health message for ``exc``, or None if it says nothing about
+    the source.
+
+    Counts: an upstream 403 (Cloudflare and DDoS-Guard challenges are raised as
+    403) or 5xx, and a connection refused or a host that will not resolve.
+
+    Does not count, whatever else is true:
+
+    * a timeout anywhere in the chain -- including a 5xx a connector synthesised
+      from one. A slow answer is as likely to be this box, busy with every other
+      reader's fan-out, as the site; and one reader's bad afternoon must not
+      demote a source for the whole household.
+    * any other 4xx. A 404 is the site working and saying that page is gone; a
+      429 is the site working and asking us to slow down.
+    * everything without an upstream status or a transport cause: a parser
+      that found nothing, a gate refusal, a bug. Those are real, but they are
+      not reachability, and reachability is all this table claims to measure.
+    """
+    chain = _exception_chain(exc)
+    if any(_is_timeout(link) for link in chain):
+        return None
+    for link in chain:
+        status = status_of(link)
+        if status is None:
+            continue
+        if status == 403:
+            return TRAFFIC_BLOCKED
+        if 500 <= status <= 599:
+            return TRAFFIC_SERVER_ERROR
+        return None
+    if any(_is_unreachable(link) for link in chain):
+        return TRAFFIC_UNREACHABLE
+    return None
+
+
+def record_traffic_outcome(
+    bind,
+    source_id: str,
+    error: str | None,
+    *,
+    clock=time.monotonic,
+) -> None:
+    """Record what one reader's own request just learned about a source.
+
+    ``error`` is None for a success or a message from
+    :func:`source_side_failure`; callers pass nothing at all for an outcome that
+    says nothing (a timeout, a 404, an empty answer).
+
+    Writes through a session of its OWN on ``bind``, never the caller's: the
+    request's session may be partway through work of its own that this commit
+    must not publish, and it may be the one a bulk fan-out is sharing across
+    threads. The write policy is ``record_outcomes``', so a source whose state
+    already matches costs one indexed read and no write.
+
+    Never raises. Recording a diagnostic must not turn a reader's successful
+    request into an error, nor replace the upstream error they should see.
+    """
+    if bind is None:
+        return
+    if error is not None:
+        now = clock()
+        with _traffic_lock:
+            last = _traffic_failed_at.get(source_id)
+            if last is not None and now - last < TRAFFIC_FAILURE_SPACING.total_seconds():
+                return
+            _traffic_failed_at[source_id] = now
+    try:
+        with Session(bind=bind, autoflush=False, expire_on_commit=False) as db:
+            record_outcomes(db, {source_id: error})
+    except Exception:  # noqa: BLE001 - diagnostics never fail a read
+        logger.warning("source health not recorded for %s", source_id, exc_info=True)
 
 
 def summarize(states: Iterable[SourceHealthState]) -> dict[str, int]:
