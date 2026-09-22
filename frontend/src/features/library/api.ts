@@ -138,9 +138,12 @@ export const libraryApi = {
     http.get<SearchResponse>("/library/search", { query: params }),
 
   // --- Reading history (progress service) ---
+  // `collapse=series`: one row per BOOK, the way the phone asks. Without it
+  // forty chapters of one book are forty rows and the book before it lands on
+  // page two. The server collapses in SQL, so `limit`/`offset` page over books.
   readingHistory: (limit = 50, offset = 0) =>
     http.get<import("./types").ReadingHistoryItem[]>("/reader/history", {
-      query: { limit, offset },
+      query: { limit, offset, collapse: "series" },
     }),
 
   // --- Collections ---

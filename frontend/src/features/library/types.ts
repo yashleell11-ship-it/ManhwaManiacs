@@ -169,7 +169,10 @@ export type RecommendationsResponse = RecommendationGenre[];
 
 // --- Reading history ---
 
-/** `GET /reader/history` row (progress-service `_serialize`). */
+/**
+ * `GET /reader/history` row (progress-service `_serialize`), plus the book it
+ * is a position in (`_with_titles`).
+ */
 export interface ReadingHistoryItem {
   id: number;
   source_id: string;
@@ -184,6 +187,14 @@ export interface ReadingHistoryItem {
   last_read_at: string | null;
   completed_at: string | null;
   time_spent_seconds: number;
+  /** Null when the book has aged out of the server's series cache. */
+  series_title: string | null;
+  /**
+   * As stored in the series cache — in production the backend-RELATIVE
+   * `/sources/{src}/series/{key}/cover` path. Resolve it with
+   * `historyCoverSrc`, never hand it to an `<img>` as-is.
+   */
+  cover_url: string | null;
 }
 
 // --- Statistics ---
