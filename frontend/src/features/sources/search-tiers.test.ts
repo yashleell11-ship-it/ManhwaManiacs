@@ -143,6 +143,12 @@ describe("tier 2 across a change of term", () => {
 
     const orvFirst = response({ groups: [group("reaperscans")], next_tier: 2 });
     observer.setOptions(federatedSearchRestOptions(orv, orvFirst));
+    // The options themselves must not hand the old term's tier 2 forward as a
+    // placeholder. Asserted on the raw observer, BEFORE resolveSearchTiers: its
+    // isPlaceholderData guard would otherwise hide a regression in the options,
+    // and a guard that nothing tests is a guard that quietly goes missing.
+    expect(observer.getCurrentResult().isPlaceholderData).toBe(false);
+    expect(observer.getCurrentResult().data).toBeUndefined();
     const shown = resolveSearchTiers(orvFirst, observer.getCurrentResult());
 
     expect(shown.data?.groups.map((g) => g.source)).toEqual(["reaperscans"]);
@@ -159,6 +165,8 @@ describe("tier 2 across a change of term", () => {
 
     const orvOnly = response({ groups: [group("reaperscans")], next_tier: null });
     observer.setOptions(federatedSearchRestOptions(orv, orvOnly));
+    expect(observer.getCurrentResult().isPlaceholderData).toBe(false);
+    expect(observer.getCurrentResult().data).toBeUndefined();
     const shown = resolveSearchTiers(orvOnly, observer.getCurrentResult());
 
     expect(shown.data?.groups.map((g) => g.source)).toEqual(["reaperscans"]);
