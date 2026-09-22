@@ -5,6 +5,7 @@ import {
   MAX_PROMPT_LENGTH,
   MIN_PROMPT_LENGTH,
   suggestionKey,
+  suggestionsSubtitle,
 } from "./suggestions";
 
 describe("spending a request", () => {
@@ -58,5 +59,34 @@ describe("identity", () => {
     const a = suggestionKey({ source: "asurascans", series_id: "nano-machine" });
     const b = suggestionKey({ source: "demonicscans", series_id: "nano-machine" });
     expect(a).not.toBe(b);
+  });
+});
+
+describe("why the box is hidden", () => {
+  it("describes the working state when the box can ask", () => {
+    expect(suggestionsSubtitle(true, "ok")).toContain("Describe it");
+  });
+
+  it("tells a spent budget it comes back, not just that it's gone", () => {
+    // The one distinction this whole helper exists for: two reasons that
+    // both hide the identical box used to render the identical sentence.
+    const copy = suggestionsSubtitle(false, "budget_exhausted");
+    expect(copy).toContain("used today's AI suggestions");
+    expect(copy).toContain("midnight UTC");
+  });
+
+  it("falls back to the genre pitch for a server with no key at all", () => {
+    expect(suggestionsSubtitle(false, "not_configured")).toContain(
+      "genres you read most",
+    );
+  });
+
+  it("treats a missing reason the same as not_configured", () => {
+    // availabilityQuery.data can be undefined before the first response
+    // lands; that must read as "nothing to explain yet", not crash or claim
+    // a budget was spent that was never checked.
+    expect(suggestionsSubtitle(false, undefined)).toContain(
+      "genres you read most",
+    );
   });
 });

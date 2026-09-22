@@ -29,10 +29,22 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../support/test_overrides.dart';
 
 class _SuggestRepository implements LibraryRepository {
-  _SuggestRepository({this.available = true, this.dropped = 0});
+  _SuggestRepository({
+    this.available = true,
+    this.dropped = 0,
+    this.reason,
+    this.remainingToday = 42,
+  });
 
   final bool available;
   final int dropped;
+
+  /// `ok` · `not_configured` · `budget_exhausted`. Defaults to matching
+  /// [available] the way the real server does, so most tests need not name
+  /// it — only the ones distinguishing "never configured" from "spent for
+  /// today" have to.
+  final String? reason;
+  final int remainingToday;
 
   int suggestCalls = 0;
   int availabilityCalls = 0;
@@ -64,7 +76,7 @@ class _SuggestRepository implements LibraryRepository {
           ),
         ],
         dropped: dropped,
-        remainingToday: 41,
+        remainingToday: remainingToday - 1,
         model: 'deepseek-flash',
       ),
     );
@@ -76,8 +88,8 @@ class _SuggestRepository implements LibraryRepository {
     return Ok(
       SuggestionAvailability(
         available: available,
-        reason: available ? 'ok' : 'not_configured',
-        remainingToday: available ? 42 : 0,
+        reason: reason ?? (available ? 'ok' : 'not_configured'),
+        remainingToday: available ? remainingToday : 0,
       ),
     );
   }
@@ -194,6 +206,49 @@ void main() {
     expect(find.text('SUGGEST SOMETHING'), findsNothing);
     // The genre chips are the fallback, and they still work.
     expect(find.text('martial arts'), findsOneWidget);
+  });
+
+  testWidgets(
+      'a spent budget says so and names when it comes back, unlike a missing key',
+      (tester) async {
+    // Both `not_configured` and `budget_exhausted` hide the exact same box,
+    // but only one of them is a reader's own doing. Someone who just spent
+    // the 60th request of the day needs to be told it comes back — the
+    // server wrote that sentence specifically (`ai_budget_exhausted`) and it
+    // was unreachable from this screen until now.
+    final repo = _SuggestRepository(available: false, reason: 'budget_exhausted');
+    await tester.pumpWidget(await _wrap(repo));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.byType(TextField), findsNothing);
+    expect(
+      find.textContaining("You've used today's AI suggestions"),
+      findsOneWidget,
+    );
+    expect(find.textContaining('midnight UTC'), findsOneWidget);
+    // Still not "Pick a genre" copy meant for a server with no key at all.
+    expect(find.text('Pick a genre you read a lot of.'), findsNothing);
+    expect(find.text('martial arts'), findsOneWidget);
+  });
+
+  testWidgets("a low daily allowance is shown, a healthy one isn't",
+      (tester) async {
+    // Matches the web client's threshold exactly: silent above 10 remaining,
+    // shown once it is close enough to matter. A reader who never sees the
+    // count until it is nearly gone is a reader surprised by the box
+    // vanishing; the warning has to arrive before the wall does.
+    final low = _SuggestRepository(remainingToday: 4);
+    await tester.pumpWidget(await _wrap(low));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('4 left today'), findsOneWidget);
+
+    final healthy = _SuggestRepository(remainingToday: 41);
+    await tester.pumpWidget(await _wrap(healthy));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.textContaining('left today'), findsNothing);
   });
 
   testWidgets('the button is dead for a prompt too short to spend on',

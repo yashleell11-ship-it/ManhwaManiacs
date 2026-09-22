@@ -62,10 +62,14 @@ class _RecommendationsScreenState extends ConsumerState<RecommendationsScreen> {
 
     // An unconfigured server is a deployment state, not an error to put in
     // front of a reader: the box is simply absent and the genre chips remain.
-    final canAsk = availability.maybeWhen(
-      data: (state) => state.available,
-      orElse: () => false,
-    );
+    final state = availability.asData?.value;
+    final canAsk = state?.available ?? false;
+    // "not_configured" and "budget_exhausted" both hide the box, but only one
+    // of them is worth a sentence: a server with no key was never going to
+    // offer this, while a reader who just spent the 60th request of the day
+    // watched the box vanish out from under them and deserves to be told it
+    // comes back rather than silently reading as broken or removed.
+    final budgetExhausted = state?.isBudgetExhausted ?? false;
 
     return Scaffold(
       appBar: AppBar(
@@ -85,7 +89,10 @@ class _RecommendationsScreenState extends ConsumerState<RecommendationsScreen> {
             canAsk
                 ? 'Describe it in your own words. Suggestions are weighed '
                     'against what you already read.'
-                : 'Pick a genre you read a lot of.',
+                : budgetExhausted
+                    ? "You've used today's AI suggestions. They reset at "
+                        'midnight UTC — pick a genre below meanwhile.'
+                    : 'Pick a genre you read a lot of.',
             style: context.text.body.copyWith(color: context.colors.muted),
           ),
           if (canAsk) ...[
@@ -94,6 +101,7 @@ class _RecommendationsScreenState extends ConsumerState<RecommendationsScreen> {
               controller: _controller,
               onSubmit: _submit,
               busy: suggestions.isLoading,
+              remainingToday: state?.remainingToday,
             ),
           ],
           SizedBox(height: context.space.xl2),
@@ -114,11 +122,16 @@ class _PromptBox extends StatefulWidget {
     required this.controller,
     required this.onSubmit,
     required this.busy,
+    this.remainingToday,
   });
 
   final TextEditingController controller;
   final VoidCallback onSubmit;
   final bool busy;
+
+  /// Requests left in today's allowance. Null while availability is still
+  /// loading — nothing renders for that, rather than a flash of "0 left".
+  final int? remainingToday;
 
   /// Concrete enough to show the box takes a sentence, not a keyword. A reader
   /// shown "action, fantasy" types "action, fantasy" and gets a search.
@@ -202,9 +215,23 @@ class _PromptBoxState extends State<_PromptBox> {
           ],
         ),
         SizedBox(height: context.space.lg),
-        PrimaryPillButton(
-          label: widget.busy ? 'Thinking' : 'Suggest something',
-          onPressed: _canSubmit ? widget.onSubmit : null,
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            PrimaryPillButton(
+              label: widget.busy ? 'Thinking' : 'Suggest something',
+              onPressed: _canSubmit ? widget.onSubmit : null,
+            ),
+            // Matches the web client's threshold: silent above 10 remaining,
+            // shown once the day's allowance is close enough to matter.
+            if (widget.remainingToday != null && widget.remainingToday! <= 10) ...[
+              SizedBox(width: context.space.md),
+              Text(
+                '${widget.remainingToday} left today',
+                style: context.text.caption.copyWith(color: context.colors.muted),
+              ),
+            ],
+          ],
         ),
       ],
     );

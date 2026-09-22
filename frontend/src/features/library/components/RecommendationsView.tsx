@@ -7,7 +7,11 @@ import {
   SearchResultCardSkeleton,
 } from "@/features/library/components/GlobalSearchResultCard";
 import { SuggestionPromptBox } from "@/features/library/components/SuggestionPromptBox";
-import { droppedNotice, suggestionKey } from "@/features/library/suggestions";
+import {
+  droppedNotice,
+  suggestionKey,
+  suggestionsSubtitle,
+} from "@/features/library/suggestions";
 import {
   useRecommendations,
   useSuggest,
@@ -54,9 +58,7 @@ export function RecommendationsView() {
         <div className="mb-8">
           <h1 className="page-title">Find something to read</h1>
           <p className="page-subtitle">
-            {canAsk
-              ? "Describe it in your own words. Suggestions are weighed against what you already read."
-              : "The genres you read most — tap one to browse more like it."}
+            {suggestionsSubtitle(canAsk, availabilityQuery.data?.reason)}
           </p>
         </div>
 
