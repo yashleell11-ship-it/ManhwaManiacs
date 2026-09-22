@@ -3,6 +3,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { loadNovelAudioObjectUrl } from "@/features/novels/audio-url";
+import {
+  createLatestLoad,
+  isPlaybackFailure,
+  keepLoadedUrl,
+} from "@/features/novels/latest-load";
 import type { ChapterId } from "@/types/api";
 
 /**
@@ -41,18 +46,27 @@ export function NovelAudioPlayer({
   const [source, setSource] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
+  // The download started by the first press of play. State rather than a
+  // plain `useRef(createLatestLoad())` only so it is created once.
+  const [loads] = useState(createLatestLoad);
 
   // Revoked on unmount and whenever the chapter changes: a leaked object URL
   // pins the whole file in memory for the life of the tab, and a reader moving
   // through a book would accumulate one per chapter.
+  //
+  // A download still in flight is abandoned here too. Moving on to the next
+  // chapter or pressing Escape while the file is on its way would otherwise
+  // start this chapter's narration on a detached element, after the controls
+  // that could pause it are gone.
   useEffect(() => {
     return () => {
+      loads.cancel();
       setSource((current) => {
         if (current) URL.revokeObjectURL(current);
         return null;
       });
     };
-  }, [chapter.sourceId, chapter.seriesKey, chapter.chapterKey]);
+  }, [loads, chapter.sourceId, chapter.seriesKey, chapter.chapterKey]);
 
   // Held in a ref so `timeupdate` never needs a fresh closure, and so changing
   // the callback cannot re-attach the listener mid-playback.
@@ -103,23 +117,33 @@ export function NovelAudioPlayer({
       return;
     }
     if (!source) {
+      const signal = loads.begin();
       setLoading(true);
       setFailed(false);
+      let url: string;
       try {
-        const url = await loadNovelAudioObjectUrl(chapter);
-        setSource(url);
-        element.src = url;
+        url = await loadNovelAudioObjectUrl(chapter, { signal });
       } catch {
         // Audio is an addition to the page. A failure here leaves the chapter
-        // readable and says so, rather than breaking the reader.
-        setFailed(true);
+        // readable and says so, rather than breaking the reader. An abort is
+        // the reader having left, which is not a failure to report.
+        if (!signal.aborted) setFailed(true);
         return;
       } finally {
         setLoading(false);
       }
+      // The reader left while the file was arriving: nothing may play.
+      if (!keepLoadedUrl(signal, url)) return;
+      setSource(url);
+      element.src = url;
     }
-    void element.play();
-  }, [chapter, source]);
+    // Cleared on every press, not only on a load: a refused play() marks the
+    // button failed, and a later press that works must not keep saying so.
+    setFailed(false);
+    element.play().catch((error: unknown) => {
+      if (isPlaybackFailure(error)) setFailed(true);
+    });
+  }, [chapter, source, loads]);
 
   const seek = useCallback((ms: number) => {
     const element = audioRef.current;

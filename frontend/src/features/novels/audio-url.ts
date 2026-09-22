@@ -39,9 +39,16 @@ export function novelAudioPath(ref: ChapterId): {
  *
  * The caller owns the URL and must `URL.revokeObjectURL` it — a leaked one
  * pins the whole file in memory for the life of the tab.
+ *
+ * `signal` lets a reader who leaves the chapter mid-download stop paying for
+ * the rest of it; see `latest-load.ts` for why the caller must still check it
+ * after this resolves.
  */
-export async function loadNovelAudioObjectUrl(ref: ChapterId): Promise<string> {
+export async function loadNovelAudioObjectUrl(
+  ref: ChapterId,
+  { signal }: { signal?: AbortSignal } = {},
+): Promise<string> {
   const { path, query } = novelAudioPath(ref);
-  const { blob } = await requestBlob(path, { query });
+  const { blob } = await requestBlob(path, { query, signal });
   return URL.createObjectURL(blob);
 }
