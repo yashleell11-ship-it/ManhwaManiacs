@@ -132,6 +132,9 @@ class NovelsRepositoryImpl implements NovelsRepository {
         narratable: cached is List
             ? cached.whereType<String>().toSet()
             : <String>{},
+        // Absent on a server from before the flag existed. None of those has
+        // a render worker, so "no" is the honest reading, not a guess.
+        canRender: data['can_render'] == true,
       ),);
     } on DioException catch (e) {
       return Err(_err(e));

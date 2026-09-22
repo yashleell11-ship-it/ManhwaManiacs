@@ -198,6 +198,13 @@ class NovelAudioJob {
   final double progress;
   final String? errorCode;
 
-  bool get isActive =>
-      status == 'queued' || status == 'planning' || status == 'rendering';
+  bool get isActive => isWaiting || isRunning;
+
+  /// Asked for, and no render box has picked it up yet. Not "in progress":
+  /// with no worker free — or none configured — it can sit here for a long
+  /// time, and calling that progress is how a label ends up lying for days.
+  bool get isWaiting => status == 'queued';
+
+  /// A render box has it and is working on it.
+  bool get isRunning => status == 'planning' || status == 'rendering';
 }

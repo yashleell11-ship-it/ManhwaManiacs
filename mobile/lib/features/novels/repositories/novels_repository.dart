@@ -12,7 +12,16 @@ import 'package:manhwamaniacs/features/novels/models/novel_chapter_window.dart';
 /// manga equivalent, because a manga chapter's payload is a list of image
 /// URLs and a novel chapter's is the prose itself.
 /// What one book's audio looks like: what exists, and what could.
-typedef NovelSeriesAudio = ({Set<String> rendered, Set<String> narratable});
+///
+/// `canRender` is whether this server can make NEW audio at all — true only
+/// when a render worker is configured. Without one a request queues and
+/// never runs, so the app must not offer it, and a queued job must not be
+/// polled or shown as in progress forever.
+typedef NovelSeriesAudio = ({
+  Set<String> rendered,
+  Set<String> narratable,
+  bool canRender,
+});
 
 abstract class NovelsRepository {
   /// One chapter as sanitized plain-text paragraphs.

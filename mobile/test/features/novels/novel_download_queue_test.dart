@@ -47,7 +47,9 @@ class _ScriptedNovelsRepository implements NovelsRepository {
   Future<Result<NovelSeriesAudio>> seriesAudio({
     required String sourceId,
     required String seriesKey,
-  }) async => const Ok((rendered: <String>{}, narratable: <String>{}));
+  }) async => const Ok(
+    (rendered: <String>{}, narratable: <String>{}, canRender: false),
+  );
 
   @override
   Future<Result<NovelAudioRequest>> requestAudio({

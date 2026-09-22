@@ -18,7 +18,7 @@ class FakeNovelsRepository implements NovelsRepository {
   Map<String, List<int>> audioBytesByChapter = {};
 
   Result<NovelSeriesAudio> seriesAudioResult = const Ok(
-    (rendered: <String>{}, narratable: <String>{}),
+    (rendered: <String>{}, narratable: <String>{}, canRender: true),
   );
 
   /// Answers for successive `GET /novels/audio/jobs` calls, in order. The

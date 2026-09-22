@@ -321,7 +321,7 @@ class _FrontMatter extends ConsumerWidget {
           // Narration is a REQUEST, not a download: it costs about nine
           // minutes on the render PC per chapter, so it is its own deliberate
           // control rather than a checkbox on "Download book".
-          _AudiobookButton(
+          AudiobookButton(
             sourceId: sourceId,
             seriesKey: seriesId,
             chapters: [
@@ -578,8 +578,9 @@ class _TocRow extends ConsumerWidget {
 /// page: the answer marks which chapters are already narrated, and a page
 /// that awaited it would wait on a request that usually says "none" before
 /// showing a table of contents.
-class _AudiobookButton extends ConsumerWidget {
-  const _AudiobookButton({
+class AudiobookButton extends ConsumerWidget {
+  const AudiobookButton({
+    super.key,
     required this.sourceId,
     required this.seriesKey,
     required this.chapters,
@@ -595,41 +596,92 @@ class _AudiobookButton extends ConsumerWidget {
     final audio = ref.watch(seriesAudioProvider(key)).valueOrNull;
     final rendered = audio?.rendered ?? const <String>{};
     final narratable = audio?.narratable ?? const <String>{};
+    // Until the server has answered, assume it can: the button is then
+    // briefly enabled rather than briefly claiming narration is unavailable.
+    final canRender = audio?.canRender ?? true;
     final jobs = ref.watch(novelAudioJobsProvider(key)).valueOrNull ?? const [];
-    final running = jobs.where((job) => job.isActive).length;
+    final running = jobs.where((job) => job.isRunning).length;
+    final waiting = jobs.where((job) => job.isWaiting).length;
 
-    return SizedBox(
+    final button = SizedBox(
       width: double.infinity,
       child: OutlinedButton.icon(
-        onPressed: () => AudiobookPickerSheet.show(
-          context,
-          sourceId: sourceId,
-          seriesKey: seriesKey,
-          chapters: [
-            for (final chapter in chapters)
-              (
-                key: chapter.key,
-                number: chapter.number,
-                title: chapter.title,
-                isRead: chapter.isRead,
-                // "Downloaded" means "already has audio" on this sheet.
-                isDownloaded: rendered.contains(chapter.key),
+        // No render worker: a request would queue and never run, so it is not
+        // offered at all rather than accepted and left "in progress" forever.
+        onPressed: !canRender
+            ? null
+            : () => AudiobookPickerSheet.show(
+                context,
+                sourceId: sourceId,
+                seriesKey: seriesKey,
+                chapters: [
+                  for (final chapter in chapters)
+                    (
+                      key: chapter.key,
+                      number: chapter.number,
+                      title: chapter.title,
+                      isRead: chapter.isRead,
+                      // "Downloaded" means "already has audio" on this sheet.
+                      isDownloaded: rendered.contains(chapter.key),
+                    ),
+                ],
+                // Only chapters whose text is on the server can be narrated.
+                // The picker shows the rest greyed with the reason rather
+                // than letting them be chosen and then refused.
+                cached: narratable,
               ),
-          ],
-          // Only chapters whose text is on the server can be narrated. The
-          // picker shows the rest greyed with the reason rather than letting
-          // them be chosen and then refused.
-          cached: narratable,
-        ),
         icon: const Icon(Icons.graphic_eq_rounded, size: 18),
         label: Text(
-          running > 0
-              ? 'Making audiobook · $running in progress'
-              : rendered.isEmpty
-              ? 'Make audiobook'
-              : 'Make audiobook · ${rendered.length} done',
+          audiobookButtonLabel(
+            canRender: canRender,
+            running: running,
+            waiting: waiting,
+            rendered: rendered.length,
+          ),
         ),
       ),
     );
+    if (canRender) return button;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        button,
+        Padding(
+          padding: EdgeInsets.only(top: context.space.xxs),
+          child: Text(
+            kNarrationUnavailable,
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ),
+      ],
+    );
   }
+}
+
+/// Said plainly wherever a request for narration would otherwise be offered,
+/// when the server has no render worker to run one.
+const String kNarrationUnavailable =
+    'Narration of new chapters is not available right now.';
+
+/// The audiobook button's words.
+///
+/// "In progress" only for a job a render box is actually working on. A job
+/// that is merely queued is WAITING — with no worker free it can sit there a
+/// long time — and with no worker configured at all there is no job to talk
+/// about, because nothing will ever move.
+String audiobookButtonLabel({
+  required bool canRender,
+  required int running,
+  required int waiting,
+  required int rendered,
+}) {
+  if (canRender && running > 0) {
+    return waiting > 0
+        ? 'Making audiobook · $running in progress, $waiting waiting'
+        : 'Making audiobook · $running in progress';
+  }
+  if (canRender && waiting > 0) {
+    return 'Make audiobook · $waiting waiting for the narration PC';
+  }
+  return rendered == 0 ? 'Make audiobook' : 'Make audiobook · $rendered done';
 }
