@@ -362,7 +362,15 @@ void main() {
       await controller.debugWaitUntilIdle();
 
       expect(repository.windows, isNotEmpty);
-      expect(repository.singles, ['ch-1', 'ch-2', 'ch-3', 'ch-4']);
+      // Unordered on purpose. A batch runs its chapters concurrently
+      // (`Future.wait` in the queue controller), so the order their fallback
+      // requests reach the single endpoint is scheduling, not behaviour. An
+      // ordered assertion here passed on an idle machine and failed under
+      // load — which is exactly when CI runs it.
+      expect(
+        repository.singles,
+        unorderedEquals(['ch-1', 'ch-2', 'ch-3', 'ch-4']),
+      );
       final store = harness.storeFor('u1p1');
       for (var n = 1; n <= 4; n++) {
         expect(
