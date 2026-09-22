@@ -26,8 +26,19 @@ on:
 # A second push supersedes the first: these three suites take minutes and the
 # only run whose result matters is the newest. Never cancel on master — a
 # superseded run there would leave the default branch with no verdict at all.
+#
+# The group is keyed on the CALLING workflow as well as the ref. One push
+# starts this file twice — standalone, and inside ios-build.yml via
+# workflow_call — and in a called workflow `github.workflow` is the caller's
+# name while `github.ref` is identical. Keyed on the ref alone, the two copies
+# shared one group and cancelled each other, whichever arrived second winning.
+# When the iOS copy lost, `needs.tests.result` came back `cancelled`, the
+# release step (`if: needs.tests.result == 'success'`) was skipped, and a
+# fully built .ipa never reached the phone — on roughly every other push,
+# silently, since nothing had FAILED. Per-workflow groups still let a newer
+# push supersede an older one within each, which is all this was ever for.
 concurrency:
-  group: tests-${{ github.ref }}
+  group: tests-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
