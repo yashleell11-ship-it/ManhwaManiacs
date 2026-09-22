@@ -53,7 +53,13 @@ def chapter_key_hash(source_id: str, series_key: str, chapter_key: str) -> str:
 
 
 def chapter_paths(source_id: str, series_key: str, chapter_key: str) -> tuple[Path, Path]:
-    """(audio, timing) paths for one chapter. Neither is guaranteed to exist."""
+    """(audio, timing) paths for one chapter. Neither is guaranteed to exist.
+
+    An ``.m4a`` may also sit beside the audio (``services.chapter_audio_m4a``).
+    It is a copy derived from the opus for iOS, not a second rendition: it is
+    never listed or counted as a chapter's audio, and it goes when the opus is
+    replaced.
+    """
     name = chapter_key_hash(source_id, series_key, chapter_key)
     shard = audio_root() / name[:2]
     return shard / f"{name}.opus", shard / f"{name}.timing.json"
@@ -65,6 +71,10 @@ class ChapterAudio:
     bytes: int = 0
     total_ms: int = 0
     segments: tuple[dict, ...] = ()
+    #: Fingerprint of the text the render was cut from, as the render box
+    #: recorded it in the timing map. None when the map is missing or
+    #: predates the field — "not known", never "matches".
+    text_fingerprint: str | None = None
 
 
 def rendered_chapters(
@@ -111,10 +121,13 @@ def read_chapter_audio(
 
     segments: tuple[dict, ...] = ()
     total_ms = 0
+    fingerprint: str | None = None
     try:
         data = json.loads(timing.read_text(encoding="utf-8"))
         segments = tuple(data.get("segments") or ())
         total_ms = int(data.get("total_ms") or 0)
+        recorded = data.get("text_fingerprint")
+        fingerprint = recorded if isinstance(recorded, str) and recorded else None
     except (OSError, ValueError, TypeError):
         # Audio without a timing map still plays; it just cannot highlight.
         # That is a strictly better outcome than refusing to serve it.
@@ -125,4 +138,5 @@ def read_chapter_audio(
         bytes=audio.stat().st_size,
         total_ms=total_ms,
         segments=segments,
+        text_fingerprint=fingerprint,
     )

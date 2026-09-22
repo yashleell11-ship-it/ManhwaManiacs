@@ -13,7 +13,8 @@ moment the registry gate lets the connectors through.
 
 from __future__ import annotations
 
-from typing import Annotated
+import json
+from typing import Annotated, Literal
 
 from fastapi import (
     APIRouter,
@@ -28,11 +29,17 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from connectors.ids import fully_unquote
 from core.config import get_settings
 from core.errors import AppError
 from core.rate_limit import bulk_limit, limiter, sources_limit
 from database.session import get_db
 from services.auth_service import require_admin_user
+from services.chapter_audio_m4a import (
+    TranscodeFailed,
+    TranscodeTimeout,
+    ensure_m4a,
+)
 from services.chapter_audio_store import (
     chapter_paths,
     read_chapter_audio,
@@ -40,6 +47,7 @@ from services.chapter_audio_store import (
 )
 from services.novel_attribution_service import (
     UNCHANGED,
+    chapter_fingerprint,
     correct_cast_member,
     merge_alias,
     read_attribution,
@@ -140,14 +148,15 @@ def get_novel_attribution(
 def get_novel_audio(
     request: Request,
     response: Response,  # slowapi injects X-RateLimit-* headers into this
+    db: DbDep,
     source: str = Query(..., min_length=1, max_length=64),
     series: str = Query(..., min_length=1, max_length=512),
     chapter: str = Query(..., min_length=1, max_length=512),
 ) -> dict[str, object]:
     """Whether this chapter has been rendered, and where each sentence sits.
 
-    ``{available, bytes, total_ms, segments: [{i, start_ms, end_ms, p, s, e,
-    voice, speaker, speech}]}``.
+    ``{available, bytes, total_ms, highlight_safe, segments: [{i, start_ms,
+    end_ms, p, s, e, voice, speaker, speech}]}``.
 
     The timings are MEASURED, not estimated: each segment was rendered on its
     own, so its duration is the length of the samples that came back. That is
@@ -156,14 +165,57 @@ def get_novel_audio(
     Absence is not an error. Almost nothing in the library is rendered, and a
     client asking about every chapter should not be reading error paths for the
     ordinary case.
+
+    ``highlight_safe`` says whether the segment offsets still point at the
+    text a reader is shown. The audio is kept when the chapter is refetched
+    and comes back a character different, but its offsets then land on the
+    wrong words — so a client still plays it, and only follows along when
+    this is true.
     """
     found = read_chapter_audio(source, series, chapter)
     return {
         "available": found.available,
         "bytes": found.bytes,
         "total_ms": found.total_ms,
+        "highlight_safe": found.available and _highlight_safe(
+            db, source, series, chapter, found.text_fingerprint
+        ),
         "segments": list(found.segments),
     }
+
+
+def _highlight_safe(
+    db: Session, source: str, series: str, chapter: str, recorded: str | None
+) -> bool:
+    """Whether the render was cut from the text ``/novels/chapter`` serves now.
+
+    True only when both sides are KNOWN and equal. A timing map without a
+    fingerprint, or a chapter no longer in the text cache (the next read would
+    fetch it fresh, and it may differ), is "cannot tell" — and a highlight on
+    the wrong words is worse than none, so that answers false.
+
+    The cache row is looked up the way ``NovelService.get_chapter`` looks it
+    up, keys unquoted, because that is the text a reader is actually shown.
+    Read-only: this must not bump the row in the LRU order.
+    """
+    if not recorded:
+        return False
+    stored = db.execute(
+        select(NovelChapterCache.paragraphs).where(
+            NovelChapterCache.source_id == source,
+            NovelChapterCache.series_key == fully_unquote(series),
+            NovelChapterCache.chapter_key == fully_unquote(chapter),
+        )
+    ).scalar_one_or_none()
+    if stored is None:
+        return False
+    try:
+        paragraphs = json.loads(stored)
+    except ValueError:
+        return False
+    if not isinstance(paragraphs, list):
+        return False
+    return chapter_fingerprint(paragraphs) == recorded
 
 
 @router.get("/audio/series")
@@ -348,18 +400,46 @@ def get_novel_audio_file(
     source: str = Query(..., min_length=1, max_length=64),
     series: str = Query(..., min_length=1, max_length=512),
     chapter: str = Query(..., min_length=1, max_length=512),
+    audio_format: Literal["ogg", "m4a"] = Query("ogg", alias="format"),
 ) -> FileResponse:
-    """The rendered Opus, as a file.
+    """The rendered chapter, as a file.
+
+    ``format=ogg`` (the default) is the stored Ogg Opus. ``format=m4a`` is
+    AAC in MP4, for iOS: AVPlayer cannot open Ogg at all. The m4a is made from
+    the opus on the first request and served from disk after that (see
+    ``services.chapter_audio_m4a``); this is a plain ``def`` so FastAPI runs
+    that first transcode on a worker thread, never on the event loop.
 
     ``FileResponse`` and not a streamed body on purpose: it sets
     ``Accept-Ranges`` and answers a ``Range`` with a 206, which was verified
     against Starlette's source rather than assumed. Without that, every seek in
-    a player re-downloads the whole chapter.
+    a player re-downloads the whole chapter — and iOS will not play a
+    progressive MP4 at all from a server that ignores Range.
     """
     audio, _timing = chapter_paths(source, series, chapter)
     if not audio.is_file():
         raise StarletteHTTPException(status_code=404, detail="Not Found")
-    return FileResponse(audio, media_type="audio/ogg")
+    if audio_format == "ogg":
+        return FileResponse(audio, media_type="audio/ogg")
+
+    try:
+        m4a = ensure_m4a(audio)
+    except FileNotFoundError:
+        # Removed between the check above and the transcode.
+        raise StarletteHTTPException(status_code=404, detail="Not Found")
+    except TranscodeTimeout:
+        raise AppError(
+            "This chapter's audio is still being prepared. Try again shortly.",
+            code="audio_preparing",
+            status_code=503,
+        )
+    except TranscodeFailed:
+        raise AppError(
+            "This chapter's audio could not be prepared for this device.",
+            code="audio_convert_failed",
+            status_code=500,
+        )
+    return FileResponse(m4a, media_type="audio/mp4")
 
 
 @router.get("/voices")

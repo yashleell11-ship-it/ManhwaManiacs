@@ -45,6 +45,7 @@ from core.auth import tokens_equal
 from core.config import get_settings
 from database.session import get_db
 from routes.novels import require_novels_enabled
+from services.chapter_audio_m4a import m4a_path
 from services.chapter_audio_store import chapter_paths
 from services.novel_attribution_service import chapter_fingerprint
 from services.novel_render_plan import (
@@ -246,6 +247,11 @@ async def complete_render(
     never see a half-written file. The TIMING map lands first, because
     ``read_chapter_audio`` already tolerates audio without a map — "it just
     cannot highlight" — and nothing tolerates a map without audio.
+
+    An m4a made from the previous render is deleted once the new opus is in
+    place. It would be rebuilt on the next iOS request anyway (it no longer
+    matches the opus it was made from), but until then it is a stale file
+    nothing should keep.
     """
     from services.novel_render_queue import _held
 
@@ -277,6 +283,13 @@ async def complete_render(
                 leftover.unlink(missing_ok=True)
             except OSError:
                 pass
+
+    try:
+        m4a_path(audio_path).unlink(missing_ok=True)
+    except OSError:
+        # The new opus is in and the job is done; a stale m4a that could not
+        # be removed is rebuilt on the next request regardless.
+        pass
 
     complete(db, job_id, worker_id)
     db.commit()

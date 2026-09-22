@@ -484,6 +484,33 @@ class TestCompleteAndFail:
         leftovers = list((tmp_path / "audio").rglob("*.tmp"))
         assert leftovers == []
 
+    def test_a_rerender_removes_the_m4a_made_from_the_old_audio(
+        self, worker, db_session
+    ):
+        # The iOS m4a is derived from the opus. Once a new opus lands, the old
+        # m4a describes audio that no longer exists anywhere.
+        from services.chapter_audio_store import chapter_paths
+
+        audio, _ = chapter_paths(STUB_SOURCE, SERIES, "ch-1")
+        stale = audio.with_suffix(".m4a")
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_bytes(b"made from the previous render")
+        job_id = self._claim(worker, db_session)
+
+        response = worker.post(
+            "/novels/render/complete",
+            data={"job_id": job_id, "worker_id": WORKER},
+            files={
+                "audio": ("c.opus", b"OggS" + b"\1" * 400, "audio/ogg"),
+                "timing": ("c.timing.json", b"{}", "application/json"),
+            },
+            headers={"X-Render-Token": TOKEN},
+        )
+
+        assert response.status_code == 200
+        assert audio.read_bytes() == b"OggS" + b"\1" * 400
+        assert not stale.exists()
+
     def test_a_retryable_failure_goes_back_in_the_queue(self, worker, db_session):
         # A dropped connection should be tried again; that is the whole
         # distinction this flag carries.
