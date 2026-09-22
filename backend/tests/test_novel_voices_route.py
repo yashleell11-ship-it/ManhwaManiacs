@@ -254,6 +254,101 @@ class TestCastVoiceValidation:
         assert row.gender == "male"
 
 
+class TestOwnerOnly:
+    """The cast, the narrator and the aliases belong to the book, not a user.
+
+    None of those rows carries a user id, so one account's change is what
+    every listener hears, and a locked row outranks any later recast. Only
+    the admin may make that kind of change; everybody may read it.
+    """
+
+    FORBIDDEN = "Administrator access required."
+
+    def _cast_row(self, db_session, name="arthur"):
+        db_session.expire_all()
+        return db_session.query(NovelSeriesCast).filter_by(
+            source_id=STUB_SOURCE, series_key=SERIES, normalized_name=name
+        ).one_or_none()
+
+    def test_a_non_admin_cannot_pick_the_narrator(
+        self, novels_on, db_session, tmp_path, monkeypatch, as_user, make_user
+    ):
+        install_pack(tmp_path, monkeypatch)
+        reader = make_user("reader")
+
+        response = novels_on.post("/novels/narrator", json={
+            "source_id": STUB_SOURCE, "series_key": SERIES,
+            "voice_id": "libritts-2803",
+        }, headers=as_user(reader.id))
+
+        assert response.status_code == 403
+        assert response.json()["message"] == self.FORBIDDEN
+        assert db_session.get(NovelSeriesCastState, (STUB_SOURCE, SERIES)) is None
+
+    def test_a_non_admin_cannot_recast_a_character(
+        self, novels_on, db_session, tmp_path, monkeypatch, as_user, make_user
+    ):
+        install_pack(tmp_path, monkeypatch)
+        reader = make_user("reader")
+
+        response = novels_on.post("/novels/cast", json={
+            "source_id": STUB_SOURCE, "series_key": SERIES,
+            "name": "Arthur", "voice_id": "libritts-2803",
+        }, headers=as_user(reader.id))
+
+        assert response.status_code == 403
+        assert response.json()["message"] == self.FORBIDDEN
+        assert self._cast_row(db_session) is None
+
+    def test_a_non_admin_cannot_merge_characters(
+        self, novels_on, db_session, as_user, make_user
+    ):
+        from database.models import NovelSeriesAlias
+
+        reader = make_user("reader")
+        db_session.add(NovelSeriesCast(
+            source_id=STUB_SOURCE, series_key=SERIES,
+            display_name="Tessia", normalized_name="tessia",
+        ))
+        db_session.commit()
+
+        response = novels_on.post("/novels/cast/alias", json={
+            "source_id": STUB_SOURCE, "series_key": SERIES,
+            "alias": "Arthur", "canonical": "Tessia",
+        }, headers=as_user(reader.id))
+
+        assert response.status_code == 403
+        assert response.json()["message"] == self.FORBIDDEN
+        db_session.expire_all()
+        assert db_session.query(NovelSeriesAlias).count() == 0
+
+    def test_the_admin_still_can(
+        self, novels_on, db_session, tmp_path, monkeypatch, as_user, make_user
+    ):
+        install_pack(tmp_path, monkeypatch)
+        owner = make_user("owner", is_admin=True)
+
+        response = novels_on.post("/novels/cast", json={
+            "source_id": STUB_SOURCE, "series_key": SERIES,
+            "name": "Arthur", "voice_id": "libritts-2803",
+        }, headers=as_user(owner.id))
+
+        assert response.status_code == 200
+        assert self._cast_row(db_session).voice_id == "libritts-2803"
+
+    def test_a_non_admin_can_still_read_the_roster(
+        self, novels_on, tmp_path, monkeypatch, as_user, make_user
+    ):
+        install_pack(tmp_path, monkeypatch)
+        reader = make_user("reader")
+
+        body = novels_on.get("/novels/voices", headers=as_user(reader.id)).json()
+
+        assert [v["voice_id"] for v in body["voices"]] == [
+            "libritts-2803", "libritts-251"
+        ]
+
+
 class TestFlagOff:
     def test_the_roster_is_a_stock_404_when_novels_are_off(self, novels_off):
         assert novels_off.get("/novels/voices").status_code == 404

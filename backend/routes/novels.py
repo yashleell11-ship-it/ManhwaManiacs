@@ -31,6 +31,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from core.config import get_settings
 from core.rate_limit import bulk_limit, limiter, sources_limit
 from database.session import get_db
+from services.auth_service import require_admin_user
 from services.chapter_audio_store import (
     chapter_paths,
     read_chapter_audio,
@@ -70,6 +71,14 @@ router = APIRouter(
 
 NovelDep = Annotated[NovelService, Depends(get_novel_service)]
 DbDep = Annotated[Session, Depends(get_db)]
+
+#: For the writes that change a book for EVERYBODY. Casting, the narrator and
+#: aliases are per-series rows with no user id, and render jobs have no owner,
+#: so without this any signed-in account could recast the owner's book, book
+#: the owner's GPU, or cancel every job in the instance (the active list hands
+#: out every job id). Reads stay open: anyone may see who speaks and what is
+#: being narrated.
+OWNER_ONLY = [Depends(require_admin_user)]
 
 
 @router.get("/chapter")
@@ -220,7 +229,7 @@ class AudioRenderRequest(BaseModel):
     priority: int = Field(default=0, ge=0, le=9)
 
 
-@router.post("/audio/render")
+@router.post("/audio/render", dependencies=OWNER_ONLY)
 @limiter.limit(sources_limit)
 def request_novel_audio(
     request: Request,
@@ -274,7 +283,9 @@ def list_active_novel_audio_jobs(
     return {"jobs": [as_json(job) for job in active_jobs(db)]}
 
 
-@router.delete("/audio/jobs/{job_id}", status_code=204)
+@router.delete(
+    "/audio/jobs/{job_id}", status_code=204, dependencies=OWNER_ONLY
+)
 @limiter.limit(sources_limit)
 def cancel_novel_audio_job(
     request: Request,
@@ -365,7 +376,7 @@ class NarratorVoice(BaseModel):
     voice_id: str | None = Field(default=None, max_length=64)
 
 
-@router.post("/narrator")
+@router.post("/narrator", dependencies=OWNER_ONLY)
 @limiter.limit(sources_limit)
 def set_novel_narrator_voice(
     request: Request,
@@ -411,7 +422,7 @@ class AliasMerge(BaseModel):
     canonical: str = Field(min_length=1, max_length=128)
 
 
-@router.post("/cast")
+@router.post("/cast", dependencies=OWNER_ONLY)
 @limiter.limit(sources_limit)
 def correct_cast(
     request: Request,
@@ -447,7 +458,7 @@ def correct_cast(
     }
 
 
-@router.post("/cast/alias")
+@router.post("/cast/alias", dependencies=OWNER_ONLY)
 @limiter.limit(sources_limit)
 def merge_cast_alias(
     request: Request,

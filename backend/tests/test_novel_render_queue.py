@@ -271,6 +271,74 @@ class TestCancel:
         assert novels_on.delete(f"/novels/audio/jobs/{job_id}").status_code == 404
 
 
+class TestOwnerOnly:
+    """Jobs have no owner, and the GPU is the owner's.
+
+    Any signed-in account could otherwise book two hundred chapters of card
+    time at priority 9 or cancel every job in the instance, since the active
+    list hands every job id to every caller. Reading stays open: everybody
+    may see what is being narrated.
+    """
+
+    def test_a_non_admin_cannot_queue_narration(
+        self, novels_on, db_session, as_user, make_user
+    ):
+        reader = make_user("reader")
+        cache_chapter(db_session, "ch-1")
+
+        response = novels_on.post(
+            "/novels/audio/render",
+            json={"source_id": STUB_SOURCE, "series_key": SERIES,
+                  "chapter_keys": ["ch-1"], "priority": 9},
+            headers=as_user(reader.id),
+        )
+
+        assert response.status_code == 403
+        assert response.json()["message"] == "Administrator access required."
+        assert db_session.query(NovelAudioJob).count() == 0
+
+    def test_a_non_admin_cannot_cancel_a_job(
+        self, novels_on, db_session, as_user, make_user
+    ):
+        owner = make_user("owner", is_admin=True)
+        reader = make_user("reader")
+        cache_chapter(db_session, "ch-1")
+        job_id = novels_on.post(
+            "/novels/audio/render",
+            json={"source_id": STUB_SOURCE, "series_key": SERIES,
+                  "chapter_keys": ["ch-1"]},
+            headers=as_user(owner.id),
+        ).json()["queued"][0]["job_id"]
+
+        response = novels_on.delete(
+            f"/novels/audio/jobs/{job_id}", headers=as_user(reader.id)
+        )
+
+        assert response.status_code == 403
+        assert response.json()["message"] == "Administrator access required."
+        db_session.expire_all()
+        assert db_session.get(NovelAudioJob, job_id).status == "queued"
+
+    def test_a_non_admin_can_still_see_the_jobs(
+        self, novels_on, db_session, as_user, make_user
+    ):
+        owner = make_user("owner", is_admin=True)
+        reader = make_user("reader")
+        cache_chapter(db_session, "ch-1")
+        novels_on.post(
+            "/novels/audio/render",
+            json={"source_id": STUB_SOURCE, "series_key": SERIES,
+                  "chapter_keys": ["ch-1"]},
+            headers=as_user(owner.id),
+        )
+
+        active = novels_on.get(
+            "/novels/audio/jobs/active", headers=as_user(reader.id)
+        ).json()["jobs"]
+
+        assert [job["chapter_key"] for job in active] == ["ch-1"]
+
+
 class TestFlagOff:
     def test_the_queue_is_a_stock_404_when_novels_are_off(self, novels_off):
         assert novels_off.get("/novels/audio/jobs/active").status_code == 404
