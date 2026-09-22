@@ -19,6 +19,7 @@ The model is injected rather than imported so every test runs without a key.
 
 from __future__ import annotations
 
+import enum
 import hashlib
 import json
 import logging
@@ -72,6 +73,16 @@ STATUS_UNATTRIBUTABLE = "unattributable"
 STATUS_FAILED = "failed"
 
 Completer = Callable[..., deepseek_client.Completion]
+
+
+class _Unchanged(enum.Enum):
+    UNCHANGED = "unchanged"
+
+
+#: "Leave the pinned voice as it is." Distinct from None, which is a choice:
+#: clear the pin and let the automatic assignment pick. A gender correction
+#: omits the voice, and must not be read as the owner asking to clear it.
+UNCHANGED = _Unchanged.UNCHANGED
 
 
 def choose_completer() -> tuple[Completer, str]:
@@ -601,13 +612,18 @@ def correct_cast_member(
     name: str,
     *,
     gender: str | None = None,
-    voice_id: str | None = None,
+    voice_id: str | None | _Unchanged = UNCHANGED,
 ) -> NovelSeriesCast:
     """Set a character's gender or voice by hand, and hold it there.
 
     Marks the row ``locked``, which is what stops the next recast quietly
     reverting it: gender is otherwise recomputed from pronouns on every pass,
     and a human who has listened to the book knows things the counts do not.
+
+    ``voice_id=None`` CLEARS a pinned voice, so the character goes back to the
+    automatic assignment; leaving it out changes nothing. A locked row with no
+    voice is therefore just an unpinned character with a held gender, which
+    is also exactly how the render plan reads it.
 
     Raises for a gender that is not one of the three the renderer understands,
     rather than storing a value that would silently route to the narrator.
@@ -634,7 +650,7 @@ def correct_cast_member(
         db.add(row)
     if gender is not None:
         row.gender = gender
-    if voice_id is not None:
+    if voice_id is not UNCHANGED:
         row.voice_id = voice_id or None
     row.locked = True
     row.updated_at = utcnow()

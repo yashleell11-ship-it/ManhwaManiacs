@@ -230,6 +230,72 @@ class TestClaim:
         assert job.error_code == "not_attributed"
 
 
+class TestPinnedVoices:
+    """A cleared pin must plan exactly like a character nobody ever pinned.
+
+    The clients label that option "Automatic voice", so the render has to
+    agree: the character gets whatever the automatic pass gives them, not the
+    old pin and not the narrator.
+    """
+
+    PARAGRAPHS = ['"Then we go," she said.', "He turned and ran."]
+
+    def _seed(self, db):
+        from services.novel_attribution_service import chapter_fingerprint
+
+        db.add(
+            NovelChapterCache(
+                source_id=STUB_SOURCE, series_key=SERIES, chapter_key="ch-1",
+                title="Chapter 1", chapter_number=1.0,
+                paragraphs=json.dumps(self.PARAGRAPHS), word_count=8,
+            )
+        )
+        db.add(
+            NovelChapterAttribution(
+                source_id=STUB_SOURCE, series_key=SERIES, chapter_key="ch-1",
+                text_fingerprint=chapter_fingerprint(self.PARAGRAPHS),
+                paragraph_count=len(self.PARAGRAPHS), style="quoted",
+                spans=json.dumps([
+                    {"p": 0, "s": 1, "e": 12, "ord": 0, "head": "Then we go,",
+                     "cont": False, "speaker": "Tessia", "rule": 1},
+                ]),
+                pov=json.dumps(["Arthur"]),
+                pronoun_counts=json.dumps({"arthur": [9, 0], "tessia": [0, 9]}),
+                status="ok", model="test",
+            )
+        )
+        db.commit()
+
+    def _tessia_voice(self, db):
+        from services.novel_render_plan import build_chapter_plan
+
+        plan = build_chapter_plan(
+            db, STUB_SOURCE, SERIES, "ch-1", list(self.PARAGRAPHS)
+        )
+        return next(s["voice"] for s in plan["segments"] if s["speech"])
+
+    def test_clearing_a_pin_gives_back_the_automatic_voice(
+        self, db_session, tmp_path, monkeypatch
+    ):
+        from services.novel_attribution_service import correct_cast_member
+
+        _install_voices(tmp_path / "voices", monkeypatch)
+        self._seed(db_session)
+        automatic = self._tessia_voice(db_session)
+
+        correct_cast_member(db_session, STUB_SOURCE, SERIES, "Tessia",
+                            voice_id="v1")
+        assert self._tessia_voice(db_session) == "v1"
+
+        correct_cast_member(db_session, STUB_SOURCE, SERIES, "Tessia",
+                            voice_id=None)
+
+        # The row stays locked (a gender correction does that too), and a
+        # locked row with no voice is still an unpinned character.
+        assert automatic == "v2"
+        assert self._tessia_voice(db_session) == automatic
+
+
 class TestHeartbeat:
     def _claim(self, worker, db_session):
         seed(db_session)

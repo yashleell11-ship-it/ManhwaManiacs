@@ -689,6 +689,31 @@ class TestOwnerCorrections:
 
         assert row.voice_id == "libritts-3853"
 
+    def test_an_explicit_none_clears_a_pinned_voice(self, db_session):
+        # None is a choice ("Automatic voice"), not "no change". Leaving the
+        # argument out is the no-change case.
+        svc.correct_cast_member(
+            db_session, SOURCE, SERIES, "Myre", voice_id="libritts-3853"
+        )
+
+        row = svc.correct_cast_member(
+            db_session, SOURCE, SERIES, "Myre", voice_id=None
+        )
+
+        assert row.voice_id is None
+
+    def test_leaving_the_voice_out_keeps_it(self, db_session):
+        svc.correct_cast_member(
+            db_session, SOURCE, SERIES, "Myre", voice_id="libritts-3853"
+        )
+
+        row = svc.correct_cast_member(
+            db_session, SOURCE, SERIES, "Myre", gender="female"
+        )
+
+        assert row.voice_id == "libritts-3853"
+        assert row.gender == "female"
+
     def test_a_nonsense_gender_is_refused(self, db_session):
         # Storing it would silently route the character to the narrator.
         with pytest.raises(ValueError):

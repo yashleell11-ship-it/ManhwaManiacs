@@ -37,6 +37,7 @@ from services.chapter_audio_store import (
     rendered_chapters,
 )
 from services.novel_attribution_service import (
+    UNCHANGED,
     correct_cast_member,
     merge_alias,
     read_attribution,
@@ -393,6 +394,11 @@ class CastCorrection(BaseModel):
     series_key: str = Field(min_length=1, max_length=512)
     name: str = Field(min_length=1, max_length=128)
     gender: str | None = Field(default=None, pattern="^(male|female|unknown)$")
+
+    #: Three states, told apart by whether the field was SENT: a voice id
+    #: pins it, an explicit null clears the pin ("Automatic voice"), and
+    #: leaving it out changes nothing — which is what a gender-only
+    #: correction does.
     voice_id: str | None = Field(default=None, max_length=64)
 
 
@@ -423,10 +429,14 @@ def correct_cast(
     # that silently reads as narrator. Refuse it here rather than storing it.
     if body.voice_id and not is_known_voice(body.voice_id):
         raise HTTPException(status_code=400, detail="unknown voice")
+    # A default of None cannot tell "null" from "absent", so ask pydantic
+    # which fields actually arrived. Reading null as "no change" made the
+    # clients' clear-the-voice option answer 200 and keep the old voice.
+    voice = body.voice_id if "voice_id" in body.model_fields_set else UNCHANGED
     try:
         row = correct_cast_member(
             db, body.source_id, body.series_key, body.name,
-            gender=body.gender, voice_id=body.voice_id,
+            gender=body.gender, voice_id=voice,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

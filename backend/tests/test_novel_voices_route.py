@@ -204,11 +204,19 @@ class TestCastVoiceValidation:
 
         assert response.status_code == 400
 
-    def test_clearing_a_voice_is_still_allowed(
+    def _stored(self, db_session, name="arthur"):
+        db_session.expire_all()
+        return db_session.query(NovelSeriesCast).filter_by(
+            source_id=STUB_SOURCE, series_key=SERIES, normalized_name=name
+        ).one()
+
+    def test_an_explicit_null_clears_the_pinned_voice(
         self, novels_on, db_session, tmp_path, monkeypatch
     ):
-        # Null is "read as narrator", which is a legitimate choice and must not
-        # be caught by the membership check.
+        # Null is "Automatic voice": the character goes back to whatever the
+        # automatic assignment gives them. It must get past the membership
+        # check AND actually clear the pin — this used to answer 200 with the
+        # old voice still stored, so the choice could never be undone.
         install_pack(tmp_path, monkeypatch)
         novels_on.post("/novels/cast", json={
             "source_id": STUB_SOURCE, "series_key": SERIES,
@@ -221,6 +229,29 @@ class TestCastVoiceValidation:
         })
 
         assert response.status_code == 200
+        assert response.json()["voice_id"] is None
+        assert self._stored(db_session).voice_id is None
+
+    def test_a_gender_correction_leaves_the_voice_alone(
+        self, novels_on, db_session, tmp_path, monkeypatch
+    ):
+        # Omitted is not null. Fixing somebody's gender must not quietly
+        # throw away the voice the owner picked for them.
+        install_pack(tmp_path, monkeypatch)
+        novels_on.post("/novels/cast", json={
+            "source_id": STUB_SOURCE, "series_key": SERIES,
+            "name": "Arthur", "voice_id": "libritts-2803",
+        })
+
+        response = novels_on.post("/novels/cast", json={
+            "source_id": STUB_SOURCE, "series_key": SERIES,
+            "name": "Arthur", "gender": "male",
+        })
+
+        assert response.json()["voice_id"] == "libritts-2803"
+        row = self._stored(db_session)
+        assert row.voice_id == "libritts-2803"
+        assert row.gender == "male"
 
 
 class TestFlagOff:
