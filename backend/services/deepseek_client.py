@@ -108,14 +108,48 @@ def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+#: Returned by `_read_budget` for a ledger that exists but cannot be trusted
+#: (truncated JSON, permission denied, a directory where the file should be).
+#: Deliberately larger than any real `ceiling` argument this module is called
+#: with, so a corrupt ledger reads as "budget exhausted" for every caller
+#: rather than as "nothing spent yet" -- see the docstring below for why a
+#: missing file is NOT the same case as this one.
+_UNREADABLE = 1 << 30
+
+
 def _read_budget(path: Path) -> tuple[str, int]:
+    """The ledger's `(date, requests)`, read defensively.
+
+    Two failure shapes are NOT the same thing and used to be conflated:
+
+    - The file does not exist. This is the normal state before the first
+      request of any kind has ever been recorded -- a fresh deployment, or a
+      fresh `budget_path` a test just made up -- and reads as zero spent.
+    - The file exists but cannot be trusted: truncated JSON (the classic
+      crash-mid-`write_text` shape, now closed by `_record_request` writing
+      atomically, but old data or a hand-edited file can still hit this),
+      wrong permissions, or a directory sitting where the file should be.
+      This used to read as zero spent too, on the theory that "it resets to
+      today at zero, which is the conservative reading either way" -- it is
+      not. Zero-spent is a FRESH allowance; it is the most permissive answer
+      available, handed out precisely when the ledger can no longer prove
+      what has already been charged. Reads as `_UNREADABLE` instead, which
+      exceeds every `ceiling` this module is ever called with, so a caller
+      that cannot prove its budget is unspent is refused until a human
+      restores or removes the file.
+    """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return str(data.get("date", "")), int(data.get("requests", 0))
-    except (OSError, ValueError, TypeError):
-        # A corrupt or missing ledger must not be a free pass; it resets to
-        # today at zero, which is the conservative reading either way.
+    except FileNotFoundError:
         return _today(), 0
+    except (OSError, ValueError, TypeError):
+        logger.error(
+            "DeepSeek usage ledger at %s is unreadable; refusing further "
+            "spend until it is restored or removed",
+            path,
+        )
+        return _today(), _UNREADABLE
 
 
 def spent_today(path: Path | None = None) -> int:
@@ -129,13 +163,27 @@ def _record_request(path: Path) -> None:
     count = count + 1 if date == _today() else 1
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        # Write to a sibling temp file and rename over the target rather than
+        # writing the path directly. `Path.write_text` is not atomic: a
+        # container killed mid-write (a deploy, an OOM) can leave a truncated
+        # file, which `_read_budget` used to treat as a fresh zero-spent
+        # ledger -- silently erasing however much of the day's allowance had
+        # already been recorded. `os.replace` is atomic on the same
+        # filesystem, and the temp file lives next to the target so it always
+        # is one.
+        tmp = path.with_suffix(f"{path.suffix}.tmp-{os.getpid()}")
+        tmp.write_text(
             json.dumps({"date": _today(), "requests": count}), encoding="utf-8"
         )
+        os.replace(tmp, path)
     except OSError:
-        # Losing a tick of the counter is survivable; failing the call that was
-        # already paid for is not.
-        logger.warning("could not record DeepSeek usage to %s", path)
+        # Losing a tick of the counter used to be dismissed as survivable --
+        # true for an operator-triggered attribution batch, not for a button
+        # a reader can press with nothing else bounding it. A write failure
+        # here (full volume, read-only mount) means the NEXT read of this
+        # ledger raises too, which now fails closed via `_UNREADABLE` rather
+        # than quietly re-opening the budget on every call.
+        logger.error("could not record DeepSeek usage to %s", path)
 
 
 def complete_json(

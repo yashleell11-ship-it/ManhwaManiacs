@@ -274,11 +274,64 @@ class TestDailyCeiling:
 
         assert ds.spent_today(ledger) == 0
 
-    def test_a_corrupt_ledger_is_not_a_free_pass(self, ledger):
+    def test_a_missing_ledger_is_a_fresh_allowance(self, ledger):
+        # No file at all is the ordinary state before the first request ever
+        # made against this path -- a fresh deployment, or (as in every other
+        # test in this file) a `ledger` fixture that never wrote one. That is
+        # not the same claim as "we cannot prove what was spent" below, and
+        # must not be refused the way a corrupt file now is.
+        assert not ledger.exists()
+        assert ds.spent_today(ledger) == 0
+
+    def test_a_corrupt_ledger_is_refused_not_a_free_pass(self, ledger):
+        # A ledger that EXISTS but cannot be trusted -- truncated JSON is
+        # exactly what a crash mid-write used to leave behind -- must not
+        # read as zero-spent. Zero-spent is a FRESH allowance, the most
+        # permissive answer available, and handing it out precisely when the
+        # ledger can no longer prove what was already charged is how a
+        # crash-and-restart loop turns a 60/day ceiling into unlimited spend.
         ledger.write_text("{not json", encoding="utf-8")
 
-        # Reads as zero-for-today rather than raising or disabling the ceiling.
-        assert ds.spent_today(ledger) == 0
+        assert ds.spent_today(ledger) >= ds.DAILY_REQUEST_CEILING
         t = _transport(_reply())
-        ds.complete_json("p", budget_path=ledger, transport=t)
+        with pytest.raises(ds.DeepSeekBudgetExhausted):
+            ds.complete_json("p", budget_path=ledger, transport=t)
+        assert len(t.seen) == 0  # type: ignore[attr-defined]
+
+    def test_wrong_permissions_are_refused_the_same_way(self, ledger):
+        ledger.write_text(
+            json.dumps({"date": ds._today(), "requests": 1}), encoding="utf-8"
+        )
+        ledger.chmod(0o000)
+        try:
+            assert ds.spent_today(ledger) >= ds.DAILY_REQUEST_CEILING
+        finally:
+            # So pytest can clean up tmp_path afterwards.
+            ledger.chmod(0o644)
+
+    def test_a_directory_where_the_ledger_should_be_refuses_not_spends(self, ledger):
+        # A ledger every read AND every write fails against -- simulated here
+        # as a directory sitting at the ledger's path -- must refuse rather
+        # than fall through to treating the unreadable ledger as zero-spent.
+        # The old comment called a lost write "survivable" on the theory that
+        # only the counter tick was lost; the actual failure mode is worse:
+        # a ledger that can never be read successfully reports zero spent on
+        # EVERY subsequent call, which is unlimited spend, not one lost tick.
+        ledger.mkdir()
+        t = _transport(_reply())
+
+        with pytest.raises(ds.DeepSeekBudgetExhausted):
+            ds.complete_json("p", budget_path=ledger, transport=t)
+
+        assert len(t.seen) == 0  # type: ignore[attr-defined]
+        assert ds.spent_today(ledger) >= ds.DAILY_REQUEST_CEILING
+
+    def test_the_write_is_atomic_no_temp_file_survives(self, ledger):
+        # A crash between the temp-file write and the rename must never leave
+        # a `.tmp-<pid>` sibling for something to later mistake for the
+        # ledger -- and a successful write must leave none behind either.
+        ds._record_request(ledger)
+
+        siblings = list(ledger.parent.iterdir())
+        assert siblings == [ledger]
         assert ds.spent_today(ledger) == 1
