@@ -48,10 +48,13 @@ class _SuggestRepository implements LibraryRepository {
     lastPrompt = prompt;
     if (holdUntil != null) await holdUntil!.future;
     return Ok(
-      SuggestionResult(
+      // Not const: `dropped` below is this instance's own field, not a
+      // compile-time constant, so `prefer_const_constructors` is wrong on
+      // THIS constructor — but the item inside it has no such dependency.
+      SuggestionResult( // ignore: prefer_const_constructors
         items: [
-          Suggestion(
-            item: const GlobalSearchItem(
+          const Suggestion(
+            item: GlobalSearchItem(
               kind: 'source',
               source: 'asurascans',
               seriesId: 'nano-machine',
