@@ -6,6 +6,7 @@ import 'package:manhwamaniacs/app/theme/app_colors.dart';
 import 'package:manhwamaniacs/app/theme/app_presets.dart';
 import 'package:manhwamaniacs/features/content_mode/content_mode_controller.dart';
 import 'package:manhwamaniacs/features/content_mode/widgets/content_mode_chip.dart';
+import 'package:manhwamaniacs/features/downloads/models/chapter_identity.dart';
 import 'package:manhwamaniacs/features/downloads/models/download_chapter_state.dart';
 import 'package:manhwamaniacs/features/downloads/models/downloaded_series_group.dart';
 import 'package:manhwamaniacs/features/downloads/models/saved_chapter.dart';
@@ -431,12 +432,18 @@ class _SeriesDownloadCardState extends ConsumerState<_SeriesDownloadCard> {
   }
 
   String _subtitle(int saved, DownloadedSeriesGroup group) {
-    final total = group.chapters.length;
+    // Narration rows are counted as audio, not as more chapters: a book with
+    // ten chapters and their narration is still ten chapters.
+    final audio = group.chapters.where((c) => c.kind.isAudio).toList();
+    final total = group.chapters.length - audio.length;
+    final savedText = saved -
+        audio.where((c) => c.state == DownloadChapterState.complete).length;
     final size = formatDownloadBytes(group.totalBytes);
-    if (saved == total) {
-      return '$total chapter${total == 1 ? '' : 's'} · $size';
+    final withAudio = audio.isEmpty ? '' : ' · ${audio.length} with audio';
+    if (savedText == total) {
+      return '$total chapter${total == 1 ? '' : 's'}$withAudio · $size';
     }
-    return '$saved of $total chapters saved · $size';
+    return '$savedText of $total chapters saved$withAudio · $size';
   }
 
   Future<void> _onSeriesAction(_SeriesAction action) async {
@@ -446,7 +453,11 @@ class _SeriesDownloadCardState extends ConsumerState<_SeriesDownloadCard> {
           context,
           ref,
           seriesLabel: _seriesLabel,
-          chapters: widget.group.chapters,
+          // A zip of page images; speech has none to give it.
+          chapters: [
+            for (final chapter in widget.group.chapters)
+              if (!chapter.kind.isAudio) chapter,
+          ],
         );
       case _SeriesAction.deleteAll:
         await _confirmDeleteAll();
@@ -516,11 +527,21 @@ class _ChapterRow extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final label = chapterLabel(number: chapter.chapterNumber, title: chapter.title);
     final complete = chapter.state == DownloadChapterState.complete;
+    // A saved narration is listed as what it is — the chapter's AUDIO — and
+    // opens the chapter it reads, where the player picks up the saved copy.
+    final narration = chapter.kind.isAudio;
+    final opens = textIdentity(chapter.identity);
 
     return ListTile(
       dense: true,
       contentPadding: EdgeInsets.symmetric(horizontal: context.space.md),
-      title: Text(label.primary, style: context.text.bodySm),
+      leading: narration
+          ? Icon(Icons.headphones_rounded, size: 18, color: context.colors.muted)
+          : null,
+      title: Text(
+        narration ? '${label.primary} · audio' : label.primary,
+        style: context.text.bodySm,
+      ),
       subtitle: Text(
         '${_stateLabel(chapter.state, chapter.error)} · '
         '${formatDownloadBytes(chapter.bytes)}',
@@ -530,11 +551,11 @@ class _ChapterRow extends ConsumerWidget {
       // listing, which is exactly what a downloaded chapter cannot rely on.
       onTap: complete
           ? () => context.push(
-                chapter.kind.isNovel
+                chapter.kind.isNovelSide
                     ? RoutePaths.novelReader(
-                        chapter.sourceId,
-                        chapter.seriesKey,
-                        chapter.chapterKey,
+                        opens.sourceId,
+                        opens.seriesKey,
+                        opens.chapterKey,
                       )
                     : RoutePaths.reader(
                         chapter.sourceId,
@@ -549,11 +570,12 @@ class _ChapterRow extends ConsumerWidget {
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          OcrChapterAction(chapter: chapter),
+          // Speech has no page images to recognise.
+          if (!narration) OcrChapterAction(chapter: chapter),
           // "Save to Files" writes a CBZ of page images. A novel chapter has
-          // one text blob and no pages, so the export would be a zip of
-          // nothing — the action is not offered rather than offered broken.
-          if (complete && !chapter.kind.isNovel)
+          // one text blob and no pages, and narration is audio, so the export
+          // would be a zip of nothing — not offered rather than offered broken.
+          if (complete && !chapter.kind.isNovelSide)
             IconButton(
               key: Key(
                 'export-${chapter.sourceId}-${chapter.seriesKey}-${chapter.chapterKey}',
@@ -569,7 +591,8 @@ class _ChapterRow extends ConsumerWidget {
             ),
           IconButton(
             key: Key('remove-${chapter.sourceId}-${chapter.seriesKey}-${chapter.chapterKey}'),
-            tooltip: 'Remove download',
+            // For narration, the audio alone: the chapter's text stays.
+            tooltip: narration ? 'Remove saved audio' : 'Remove download',
             icon: const Icon(Icons.delete_outline, size: 20),
             onPressed: () => _remove(ref),
           ),

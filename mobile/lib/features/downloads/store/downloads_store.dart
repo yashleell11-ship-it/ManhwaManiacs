@@ -343,9 +343,23 @@ class DownloadsStore {
   /// The one blob number a novel chapter's text lives at.
   static const int novelTextBlobNumber = 1;
 
-  /// A chapter's narration, on its own row. Same blob number because the
-  /// row holds exactly one blob either way — the ROW's kind says which.
+  /// A chapter's narration, on its own row. Same blob number as the text
+  /// because the ROW's kind says which it is.
   static const int audioBlobNumber = 1;
+
+  /// The timing map that audio was rendered with — the second of the audio
+  /// row's two blobs (`page_count = 2`).
+  ///
+  /// Saved WITH the audio rather than fetched at play time, for two reasons:
+  /// with no network there is nothing to fetch it from, and a chapter
+  /// re-rendered on the server gets a new map that no longer matches the
+  /// bytes on the phone. A second blob on the same row keeps every guarantee
+  /// the first one has — the completeness check needs both, and deleting the
+  /// row releases both.
+  static const int audioTimingBlobNumber = 2;
+
+  /// How many blobs an audio row holds: the opus and its timing map.
+  static const int audioBlobCount = 2;
 
   /// Writes [chapter] (a [NovelChapter.toStoredJson] map) as this chapter's
   /// single blob. Idempotent for the same text, exactly like [savePage].
@@ -357,6 +371,51 @@ class DownloadsStore {
   /// row lets go.
   Future<void> saveAudio({required int rowId, required List<int> bytes}) =>
       savePage(rowId: rowId, pageNumber: audioBlobNumber, bytes: bytes);
+
+  /// Store the timing map [saveAudio]'s bytes were rendered with — the JSON
+  /// `GET /novels/audio` answered, as `NovelAudio.toJson` writes it.
+  Future<void> saveAudioTiming({
+    required int rowId,
+    required Map<String, dynamic> timing,
+  }) =>
+      savePage(
+        rowId: rowId,
+        pageNumber: audioTimingBlobNumber,
+        bytes: utf8.encode(jsonEncode(timing)),
+      );
+
+  /// A chapter's saved narration: the opus file to play and the timing map
+  /// to follow along with, or `null` unless BOTH are on disk and the row is
+  /// complete.
+  ///
+  /// [id] is the CHAPTER's identity, not the audio row's — callers think in
+  /// chapters, and the `:audio` suffix is this store's business.
+  ///
+  /// Never throws. A missing file (deleted by hand through the Files app), a
+  /// half-finished download or a corrupt map all read as "not saved", which
+  /// sends the reader back to streaming instead of to an error.
+  Future<({File audio, Map<String, dynamic> timing})?> readSavedNarration(
+    ChapterIdentity id,
+  ) async {
+    try {
+      final audioId = audioIdentity(textIdentity(id));
+      final chapter = await getChapter(audioId);
+      if (chapter == null ||
+          !chapter.kind.isAudio ||
+          chapter.state != DownloadChapterState.complete) {
+        return null;
+      }
+      final paths = await localPagePaths(audioId);
+      final audio = paths[audioBlobNumber];
+      final timingFile = paths[audioTimingBlobNumber];
+      if (audio == null || timingFile == null) return null;
+      final decoded = jsonDecode(await timingFile.readAsString());
+      if (decoded is! Map) return null;
+      return (audio: audio, timing: Map<String, dynamic>.from(decoded));
+    } catch (_) {
+      return null;
+    }
+  }
 
   Future<void> saveNovelText({
     required int rowId,
@@ -437,12 +496,25 @@ class DownloadsStore {
     return result;
   }
 
-  Future<List<SavedChapter>> listChapters() async {
+  /// Every chapter row in this scope, newest first.
+  ///
+  /// Narration rows are left out unless [includeNarration] asks for them. A
+  /// saved narration is not a CHAPTER — it hangs off one, under a key no
+  /// source ever issued — and every caller that lists chapters (an offline
+  /// series page, a table of contents' download badges) would otherwise grow
+  /// a phantom "c120:audio" chapter beside the real one. The Downloads screen
+  /// is the one place that asks for them, so the megabytes are never hidden.
+  Future<List<SavedChapter>> listChapters({
+    bool includeNarration = false,
+  }) async {
     final db = await database;
     final rows = await db.query(
       DownloadsSchema.savedChapters,
-      where: '${DownloadsSchema.colScopeId} = ?',
-      whereArgs: [scopeId],
+      where: includeNarration
+          ? '${DownloadsSchema.colScopeId} = ?'
+          : '${DownloadsSchema.colScopeId} = ? AND '
+              '${DownloadsSchema.colKind} IS NOT ?',
+      whereArgs: [scopeId, if (!includeNarration) kAudioDownloadKind],
       orderBy: '${DownloadsSchema.colCreatedAt} DESC',
     );
     return rows.map(SavedChapter.fromRow).toList();
@@ -455,14 +527,17 @@ class DownloadsStore {
       SELECT ${DownloadsSchema.colSourceId}, ${DownloadsSchema.colSeriesKey},
              MAX(${DownloadsSchema.colSeriesTitle}) AS series_title,
              SUM(${DownloadsSchema.colBytes}) AS total_bytes,
-             COUNT(*) AS chapter_count,
+             -- A saved narration's bytes are real and counted above; it is
+             -- not another chapter, so it is not counted here.
+             SUM(CASE WHEN ${DownloadsSchema.colKind} IS ? THEN 0 ELSE 1 END)
+               AS chapter_count,
              SUM(${DownloadsSchema.colPinned}) AS pinned_count
       FROM ${DownloadsSchema.savedChapters}
       WHERE ${DownloadsSchema.colScopeId} = ? AND ${DownloadsSchema.colState} = ?
       GROUP BY ${DownloadsSchema.colSourceId}, ${DownloadsSchema.colSeriesKey}
       ORDER BY total_bytes DESC
       ''',
-      [scopeId, DownloadChapterState.complete.wire],
+      [kAudioDownloadKind, scopeId, DownloadChapterState.complete.wire],
     );
     return rows
         .map(
@@ -517,12 +592,22 @@ class DownloadsStore {
     // unhandled error in the reader.
     try {
       final db = await database;
+      // The chapter and its narration together. The readers only ever know
+      // the chapter's own key, so stamping just that row left a saved
+      // narration with no `read_at` — exempt from read-then-expire forever,
+      // megabytes outliving the text they belong to.
       await db.update(
         DownloadsSchema.savedChapters,
         {DownloadsSchema.colReadAt: DateTime.now().toUtc().toIso8601String()},
         where: '${DownloadsSchema.colScopeId} = ? AND ${DownloadsSchema.colSourceId} = ? AND '
-            '${DownloadsSchema.colSeriesKey} = ? AND ${DownloadsSchema.colChapterKey} = ?',
-        whereArgs: [scopeId, id.sourceId, id.seriesKey, id.chapterKey],
+            '${DownloadsSchema.colSeriesKey} = ? AND ${DownloadsSchema.colChapterKey} IN (?, ?)',
+        whereArgs: [
+          scopeId,
+          id.sourceId,
+          id.seriesKey,
+          id.chapterKey,
+          audioIdentity(id).chapterKey,
+        ],
       );
     } catch (_) {
       // Retried next time this chapter reaches read_complete.
@@ -536,12 +621,20 @@ class DownloadsStore {
     // (see OpenChapterScope) — must never surface as an unhandled error.
     try {
       final db = await database;
+      // Both rows, for the same reason [markRead] stamps both: a re-read
+      // must not leave the narration to expire out from under the listener.
       await db.update(
         DownloadsSchema.savedChapters,
         {DownloadsSchema.colReadAt: null},
         where: '${DownloadsSchema.colScopeId} = ? AND ${DownloadsSchema.colSourceId} = ? AND '
-            '${DownloadsSchema.colSeriesKey} = ? AND ${DownloadsSchema.colChapterKey} = ?',
-        whereArgs: [scopeId, id.sourceId, id.seriesKey, id.chapterKey],
+            '${DownloadsSchema.colSeriesKey} = ? AND ${DownloadsSchema.colChapterKey} IN (?, ?)',
+        whereArgs: [
+          scopeId,
+          id.sourceId,
+          id.seriesKey,
+          id.chapterKey,
+          audioIdentity(id).chapterKey,
+        ],
       );
     } catch (_) {
       // If the read-then-expire sweep beats a retry to it, the chapter is

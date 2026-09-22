@@ -447,7 +447,11 @@ class DownloadQueueController extends Notifier<DownloadQueueState> {
       for (final chapter in batch) {
         if (chapter.kind.isNovel) {
           await _primeNovelWindow(chapter, pending);
-        } else {
+        } else if (!chapter.kind.isAudio) {
+          // Narration has no window: one file per chapter, fetched on its
+          // own. Treated as manga here it asked for manifests of chapter
+          // keys no source has, and the failure rested the bulk bucket for
+          // every real manga download queued beside it.
           await _primeManifestWindow(chapter, pending);
         }
       }
@@ -648,11 +652,22 @@ class DownloadQueueController extends Notifier<DownloadQueueState> {
   /// only difference a window makes down here. Everything after the fetch is
   /// identical either way, deliberately: a whole-book download is not a
   /// separate pipeline, it is this one with fewer round trips.
-  /// One chapter's narration: a single opus, stored like any other blob.
+  /// One chapter's narration: the opus and the timing map it was rendered
+  /// with, stored as the audio row's two blobs.
   ///
   /// Its own row rather than a page on the text row, so the two download,
   /// retry, fail and delete independently — and so a reader is never kept
   /// from a chapter's TEXT while two megabytes of speech arrive.
+  ///
+  /// The server is asked with the CHAPTER's key, never the row's. The row is
+  /// keyed `<chapter>:audio` so it cannot collide with the text row; the
+  /// server has never heard of that key and answers 404, which is why every
+  /// saved narration used to fail as "not narrated yet".
+  ///
+  /// The timing map is fetched first and saved with the audio: the reader's
+  /// follow-along highlight needs it, there is no network to ask when the
+  /// phone is offline, and a later re-render on the server would hand back a
+  /// map that no longer matches these bytes.
   ///
   /// Nothing else in the queue learns a new shape: the same request gate, the
   /// same retry bound, the same completeness guard, the same blob store with
@@ -662,18 +677,18 @@ class DownloadQueueController extends Notifier<DownloadQueueState> {
     SavedChapter chapter, {
     required bool reportsProgress,
   }) async {
-    final result = await _gate.run(
-      () => ref.read(novelsRepositoryProvider).audioBytes(
-            sourceId: chapter.sourceId,
-            seriesKey: chapter.seriesKey,
-            chapterKey: chapter.chapterKey,
+    final text = textIdentity(chapter.identity);
+    final timing = await _gate.run(
+      () => ref.read(novelsRepositoryProvider).audio(
+            sourceId: text.sourceId,
+            seriesKey: text.seriesKey,
+            chapterKey: text.chapterKey,
           ),
     );
-    if (result.isErr) {
-      return _recordChapterFailure(store, chapter, result.error.userMessage);
+    if (timing.isErr) {
+      return _recordChapterFailure(store, chapter, timing.error.userMessage);
     }
-    final bytes = result.value;
-    if (bytes.isEmpty) {
+    if (!timing.value.available) {
       // The server has no audio for this chapter. Not retryable: waiting will
       // not produce it, and a render has to be asked for.
       return _recordChapterFailure(
@@ -681,20 +696,48 @@ class DownloadQueueController extends Notifier<DownloadQueueState> {
       );
     }
 
+    final result = await _gate.run(
+      () => ref.read(novelsRepositoryProvider).audioBytes(
+            sourceId: text.sourceId,
+            seriesKey: text.seriesKey,
+            chapterKey: text.chapterKey,
+          ),
+    );
+    if (result.isErr) {
+      return _recordChapterFailure(store, chapter, result.error.userMessage);
+    }
+    final bytes = result.value;
+    if (bytes.isEmpty) {
+      return _recordChapterFailure(
+        store, chapter, 'This chapter has not been narrated yet.',
+      );
+    }
+
     await store.updateManifestInfo(
       rowId: chapter.rowId,
-      pageCount: 1,
+      pageCount: DownloadsStore.audioBlobCount,
       chapterNumber: chapter.chapterNumber,
       title: chapter.title,
     );
-    if (reportsProgress) _reportPageProgress(done: 0, total: 1);
+    if (reportsProgress) {
+      _reportPageProgress(done: 0, total: DownloadsStore.audioBlobCount);
+    }
 
     try {
       await store.saveAudio(rowId: chapter.rowId, bytes: bytes);
+      await store.saveAudioTiming(
+        rowId: chapter.rowId,
+        timing: timing.value.toJson(),
+      );
     } catch (error) {
       return _recordChapterFailure(store, chapter, 'Could not save the audio.');
     }
-    if (reportsProgress) _reportPageProgress(done: 1, total: 1);
+    if (reportsProgress) {
+      _reportPageProgress(
+        done: DownloadsStore.audioBlobCount,
+        total: DownloadsStore.audioBlobCount,
+      );
+    }
 
     if (_cancelledRowIds.contains(chapter.rowId)) {
       return _ChapterOutcome.cancelled;
@@ -863,7 +906,7 @@ class DownloadQueueController extends Notifier<DownloadQueueState> {
 
     final keys = <String>[];
     for (final row in pending) {
-      if (row.kind.isNovel) continue;
+      if (row.kind.isNovelSide) continue;
       if (row.sourceId != head.sourceId) continue;
       if (row.seriesKey != head.seriesKey) continue;
       if (_manifestWindow.containsKey(row.identity)) continue;
@@ -1056,6 +1099,40 @@ typedef ChapterQueueRequest = ({
   String? seriesTitle,
   DownloadKind kind,
 });
+
+/// What to queue to keep [chapter]'s narration on the phone: its TEXT as
+/// well as its audio.
+///
+/// Listening offline is the point of saving narration, and the reader opens a
+/// chapter from its text — audio alone would be a file the phone cannot play
+/// with the network off, and the follow-along highlight has nothing to light
+/// up without the words. Both go through `ensureQueued`, so text already on
+/// the phone is left exactly as it is. Text first, so the chapter is readable
+/// before its megabytes of speech arrive.
+List<ChapterQueueRequest> narrationDownloadRequests({
+  required ChapterIdentity chapter,
+  double? chapterNumber,
+  String? title,
+  String? seriesTitle,
+}) {
+  final text = textIdentity(chapter);
+  return [
+    (
+      id: text,
+      chapterNumber: chapterNumber,
+      title: title,
+      seriesTitle: seriesTitle,
+      kind: DownloadKind.novel,
+    ),
+    (
+      id: audioIdentity(text),
+      chapterNumber: chapterNumber,
+      title: title,
+      seriesTitle: seriesTitle,
+      kind: DownloadKind.audio,
+    ),
+  ];
+}
 
 final downloadQueueControllerProvider =
     NotifierProvider<DownloadQueueController, DownloadQueueState>(

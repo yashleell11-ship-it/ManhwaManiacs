@@ -14,22 +14,34 @@ import 'package:manhwamaniacs/features/novels/models/novel_audio.dart';
 /// carries it, and that player has to fetch the whole file through the JSON
 /// client first.
 ///
+/// A narration saved on the phone plays from [filePath] instead, with no
+/// network and no token: that is what makes a chapter listenable on a plane.
+///
 /// [onPosition] fires on every tick. The reader takes it as a raw millisecond
 /// count and does its own lookup rather than being handed a widget, so nothing
 /// here decides how a chapter is drawn.
 class NovelAudioPlayerBar extends StatefulWidget {
   const NovelAudioPlayerBar({
-    required this.url,
-    required this.headers,
     required this.audio,
     required this.onPosition,
     required this.muted,
     required this.rule,
+    this.url,
+    this.headers = const {},
+    this.filePath,
     super.key,
-  });
+  }) : assert(
+         url != null || filePath != null,
+         'a player needs something to play',
+       );
 
-  final String url;
+  /// Where to stream from when nothing is saved on the phone.
+  final String? url;
   final Map<String, String> headers;
+
+  /// The saved narration, when there is one. Wins over [url].
+  final String? filePath;
+
   final NovelAudio audio;
 
   /// Playhead position, or null when nothing is playing.
@@ -78,7 +90,12 @@ class _NovelAudioPlayerBarState extends State<NovelAudioPlayerBar> {
     try {
       // Nothing is fetched until here, so a reader who never presses play
       // never spends the bytes.
-      await player.setUrl(widget.url, headers: widget.headers);
+      final file = widget.filePath;
+      if (file != null) {
+        await player.setFilePath(file);
+      } else {
+        await player.setUrl(widget.url!, headers: widget.headers);
+      }
     } catch (_) {
       // Audio is an addition to the page. A failure leaves the chapter
       // readable and says so, rather than breaking the reader.

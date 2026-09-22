@@ -21,6 +21,7 @@ import 'package:manhwamaniacs/features/novels/utils/novel_book.dart';
 import 'package:manhwamaniacs/features/novels/utils/novel_progress.dart';
 import 'package:manhwamaniacs/features/novels/utils/novel_snippet.dart';
 import 'package:manhwamaniacs/features/novels/utils/novel_speaking.dart';
+import 'package:manhwamaniacs/features/novels/widgets/narration_save_button.dart';
 import 'package:manhwamaniacs/features/novels/widgets/novel_audio_player.dart';
 import 'package:manhwamaniacs/features/novels/widgets/novel_cast_panel.dart';
 import 'package:manhwamaniacs/features/novels/widgets/novel_chapter_view.dart';
@@ -699,39 +700,59 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
           seriesKey: chapter.seriesKey,
           chapterKey: chapter.chapterKey,
         );
-        final audio = ref.watch(novelAudioProvider(key)).valueOrNull;
-        final token = ref.read(authTokenStoreProvider).token;
-        if (audio == null ||
-            !audio.available ||
-            token == null ||
-            token.isEmpty) {
-          return const SizedBox.shrink();
+        // The phone's copy first: it plays with no network, and the timing
+        // map saved with it is the one those exact bytes were rendered with.
+        final playable = ref.watch(playableNovelAudioProvider(key)).valueOrNull;
+        if (playable == null) return const SizedBox.shrink();
+        final audio = playable.audio;
+        final file = playable.file;
+
+        String? url;
+        var headers = const <String, String>{};
+        if (file == null) {
+          final token = ref.read(authTokenStoreProvider).token;
+          if (token == null || token.isEmpty) return const SizedBox.shrink();
+          final base = ref.read(apiBaseUrlProvider);
+          final trimmed =
+              base.endsWith('/') ? base.substring(0, base.length - 1) : base;
+          // Query parameters, never path segments: connector keys are opaque
+          // and routinely contain slashes.
+          final query = Uri(
+            queryParameters: {
+              'source': chapter.sourceId,
+              'series': chapter.seriesKey,
+              'chapter': chapter.chapterKey,
+            },
+          ).query;
+          url = '$trimmed/novels/audio/file?$query';
+          headers = {'Authorization': 'Bearer $token'};
         }
-        final base = ref.read(apiBaseUrlProvider);
-        final trimmed =
-            base.endsWith('/') ? base.substring(0, base.length - 1) : base;
-        // Query parameters, never path segments: connector keys are opaque
-        // and routinely contain slashes.
-        final query = Uri(
-          queryParameters: {
-            'source': chapter.sourceId,
-            'series': chapter.seriesKey,
-            'chapter': chapter.chapterKey,
-          },
-        ).query;
         return ColoredBox(
           // Opaque for the same reason the chrome's own bars are: prose has to
           // stop showing through a control for it to read as one.
           color: surface.bg,
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
-            child: NovelAudioPlayerBar(
-              url: '$trimmed/novels/audio/file?$query',
-              headers: {'Authorization': 'Bearer $token'},
-              audio: audio,
-              muted: surface.muted,
-              rule: surface.rule,
-              onPosition: (ms) => _follower.onPosition(ms, audio),
+            padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
+            child: Row(
+              children: [
+                Expanded(
+                  child: NovelAudioPlayerBar(
+                    url: url,
+                    headers: headers,
+                    filePath: file?.path,
+                    audio: audio,
+                    muted: surface.muted,
+                    rule: surface.rule,
+                    onPosition: (ms) => _follower.onPosition(ms, audio),
+                  ),
+                ),
+                NarrationSaveButton(
+                  chapter: key,
+                  color: surface.muted,
+                  chapterNumber: chapter.chapterNumber,
+                  title: chapter.title,
+                ),
+              ],
             ),
           ),
         );
@@ -1013,18 +1034,21 @@ class _ChapterHeading extends StatelessWidget {
                 seriesKey: chapter.seriesKey,
                 chapterKey: chapter.chapterKey,
               );
-              final audio = ref.watch(novelAudioProvider(key)).valueOrNull;
-              if (audio == null || !audio.available) {
-                return const SizedBox.shrink();
-              }
+              final playable =
+                  ref.watch(playableNovelAudioProvider(key)).valueOrNull;
+              if (playable == null) return const SizedBox.shrink();
               return Padding(
                 padding: const EdgeInsets.only(top: 18),
                 child: Center(
                   child: OutlinedButton.icon(
                     onPressed: onListen,
                     icon: const Icon(Icons.headphones_rounded, size: 18),
+                    // "saved" so a chapter says it will play with the network
+                    // off before anybody tries it on a plane.
                     label: Text(
-                      'Listen to this chapter${_spoken(audio.totalMs)}',
+                      'Listen to this chapter'
+                      '${_spoken(playable.audio.totalMs)}'
+                      '${playable.file != null ? ' · saved' : ''}',
                     ),
                     style: OutlinedButton.styleFrom(
                       foregroundColor: surface.ink,

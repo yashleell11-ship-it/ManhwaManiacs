@@ -2,10 +2,24 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:manhwamaniacs/app/theme/app_presets.dart';
 import 'package:manhwamaniacs/features/downloads/models/chapter_selection.dart';
+import 'package:manhwamaniacs/features/downloads/models/download_chapter_state.dart';
+import 'package:manhwamaniacs/features/downloads/providers/downloads_scope.dart';
+import 'package:manhwamaniacs/features/downloads/providers/series_download_status_provider.dart';
+import 'package:manhwamaniacs/features/downloads/queue/download_queue_controller.dart';
 import 'package:manhwamaniacs/features/novels/providers/series_audio_provider.dart';
 import 'package:manhwamaniacs/shared/providers/repository_providers.dart';
 
-/// Choose which chapters to have narrated.
+/// What the sheet is for right now.
+enum AudiobookPickerMode {
+  /// Ask the render PC to narrate chapters that have no audio yet.
+  narrate,
+
+  /// Keep audio that already exists on this phone, for listening offline.
+  save,
+}
+
+/// Choose which chapters to have narrated, or which narrations to keep on
+/// the phone.
 ///
 /// Reuses the selection machinery the download picker already has — the same
 /// controller, the same "next ten" idea — because "pick some chapters" should
@@ -17,6 +31,11 @@ import 'package:manhwamaniacs/shared/providers/repository_providers.dart';
 /// minutes rather than hidden. And a chapter whose TEXT is not on the server
 /// cannot be narrated at all: it is shown greyed with the reason, rather than
 /// being selectable and then silently refused.
+///
+/// Saving is the other half, and costs the server nothing but bandwidth: only
+/// chapters that already have audio can be saved, and a saved one says so.
+/// When the server has no render worker, saving is all this sheet offers —
+/// and it says plainly why narrating is not.
 class AudiobookPickerSheet extends ConsumerStatefulWidget {
   const AudiobookPickerSheet({
     super.key,
@@ -24,12 +43,15 @@ class AudiobookPickerSheet extends ConsumerStatefulWidget {
     required this.seriesKey,
     required this.chapters,
     required this.cached,
+    this.canRender = true,
+    this.seriesTitle,
   });
 
   final String sourceId;
   final String seriesKey;
 
-  /// Every chapter in the book, in reading order.
+  /// Every chapter in the book, in reading order. `isDownloaded` means
+  /// "already has audio on the server" on this sheet.
   final List<SelectableChapter> chapters;
 
   /// Chapter keys whose text is on the server. Only these can be narrated —
@@ -37,12 +59,20 @@ class AudiobookPickerSheet extends ConsumerStatefulWidget {
   /// make the server scrape the source.
   final Set<String> cached;
 
+  /// Whether the server can make new audio at all.
+  final bool canRender;
+
+  /// For the Downloads screen's heading over what gets saved.
+  final String? seriesTitle;
+
   static Future<void> show(
     BuildContext context, {
     required String sourceId,
     required String seriesKey,
     required List<SelectableChapter> chapters,
     required Set<String> cached,
+    bool canRender = true,
+    String? seriesTitle,
   }) {
     return showModalBottomSheet<void>(
       context: context,
@@ -52,6 +82,8 @@ class AudiobookPickerSheet extends ConsumerStatefulWidget {
         seriesKey: seriesKey,
         chapters: chapters,
         cached: cached,
+        canRender: canRender,
+        seriesTitle: seriesTitle,
       ),
     );
   }
@@ -69,6 +101,9 @@ const int _minutesPerChapter = 9;
 class _AudiobookPickerSheetState extends ConsumerState<AudiobookPickerSheet> {
   final ChapterSelectionController _selection = ChapterSelectionController();
   bool _sending = false;
+  late AudiobookPickerMode _mode = widget.canRender
+      ? AudiobookPickerMode.narrate
+      : AudiobookPickerMode.save;
 
   @override
   void initState() {
@@ -86,13 +121,36 @@ class _AudiobookPickerSheetState extends ConsumerState<AudiobookPickerSheet> {
 
   void _onSelectionChanged() => setState(() {});
 
+  /// Saved-narration state per chapter key, from the phone's own store.
+  Map<String, ChapterDownloadStatus> get _saved {
+    final series = (sourceId: widget.sourceId, seriesKey: widget.seriesKey);
+    return ref.watch(seriesNarrationStatusProvider(series)).valueOrNull ??
+        const {};
+  }
+
   /// The chapters that can actually be narrated: text on the server, and no
   /// audio yet.
-  List<SelectableChapter> get _eligible => [
+  List<SelectableChapter> get _narratable => [
     for (final chapter in widget.chapters)
       if (widget.cached.contains(chapter.key) && !chapter.isDownloaded)
         chapter,
   ];
+
+  /// The chapters whose audio can be saved: narrated, and not already on the
+  /// phone or on its way. A FAILED save is offered again — that is the retry.
+  List<SelectableChapter> _savable(Map<String, ChapterDownloadStatus> saved) => [
+    for (final chapter in widget.chapters)
+      if (chapter.isDownloaded &&
+          (saved[chapter.key] == null ||
+              saved[chapter.key]!.state == DownloadChapterState.failed))
+        chapter,
+  ];
+
+  void _switchTo(AudiobookPickerMode mode) {
+    if (mode == _mode) return;
+    _selection.clearSelection();
+    setState(() => _mode = mode);
+  }
 
   Future<void> _send() async {
     final keys = _selection.selected.toList(growable: false);
@@ -129,6 +187,43 @@ class _AudiobookPickerSheetState extends ConsumerState<AudiobookPickerSheet> {
     );
   }
 
+  /// Queue the selected chapters' audio — and their text, which offline
+  /// listening needs just as much (see [narrationDownloadRequests]).
+  Future<void> _save() async {
+    final selected = _selection.selected;
+    if (selected.isEmpty || _sending) return;
+    final requests = [
+      for (final chapter in widget.chapters)
+        if (selected.contains(chapter.key))
+          ...narrationDownloadRequests(
+            chapter: (
+              sourceId: widget.sourceId,
+              seriesKey: widget.seriesKey,
+              chapterKey: chapter.key,
+            ),
+            chapterNumber: chapter.number,
+            title: chapter.title,
+            seriesTitle: widget.seriesTitle,
+          ),
+    ];
+    setState(() => _sending = true);
+    await ref
+        .read(downloadQueueControllerProvider.notifier)
+        .enqueueChapters(requests);
+    if (!mounted) return;
+    final count = selected.length;
+    Navigator.of(context).pop();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          count == 1
+              ? 'Saving the audio of 1 chapter to this phone.'
+              : 'Saving the audio of $count chapters to this phone.',
+        ),
+      ),
+    );
+  }
+
   /// Say what happened to every chapter, not just the good half.
   String _outcome(int queued, Map<String, String> skipped) {
     final parts = <String>[
@@ -143,7 +238,12 @@ class _AudiobookPickerSheetState extends ConsumerState<AudiobookPickerSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final eligible = _eligible;
+    final saved = _saved;
+    final saving = _mode == AudiobookPickerMode.save;
+    // Saving needs somewhere to save into; the rest of the app hides its
+    // download controls with no active profile, and so does this.
+    final canSave = ref.watch(downloadsStoreProvider) != null;
+    final eligible = saving ? _savable(saved) : _narratable;
     final count = _selection.count;
     return SafeArea(
       child: ConstrainedBox(
@@ -159,7 +259,7 @@ class _AudiobookPickerSheetState extends ConsumerState<AudiobookPickerSheet> {
                 children: [
                   Expanded(
                     child: Text(
-                      'Make audiobook',
+                      'Audiobook',
                       style: Theme.of(context).textTheme.titleMedium,
                     ),
                   ),
@@ -170,19 +270,62 @@ class _AudiobookPickerSheetState extends ConsumerState<AudiobookPickerSheet> {
                 ],
               ),
             ),
+            if (widget.canRender && canSave)
+              Padding(
+                padding: EdgeInsets.fromLTRB(
+                  context.space.md,
+                  0,
+                  context.space.md,
+                  context.space.sm,
+                ),
+                child: SegmentedButton<AudiobookPickerMode>(
+                  segments: const [
+                    ButtonSegment(
+                      value: AudiobookPickerMode.narrate,
+                      label: Text('Narrate'),
+                      icon: Icon(Icons.graphic_eq_rounded),
+                    ),
+                    ButtonSegment(
+                      value: AudiobookPickerMode.save,
+                      label: Text('Save to phone'),
+                      icon: Icon(Icons.download_for_offline_outlined),
+                    ),
+                  ],
+                  selected: {_mode},
+                  onSelectionChanged: (modes) => _switchTo(modes.first),
+                ),
+              ),
+            if (!widget.canRender)
+              Padding(
+                padding: EdgeInsets.fromLTRB(
+                  context.space.md,
+                  0,
+                  context.space.md,
+                  context.space.sm,
+                ),
+                child: Text(
+                  'Narration of new chapters is not available right now. '
+                  'Chapters that already have audio can be saved to this '
+                  'phone.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
             Padding(
               padding: EdgeInsets.symmetric(horizontal: context.space.md),
               child: Wrap(
                 spacing: context.space.xs,
                 children: [
-                  _chip(
-                    'Next $kQuickRangeChapterCount',
-                    () => _selection.replaceWith(
-                      nextUnreadUndownloadedKeys(eligible),
+                  if (!saving)
+                    _chip(
+                      'Next $kQuickRangeChapterCount',
+                      () => _selection.replaceWith(
+                        nextUnreadUndownloadedKeys(eligible),
+                      ),
                     ),
-                  ),
                   _chip(
-                    'All un-narrated (${eligible.length})',
+                    saving
+                        ? 'All narrated (${eligible.length})'
+                        : 'All un-narrated (${eligible.length})',
                     () => _selection.replaceWith(eligible.map((c) => c.key)),
                   ),
                   _chip('None', _selection.clearSelection),
@@ -195,32 +338,9 @@ class _AudiobookPickerSheetState extends ConsumerState<AudiobookPickerSheet> {
                 itemCount: widget.chapters.length,
                 itemBuilder: (context, index) {
                   final chapter = widget.chapters[index];
-                  final narratable = widget.cached.contains(chapter.key);
-                  final already = chapter.isDownloaded;
-                  return CheckboxListTile(
-                    dense: true,
-                    value: _selection.isSelected(chapter.key),
-                    // Not selectable is not the same as not shown: a reader
-                    // looking for a chapter needs to see it and be told why
-                    // it cannot be narrated yet.
-                    onChanged: !narratable || already
-                        ? null
-                        : (_) => _selection.toggle(chapter.key),
-                    title: Text(
-                      chapter.title ??
-                          'Chapter ${chapter.number?.toString() ?? ''}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    subtitle: already
-                        ? const Text('Already narrated')
-                        : narratable
-                        ? null
-                        : const Text('Download the text first'),
-                    secondary: already
-                        ? const Icon(Icons.headphones_rounded, size: 18)
-                        : null,
-                  );
+                  return saving
+                      ? _saveRow(chapter, saved[chapter.key])
+                      : _narrateRow(chapter, saved[chapter.key]);
                 },
               ),
             ),
@@ -228,7 +348,7 @@ class _AudiobookPickerSheetState extends ConsumerState<AudiobookPickerSheet> {
               padding: EdgeInsets.all(context.space.md),
               child: Column(
                 children: [
-                  if (count > 0)
+                  if (count > 0 && !saving)
                     Padding(
                       padding: EdgeInsets.only(bottom: context.space.xs),
                       child: Text(
@@ -237,14 +357,37 @@ class _AudiobookPickerSheetState extends ConsumerState<AudiobookPickerSheet> {
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ),
+                  if (count > 0 && saving)
+                    Padding(
+                      padding: EdgeInsets.only(bottom: context.space.xs),
+                      child: Text(
+                        // Foreground-only, as every download here is: a
+                        // sideloaded iPhone gives the app no dependable time
+                        // in the background.
+                        'Saves while the app is open. The text is saved too, '
+                        'so the chapter plays and follows along offline.',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
                   SizedBox(
                     width: double.infinity,
                     child: FilledButton.icon(
-                      onPressed: count == 0 || _sending ? null : _send,
-                      icon: const Icon(Icons.graphic_eq_rounded),
+                      onPressed: count == 0 || _sending
+                          ? null
+                          : saving
+                          ? _save
+                          : _send,
+                      icon: Icon(
+                        saving
+                            ? Icons.download_for_offline_outlined
+                            : Icons.graphic_eq_rounded,
+                      ),
                       label: Text(
                         count == 0
                             ? 'Select chapters'
+                            : saving
+                            ? 'Save audio of $count '
+                                  '${count == 1 ? "chapter" : "chapters"}'
                             : 'Make audiobook of $count '
                                   '${count == 1 ? "chapter" : "chapters"}',
                       ),
@@ -256,6 +399,64 @@ class _AudiobookPickerSheetState extends ConsumerState<AudiobookPickerSheet> {
           ],
         ),
       ),
+    );
+  }
+
+  Widget _title(SelectableChapter chapter) => Text(
+    chapter.title ?? 'Chapter ${chapter.number?.toString() ?? ''}',
+    maxLines: 1,
+    overflow: TextOverflow.ellipsis,
+  );
+
+  Widget _narrateRow(SelectableChapter chapter, ChapterDownloadStatus? saved) {
+    final narratable = widget.cached.contains(chapter.key);
+    final already = chapter.isDownloaded;
+    return CheckboxListTile(
+      dense: true,
+      value: _selection.isSelected(chapter.key),
+      // Not selectable is not the same as not shown: a reader looking for a
+      // chapter needs to see it and be told why it cannot be narrated yet.
+      onChanged: !narratable || already
+          ? null
+          : (_) => _selection.toggle(chapter.key),
+      title: _title(chapter),
+      subtitle: already
+          ? Text(
+              saved?.state == DownloadChapterState.complete
+                  ? 'Already narrated · saved on this phone'
+                  : 'Already narrated',
+            )
+          : narratable
+          ? null
+          : const Text('Download the text first'),
+      secondary: already
+          ? const Icon(Icons.headphones_rounded, size: 18)
+          : null,
+    );
+  }
+
+  Widget _saveRow(SelectableChapter chapter, ChapterDownloadStatus? saved) {
+    final state = saved?.state;
+    final selectable = chapter.isDownloaded &&
+        (state == null || state == DownloadChapterState.failed);
+    return CheckboxListTile(
+      dense: true,
+      value: _selection.isSelected(chapter.key),
+      onChanged: selectable ? (_) => _selection.toggle(chapter.key) : null,
+      title: _title(chapter),
+      subtitle: Text(
+        switch (state) {
+          DownloadChapterState.complete => 'Saved on this phone',
+          DownloadChapterState.queued ||
+          DownloadChapterState.downloading => 'Saving…',
+          DownloadChapterState.failed => 'Could not be saved — select to retry',
+          null when chapter.isDownloaded => 'Narrated',
+          null => 'Not narrated yet',
+        },
+      ),
+      secondary: state == DownloadChapterState.complete
+          ? const Icon(Icons.download_done_rounded, size: 18)
+          : null,
     );
   }
 

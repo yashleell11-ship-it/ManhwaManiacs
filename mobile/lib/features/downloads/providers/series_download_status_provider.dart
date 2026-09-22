@@ -38,6 +38,27 @@ final seriesChapterDownloadStatusProvider = FutureProvider.autoDispose
   };
 });
 
+/// [seriesChapterDownloadStatusProvider]'s counterpart for saved NARRATION:
+/// the state of each chapter's audio row, keyed by the CHAPTER's key (not the
+/// row's `:audio` one), so a chapter list can ask about audio in the same
+/// terms it asks about text.
+final seriesNarrationStatusProvider = FutureProvider.autoDispose
+    .family<Map<String, ChapterDownloadStatus>, SeriesIdentity>((ref, series) async {
+  final store = ref.watch(downloadsStoreProvider);
+  ref.watch(downloadQueueControllerProvider.select((s) => s.queueRevision));
+  if (store == null) return const {};
+
+  final chapters = await store.listChapters(includeNarration: true);
+  return {
+    for (final chapter in chapters)
+      if (chapter.kind.isAudio &&
+          chapter.sourceId == series.sourceId &&
+          chapter.seriesKey == series.seriesKey)
+        textIdentity(chapter.identity).chapterKey:
+            (state: chapter.state, error: chapter.error),
+  };
+});
+
 /// Which chapter of [series] the queue is fetching right now and how far into
 /// it, or `null` when the loop is elsewhere (another series, or idle).
 ///

@@ -221,6 +221,8 @@ class _CurrentChapterProgress extends ConsumerWidget {
           // instead of counting to one.
           chapter.kind.isNovel
               ? '${label.primary} · ${queue.pagesDone > 0 ? 'saving the text…' : 'fetching the text…'}'
+              : chapter.kind.isAudio
+              ? '${label.primary} · ${queue.pagesDone > 0 ? 'saving the audio…' : 'fetching the audio…'}'
               : total > 0
                   ? '${label.primary} · page ${queue.pagesDone} of $total'
                   : '${label.primary} · reading chapter details…',

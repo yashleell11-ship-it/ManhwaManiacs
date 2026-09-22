@@ -36,6 +36,19 @@ class NovelAudioSegment {
     );
   }
 
+  /// The wire shape [NovelAudioSegment.fromJson] reads, so a map saved with
+  /// the audio on the phone reads back exactly as the server sent it.
+  Map<String, dynamic> toJson() => {
+        'i': index,
+        'start_ms': startMs,
+        'end_ms': endMs,
+        'p': paragraph,
+        's': start,
+        'e': end,
+        'speech': isSpeech,
+        if (speaker != null) 'speaker': speaker,
+      };
+
   final int index;
   final int startMs;
   final int endMs;
@@ -72,6 +85,20 @@ class NovelAudio {
           : const <NovelAudioSegment>[],
     );
   }
+
+  /// What is saved beside a chapter's audio on the phone.
+  ///
+  /// The timing map belongs to ONE render, and the server's copy is replaced
+  /// when a chapter is re-rendered. Keeping the map the saved audio was made
+  /// with, rather than asking the server again at play time, is what keeps
+  /// the highlight on the words being spoken — and what makes it work with
+  /// no network at all.
+  Map<String, dynamic> toJson() => {
+        'available': available,
+        'total_ms': totalMs,
+        'bytes': bytes,
+        'segments': [for (final segment in segments) segment.toJson()],
+      };
 
   static const NovelAudio none = NovelAudio(
     available: false,

@@ -19,7 +19,10 @@ final downloadedSeriesProvider =
   ref.watch(downloadQueueControllerProvider.select((s) => s.queueRevision));
   if (store == null) return const [];
 
-  final chapters = await store.listChapters();
+  // Narration included: this is the one screen that must account for every
+  // byte on the phone, and the only place a saved narration can be removed
+  // on its own once its chapter is gone from view.
+  final chapters = await store.listChapters(includeNarration: true);
   final bySeries = <String, List<SavedChapter>>{};
   final order = <String>[];
   for (final chapter in chapters) {
@@ -75,7 +78,8 @@ List<SavedChapter> chaptersInMode(
   ContentModeScope scope,
 ) {
   if (!scope.novelsEnabled) return rows;
-  return rows.where((c) => c.kind.isNovel == scope.isNovel).toList();
+  // Narration belongs with the books it reads, not among the manga.
+  return rows.where((c) => c.kind.isNovelSide == scope.isNovel).toList();
 }
 
 /// [groups] reduced to the chapters of the active mode, dropping any series
