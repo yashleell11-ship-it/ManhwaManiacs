@@ -120,6 +120,17 @@ def bulk_limit() -> str:
     return get_settings().rate_limit_bulk
 
 
+def suggest_limit() -> str:
+    """Limit for POST /library/suggest.
+
+    Its own bucket because one accepted request is one *paid* API call. The
+    other buckets here protect somebody else's server or this box's disk; this
+    one protects a bill, which is the only resource in the app that does not
+    recover on its own. Sized in ``Settings.rate_limit_suggest``
+    (MM_RATE_LIMIT_SUGGEST)."""
+    return get_settings().rate_limit_suggest
+
+
 def ocr_limit() -> str:
     """Limit for POST /ocr/chapter.
 

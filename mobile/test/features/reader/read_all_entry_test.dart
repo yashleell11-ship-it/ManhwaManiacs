@@ -6,6 +6,7 @@ import 'package:manhwamaniacs/app/router/routes.dart';
 import 'package:manhwamaniacs/core/utils/pagination.dart';
 import 'package:manhwamaniacs/core/utils/result.dart';
 import 'package:manhwamaniacs/features/library/models/followed_series.dart';
+import 'package:manhwamaniacs/features/library/models/suggestion.dart';
 import 'package:manhwamaniacs/features/library/repositories/library_repository.dart';
 import 'package:manhwamaniacs/features/reader/models/reader_chapter.dart';
 import 'package:manhwamaniacs/features/reader/widgets/read_all_button.dart';
@@ -165,6 +166,19 @@ class _FakeLibraryRepository implements LibraryRepository {
 
   @override
   dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError();
+
+  @override
+  Future<Result<SuggestionResult>> suggest(String prompt, {int limit = 6}) async =>
+      const Ok(SuggestionResult());
+
+  @override
+  Future<Result<SuggestionAvailability>> suggestAvailability() async => const Ok(
+        SuggestionAvailability(
+          available: false,
+          reason: 'not_configured',
+          remainingToday: 0,
+        ),
+      );
 }
 
 void main() {

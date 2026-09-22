@@ -8,19 +8,25 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from core.profile_context import require_profile_context
+from core.rate_limit import limiter, suggest_limit
 from services.followed_series_service import (
     FollowedSeriesService,
     get_followed_series_service,
+)
+from services.suggestion_service import (
+    SuggestionService,
+    get_suggestion_service,
 )
 from utils.api_pagination import set_list_total_header
 
 router = APIRouter(prefix="/library", tags=["library"])
 
 ServiceDep = Annotated[FollowedSeriesService, Depends(get_followed_series_service)]
+SuggestDep = Annotated[SuggestionService, Depends(get_suggestion_service)]
 
 
 class FollowRequest(BaseModel):
@@ -158,6 +164,49 @@ def recommendations(
     items = service.recommendations(limit=limit)
     set_list_total_header(response, len(items))
     return items
+
+
+class SuggestRequest(BaseModel):
+    prompt: str = Field(min_length=3, max_length=600)
+    limit: int = Field(default=6, ge=1, le=8)
+
+
+@router.get("/suggest/availability")
+def suggest_availability(service: SuggestDep) -> dict[str, object]:
+    """Whether AI suggestions can run, without running one.
+
+    Free and local: it reads whether a key is configured and how much of
+    today's allowance is left. The clients call it on mount and hide the
+    prompt box when it says no, rather than offering a button that 503s —
+    an unconfigured key is a deployment state, not an error to surface at
+    the moment somebody finally types a sentence.
+    """
+    return service.availability()
+
+
+@router.post("/suggest")
+@limiter.limit(suggest_limit)
+def suggest(
+    body: SuggestRequest,
+    request: Request,
+    response: Response,  # slowapi injects X-RateLimit-* headers into this
+    service: SuggestDep,
+) -> dict[str, object]:
+    """Describe what you feel like reading; get series this server can open.
+
+    Every returned item is a real row in the catalog cache, so every card
+    opens. Titles the model names that are not on that shelf are counted in
+    ``dropped`` and discarded — a suggestion nobody can read is worse than
+    one fewer suggestion.
+
+    Rate-limited on its own bucket and capped on its own daily ledger,
+    because one accepted request here is one paid API call.
+    """
+    return service.suggest(
+        body.prompt,
+        base_url=str(request.base_url),
+        limit=body.limit,
+    )
 
 
 @router.get("/statistics")

@@ -8,6 +8,7 @@
  * mutations (`PATCH`/`DELETE /library/...`).
  */
 
+import type { GlobalSearchItem } from "@/features/sources/types";
 import type { SeriesId } from "@/types/api";
 
 export type { SeriesId };
@@ -301,4 +302,42 @@ export interface Statistics {
   by_series: SeriesReading[];
   /** The last few sessions, deliberately NOT clipped to the window. */
   recent_sessions: RecentSession[];
+}
+
+/**
+ * One AI suggestion: a series this server can actually open, plus why.
+ *
+ * It extends `GlobalSearchItem` because that is literally what it is — the
+ * server only ever picks suggestions out of its own catalog cache, so a
+ * suggestion opens through the same route a search hit does. Titles the model
+ * named that no configured source carries never arrive here; they are counted
+ * in `dropped` and discarded, because a card that cannot be opened is worse
+ * than one fewer card.
+ */
+export interface Suggestion extends GlobalSearchItem {
+  /** The model's one line on why this fits. May be empty. */
+  why: string;
+}
+
+export interface SuggestResponse {
+  items: Suggestion[];
+  /** How many titles the model named that nothing here carries. */
+  dropped: number;
+  /** Requests left in today's allowance. */
+  remaining_today: number;
+  model: string;
+}
+
+/**
+ * Whether suggestions can run, answered without running one.
+ *
+ * An unconfigured key is a deployment state, not an error — so the client
+ * hides the prompt box rather than offering a button that 503s on tap.
+ */
+export interface SuggestAvailability {
+  available: boolean;
+  /** `ok` · `not_configured` · `budget_exhausted`. */
+  reason: string;
+  remaining_today: number;
+  daily_ceiling: number;
 }

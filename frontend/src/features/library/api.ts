@@ -14,6 +14,8 @@ import type {
   SeriesListResponse,
   SeriesSort,
   Statistics,
+  SuggestAvailability,
+  SuggestResponse,
 } from "./types";
 
 /**
@@ -109,6 +111,19 @@ export const libraryApi = {
     http.get<RecommendationsResponse>("/library/recommendations", {
       query: { limit },
     }),
+
+  /**
+   * Describe what you feel like reading; get series this server can open.
+   *
+   * One call is one paid API request on the server, so this is only ever
+   * fired by an explicit submit — never on mount, never per keystroke.
+   */
+  suggest: (body: { prompt: string; limit?: number }) =>
+    http.post<SuggestResponse>("/library/suggest", body),
+
+  /** Whether `suggest` can run. Free and local on the server. */
+  suggestAvailability: () =>
+    http.get<SuggestAvailability>("/library/suggest/availability"),
 
   /**
    * Library shape + reading activity. `tz_offset_minutes` decides where a day

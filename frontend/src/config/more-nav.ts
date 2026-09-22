@@ -60,8 +60,8 @@ export const moreSections: MoreSection[] = [
       },
       {
         href: "/library/recommendations",
-        label: "Recommendations",
-        description: "Suggestions drawn from what you read.",
+        label: "Find something to read",
+        description: "Describe what you feel like; get suggestions.",
         icon: Heart,
       },
     ],

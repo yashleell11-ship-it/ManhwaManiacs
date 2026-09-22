@@ -865,6 +865,14 @@ NOT_SERIES_DERIVED = {
     "/updates/settings": "the instance-wide sweep singleton",
     "/updates/runs": "admin-only; counts per sweep, no series identity",
     "/updates/runs/{run_id}": "admin-only; counts for one sweep",
+    "/library/suggest/availability": (
+        "whether AI suggestions can run: a bool, a reason string and today's "
+        "remaining request count. It names no series and reads no catalog "
+        "table, so there is nothing for the gate to hide. The suggestions "
+        "THEMSELVES are gated three ways and walked by "
+        "tests/test_suggestion_service.py -- the adult rows never reach the "
+        "prompt, let alone the response"
+    ),
 }
 
 #: Every path this file actually drives, taken from the tables above so the

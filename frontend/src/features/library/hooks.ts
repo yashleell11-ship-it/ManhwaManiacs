@@ -161,6 +161,38 @@ export function useRecommendations(limit = 10) {
   });
 }
 
+/**
+ * Whether the AI suggestion box should be shown at all.
+ *
+ * Free on the server — a config flag and a counter, no network, no spend — so
+ * it is safe as a query, unlike the suggestion itself.
+ */
+export function useSuggestAvailability() {
+  return useQuery({
+    queryKey: [...DISCOVERY_KEY, "suggest-availability"],
+    queryFn: () => libraryApi.suggestAvailability(),
+    staleTime: 5 * 60_000,
+  });
+}
+
+/**
+ * Ask for suggestions. A MUTATION, deliberately, not a query: one call is one
+ * paid API request, and a query would re-fire on remount, refocus and retry.
+ * Nothing here runs until somebody presses the button.
+ */
+export function useSuggest() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { prompt: string; limit?: number }) => libraryApi.suggest(body),
+    onSuccess: () => {
+      // The day's allowance just moved, and the box shows what is left.
+      void queryClient.invalidateQueries({
+        queryKey: [...DISCOVERY_KEY, "suggest-availability"],
+      });
+    },
+  });
+}
+
 export function useReadingHistory(limit = 50) {
   return useQuery({
     queryKey: [...DISCOVERY_KEY, "reading-history", limit],

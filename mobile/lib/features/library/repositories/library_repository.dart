@@ -8,6 +8,7 @@ import 'package:manhwamaniacs/features/library/models/library_statistics.dart';
 import 'package:manhwamaniacs/features/library/models/reading_history_item.dart';
 import 'package:manhwamaniacs/features/library/models/recommendation.dart';
 import 'package:manhwamaniacs/features/library/models/series_detail.dart';
+import 'package:manhwamaniacs/features/library/models/suggestion.dart';
 import 'package:manhwamaniacs/features/library/models/tag.dart';
 
 /// The per-profile library — source-native (spec §4.2). A series is in the
@@ -47,6 +48,15 @@ abstract interface class LibraryRepository {
   Future<Result<List<FollowedSeries>>> recentlyUpdated({int limit = 10});
 
   Future<Result<List<RecommendationGenre>>> recommendations({int limit = 10});
+
+  /// Describe what you feel like reading; get series this server can open.
+  ///
+  /// One call here is one paid API request on the server, so this is only ever
+  /// fired by an explicit submit — never on mount, never per keystroke.
+  Future<Result<SuggestionResult>> suggest(String prompt, {int limit = 6});
+
+  /// Whether [suggest] can run. Free and local on the server; call it on mount.
+  Future<Result<SuggestionAvailability>> suggestAvailability();
 
   Future<Result<PagedResult<FollowedSeries>>> search(
     String query, {
