@@ -134,6 +134,35 @@ class Changelog(BaseModel):
 # consume the exact same source of truth.
 _RELEASE_NOTES: list[ChangelogEntry] = [
     ChangelogEntry(
+        version="3.3.0",
+        build=52,
+        date="September 2026",
+        highlights=[
+            "Narration can be saved to the phone and played with no "
+            "connection. Save a chapter from the button beside the player, or "
+            "several at once from the audiobook sheet. The lines still light "
+            "up as they are read, and saved narration shows up in Downloads "
+            "with its own remove button",
+            "On iPhone, narration keeps playing when the screen locks, and a "
+            "call or another app's sound pauses it instead of talking over it",
+            "History covers load on the phone — every one of them was blank. "
+            "The website now has the same shelf of books, and Continue picks "
+            "up where you stopped: the same page if you were partway through, "
+            "the next chapter if you had finished",
+            "When this server cannot narrate new chapters, the app says so "
+            "instead of accepting a request that would never run. Chapters "
+            "waiting for the narration PC say they are waiting, not in progress",
+            "In the voice list, a character without a chosen voice is marked "
+            "Automatic, and choosing Automatic voice now actually clears the "
+            "one you picked. If a change is refused, you are told why",
+            "A new search no longer shows the previous search's slower results "
+            "mixed in with its own for several seconds",
+            "LinkManga is gone: every series page and every search was blocked "
+            "before it could load. ManhuaNext, marked unreachable for days "
+            "after a short outage, is back",
+        ],
+    ),
+    ChangelogEntry(
         version="3.2.0",
         build=51,
         date="September 2026",
