@@ -56,4 +56,31 @@ void main() {
       );
     });
   });
+
+  group('historyCoverUrl', () {
+    test('resolves the relative proxy path production history rows carry', () {
+      // Every history row in production has this shape; unresolved it has no
+      // host and the cover renders as the broken-image placeholder.
+      expect(
+        historyCoverUrl(
+          'https://api.manhwamaniacs.xyz',
+          '/sources/asurascans/series/nano-machine-6f7fe6eb/cover',
+        ),
+        'https://api.manhwamaniacs.xyz/sources/asurascans/series/'
+        'nano-machine-6f7fe6eb/cover',
+      );
+    });
+
+    test('leaves an absolute cover URL untouched', () {
+      expect(
+        historyCoverUrl('http://127.0.0.1:8000', 'https://example.test/c.jpg'),
+        'https://example.test/c.jpg',
+      );
+    });
+
+    test('is null when the row has no cover', () {
+      expect(historyCoverUrl('http://127.0.0.1:8000', null), isNull);
+      expect(historyCoverUrl('http://127.0.0.1:8000', '  '), isNull);
+    });
+  });
 }

@@ -9,6 +9,20 @@ String? followedSeriesCoverUrl(String apiBaseUrl, FollowedSeries series) {
   return resolveApiResourceUrl(apiBaseUrl, series.coverUrl);
 }
 
+/// Resolves a reading-history row's `cover_url` to an absolute one, or null
+/// when the row has none.
+///
+/// `GET /reader/history` copies the cover straight out of
+/// `source_series_cache`, and in production that column holds the backend's
+/// RELATIVE `/sources/{source}/series/{series}/cover` proxy path. Handed to
+/// the image loader as-is it has no host, so every history cover showed the
+/// broken-image placeholder. Resolved here, before `SeriesCoverImage` adds
+/// its `?w=` — that only matches a URL ending in `/cover`, which still holds.
+String? historyCoverUrl(String apiBaseUrl, String? coverUrl) {
+  if (coverUrl == null || coverUrl.trim().isEmpty) return null;
+  return resolveApiResourceUrl(apiBaseUrl, coverUrl.trim());
+}
+
 /// Builds the absolute cover image URL for an online source series, matching
 /// the backend route `/sources/{source_id}/series/{series_id:path}/cover`.
 String sourceSeriesCoverUrl(String apiBaseUrl, String source, String seriesId) {

@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:manhwamaniacs/app/theme/app_colors.dart';
 import 'package:manhwamaniacs/app/theme/app_presets.dart';
 import 'package:manhwamaniacs/features/library/models/reading_history_item.dart';
+import 'package:manhwamaniacs/features/library/utils/cover_url.dart';
+import 'package:manhwamaniacs/shared/providers/core_providers.dart';
 import 'package:manhwamaniacs/shared/widgets/pressable.dart';
 import 'package:manhwamaniacs/shared/widgets/series_cover_image.dart';
 
@@ -35,7 +37,8 @@ class HistorySeriesCard extends ConsumerWidget {
   /// Open the book's page. Matches what a library cover does.
   final VoidCallback onTap;
 
-  /// Straight back into the chapter. The reason somebody opens history.
+  /// Back to where the reader stopped — the stored position, or the next
+  /// chapter when this one is finished. The reason somebody opens history.
   final VoidCallback onContinue;
 
   @override
@@ -43,6 +46,10 @@ class HistorySeriesCard extends ConsumerWidget {
     final progress = item.pageCount > 0
         ? (item.lastPage / item.pageCount).clamp(0.0, 1.0)
         : null;
+    // The server hands the cover over as a backend-relative proxy path; the
+    // image loader needs a host. See [historyCoverUrl].
+    final coverUrl =
+        historyCoverUrl(ref.watch(apiBaseUrlProvider), item.coverUrl);
 
     return Pressable(
       onTap: onTap,
@@ -56,8 +63,8 @@ class HistorySeriesCard extends ConsumerWidget {
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  if (item.coverUrl != null && item.coverUrl!.isNotEmpty)
-                    SeriesCoverImage(url: item.coverUrl!, width: coverWidth)
+                  if (coverUrl != null)
+                    SeriesCoverImage(url: coverUrl, width: coverWidth)
                   else
                     ColoredBox(
                       color: context.colors.muted.withValues(alpha: 0.12),
