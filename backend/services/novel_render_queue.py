@@ -127,15 +127,24 @@ def enqueue(
             status="queued",
             priority=priority,
         )
-        db.add(job)
         try:
             # Flushed per job so the unique index answers now: a failure here
-            # is one chapter's "already queued", not a lost batch.
-            db.flush()
+            # is one chapter's "already queued", not a lost batch. That is
+            # only true inside a SAVEPOINT. A session-level rollback would
+            # discard every job flushed earlier in this request while they
+            # sat in ``queued`` with ids, and the route would then commit
+            # nothing for them. The add goes inside too, so the rejected
+            # object leaves the session with its savepoint rather than being
+            # flushed again at commit.
+            with db.begin_nested():
+                db.add(job)
+                db.flush()
         except IntegrityError:
-            db.rollback()
+            # Caught outside the block so the savepoint has already rolled
+            # back just this one insert.
             skipped.append({"chapter_key": key, "reason": "already_queued"})
             continue
+        # Only now, after the savepoint closed cleanly, is this row real.
         queued.append({"job_id": job.id, "chapter_key": key})
 
     return Enqueued(queued=tuple(queued), skipped=tuple(skipped))

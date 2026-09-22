@@ -128,6 +128,54 @@ class TestEnqueue:
         assert [q["chapter_key"] for q in body["queued"]] == ["ch-2"]
         assert [s["reason"] for s in body["skipped"]] == ["already_queued"]
 
+    def test_an_already_queued_chapter_last_does_not_lose_the_ones_before_it(
+        self, novels_on, db_session
+    ):
+        # The order the previous test cannot see. A duplicate that arrives
+        # AFTER new chapters used to roll back the whole transaction, taking
+        # the new chapters with it while the response still called them queued.
+        cache_chapter(db_session, "ch-1")
+        ask(novels_on, ["ch-1"])
+        cache_chapter(db_session, "ch-2", number=2)
+        cache_chapter(db_session, "ch-3", number=3)
+
+        body = ask(novels_on, ["ch-2", "ch-1", "ch-3"]).json()
+
+        assert [q["chapter_key"] for q in body["queued"]] == ["ch-2", "ch-3"]
+        assert body["skipped"] == [
+            {"chapter_key": "ch-1", "reason": "already_queued"}
+        ]
+        # The table, not the response, is what a worker will ever render.
+        db_session.expire_all()
+        rows = {
+            row.chapter_key: row.id
+            for row in db_session.query(NovelAudioJob).all()
+        }
+        assert set(rows) == {"ch-1", "ch-2", "ch-3"}
+        for queued in body["queued"]:
+            assert rows[queued["chapter_key"]] == queued["job_id"]
+
+    def test_a_key_repeated_in_one_request_is_queued_once(
+        self, novels_on, db_session
+    ):
+        # No earlier request needed: the second copy of a key hitting the
+        # unique index must not undo the first copy, or anything before it.
+        cache_chapter(db_session, "ch-1")
+        cache_chapter(db_session, "ch-2", number=2)
+
+        body = ask(novels_on, ["ch-2", "ch-1", "ch-1"]).json()
+
+        assert [q["chapter_key"] for q in body["queued"]] == ["ch-2", "ch-1"]
+        assert body["skipped"] == [
+            {"chapter_key": "ch-1", "reason": "already_queued"}
+        ]
+        db_session.expire_all()
+        rows = sorted(
+            (row.chapter_key, row.status)
+            for row in db_session.query(NovelAudioJob).all()
+        )
+        assert rows == [("ch-1", "queued"), ("ch-2", "queued")]
+
     def test_the_batch_is_bounded(self, novels_on):
         # Each chapter is ~9 minutes of GPU. A whole long book is a fair ask,
         # but as a deliberate batch rather than one click booking days.
