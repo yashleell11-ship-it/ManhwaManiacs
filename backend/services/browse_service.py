@@ -29,6 +29,7 @@ from core.profile_context import ProfileContext, resolve_profile_context
 from database.models import SourceSeriesCache
 from database.session import get_db
 from connectors.base import SourceConnector
+from connectors.http import swallowed
 from connectors.http.client import ConnectorHttpError
 from connectors.ids import fully_unquote
 from connectors.models import Chapter, Page, PaginatedSeriesList, Series
@@ -555,13 +556,58 @@ class BrowseService:
         if self._record_traffic_health:
             record_traffic_outcome(self._traffic_bind(), source_id, None)
 
-    def _traffic_failed(self, source_id: str, exc: BaseException) -> None:
-        """This reader's request failed; record it only if the SOURCE did."""
+    def _traffic_failed(
+        self,
+        source_id: str,
+        exc: BaseException,
+        noted: list[BaseException] | None = None,
+    ) -> None:
+        """This reader's request failed; record it only if the SOURCE did.
+
+        ``noted`` is what the connector swallowed on the way (see
+        ``_observe_traffic``). It is the fallback, not the first choice: the
+        raised failure is the direct evidence, and a 404 we raise because the
+        connector answered None is only the source's fault when the None hid a
+        source-side failure.
+        """
         if not self._record_traffic_health:
             return
         error = source_side_failure(exc)
+        if error is None:
+            error = self._swallowed_failure(noted)
         if error is not None:
             record_traffic_outcome(self._traffic_bind(), source_id, error)
+
+    def _traffic_swallowed(
+        self, source_id: str, noted: list[BaseException]
+    ) -> None:
+        """The source gave nothing back; record it if the nothing hid the
+        SOURCE failing.
+
+        For a None series or an empty chapter list that came back without an
+        exception. With nothing noted this records nothing, exactly as before:
+        a genuine "no such series" or an empty list the site served is evidence
+        of neither success nor failure.
+        """
+        if not self._record_traffic_health:
+            return
+        error = self._swallowed_failure(noted)
+        if error is not None:
+            record_traffic_outcome(self._traffic_bind(), source_id, error)
+
+    @staticmethod
+    def _swallowed_failure(noted: list[BaseException] | None) -> str | None:
+        """The newest noted failure that is the source's, as a health message.
+
+        Newest, because a retry supersedes the attempt before it. Filtered by
+        ``source_side_failure`` like everything else, so a swallowed 404 or a
+        timeout still counts as nothing.
+        """
+        for exc in reversed(noted or ()):
+            error = source_side_failure(exc)
+            if error is not None:
+                return error
+        return None
 
     def _traffic_bind(self):
         # The engine, not the session: the recording opens a session of its own
@@ -579,12 +625,19 @@ class BrowseService:
         caller says so itself with ``_traffic_ok``. Anything that is not the
         source's fault (a 404 of ours, the 18+ gate, a timeout) is filtered by
         ``source_side_failure``, so wrapping a gate check here is harmless.
+
+        Yields the failures the connector SWALLOWED inside the block. Most
+        families (Madara among them) answer a blocked series page with None
+        and a blocked chapter list with [], so the failure never reaches the
+        ``except`` below; a caller that got nothing back hands this list to
+        ``_traffic_swallowed``. It stays readable after the block.
         """
-        try:
-            yield
-        except Exception as exc:
-            self._traffic_failed(source_id, exc)
-            raise
+        with swallowed.capture() as noted:
+            try:
+                yield noted
+            except Exception as exc:
+                self._traffic_failed(source_id, exc, noted)
+                raise
 
     @staticmethod
     def _raise_source_connector_error(source_id: str, exc: Exception) -> None:
@@ -1228,9 +1281,12 @@ class BrowseService:
 
     def get_series(self, source_id: str, series_id: str) -> dict[str, object]:
         connector = self._get_connector(source_id)
-        with self._observe_traffic(source_id):
+        with self._observe_traffic(source_id) as noted:
             series = connector.get_series(fully_unquote(series_id))
         if series is None:
+            # The reader still gets a 404 either way; health only hears about
+            # it when the None hid the source failing (a blocked series page).
+            self._traffic_swallowed(source_id, noted)
             raise AppError(
                 "Series not found.",
                 code="series_not_found",
@@ -1247,7 +1303,7 @@ class BrowseService:
     def get_chapters(self, source_id: str, series_id: str) -> list[dict[str, object]]:
         connector = self._get_connector(source_id)
         series_id = fully_unquote(series_id)
-        with self._observe_traffic(source_id):
+        with self._observe_traffic(source_id) as noted:
             series = connector.get_series(series_id)
             if series is None:
                 raise AppError(
@@ -1278,9 +1334,14 @@ class BrowseService:
         # Only a list with chapters in it is the source working. An empty one
         # is the update sweep's "degraded" case -- drifted markup or a soft
         # block answering 200 -- and resetting a failure streak on it would
-        # clear a blocked source every time a reader opened it.
+        # clear a blocked source every time a reader opened it. It counts as a
+        # failure only when the connector swallowed the source failing to get
+        # it; after a retry that worked, the list is not empty and the earlier
+        # swallowed failure is rightly ignored.
         if chapters:
             self._traffic_ok(source_id)
+        else:
+            self._traffic_swallowed(source_id, noted)
         return [_serialize_chapter(chapter, source_id) for chapter in chapters]
 
     def get_chapter_pages(self, source_id: str, chapter_id: str) -> list[dict[str, object]]:
@@ -1309,7 +1370,7 @@ class BrowseService:
         # The series page and its chapter list are the same evidence here as in
         # ``get_chapters``; the page fetch below is not, since one chapter's
         # images failing says nothing about whether the site is up.
-        with self._observe_traffic(source_id):
+        with self._observe_traffic(source_id) as noted:
             series = connector.get_series(series_id)
             if series is None:
                 raise AppError(
@@ -1322,6 +1383,8 @@ class BrowseService:
             chapters = connector.get_chapters(series_id)
         if chapters:
             self._traffic_ok(source_id)
+        else:
+            self._traffic_swallowed(source_id, noted)
         chapter = next((item for item in chapters if item.id == normalized_chapter_id), None)
         if chapter is None:
             raise AppError(

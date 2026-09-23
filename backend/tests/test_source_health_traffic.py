@@ -397,3 +397,145 @@ def test_recording_never_breaks_a_readers_request(
 
     assert response.status_code == 200
     assert response.json()["title"] == "Some Series"
+
+
+# ---------------------------------------------------------------------------
+# A real connector family that swallows its failures (Madara)
+# ---------------------------------------------------------------------------
+# Every test above uses a fake connector that RAISES. Madara -- ~40 sources,
+# linkmanga among them -- does not: a blocked series page comes back as None
+# and a blocked chapter list as [], so without the swallowed-failure seam these
+# reads recorded nothing at all.
+
+
+@pytest.fixture
+def madara(use_connector):
+    from connectors.madara.sites import MADARA_SITES
+    from connectors.registry import create_connector
+
+    site = next(s for s in MADARA_SITES if not s.mature)
+    instance = create_connector(site.source_id)
+    caches = (
+        instance._series_cache,
+        instance._chapter_list_cache,
+        instance._page_cache,
+        instance._chapter_page_count_cache,
+    )
+    for cache in caches:
+        cache.clear()
+    use_connector(instance)
+    yield site.source_id, instance
+    for cache in caches:
+        cache.clear()
+
+
+def _serve(monkeypatch, connector, exc: BaseException) -> list[str]:
+    """Make every page GET fail with ``exc``; return the paths requested."""
+    calls: list[str] = []
+
+    def _get_text(path, *args, **kwargs):
+        calls.append(path)
+        raise exc
+
+    def _post_text(path, *args, **kwargs):
+        calls.append(path)
+        raise AssertionError("no AJAX request is expected here")
+
+    monkeypatch.setattr(connector._http, "get_text", _get_text)
+    monkeypatch.setattr(connector._http, "post_text", _post_text)
+    return calls
+
+
+def test_a_madara_series_page_blocked_by_the_source_is_recorded(
+    client, session_factory, madara, monkeypatch
+):
+    source_id, connector = madara
+    calls = _serve(monkeypatch, connector, ConnectorHttpError(LEAKY, status_code=403))
+
+    response = client.get(f"/sources/{source_id}/series/{SERIES}")
+
+    # What the reader sees is unchanged: the connector's None is a 404.
+    assert response.status_code == 404
+    # No request was added to find this out.
+    assert len(calls) == 1
+    row = _row(session_factory, source_id)
+    assert row is not None
+    assert row.consecutive_failures == 1
+    assert row.last_error == TRAFFIC_BLOCKED
+
+
+def test_a_madara_chapter_list_blocked_by_the_source_is_recorded(
+    client, session_factory, madara, monkeypatch
+):
+    source_id, connector = madara
+    # The series page answered earlier (it is cached); now the site is down.
+    connector._series_cache.set(
+        SERIES, Series(id=SERIES, title="Some Series", chapter_count=0)
+    )
+    calls = _serve(
+        monkeypatch, connector, ConnectorHttpError("Retryable HTTP 503", status_code=503)
+    )
+
+    response = client.get(f"/sources/{source_id}/series/{SERIES}/chapters")
+
+    assert response.status_code == 200
+    assert response.json() == []
+    assert len(calls) == 1
+    row = _row(session_factory, source_id)
+    assert row is not None
+    assert row.consecutive_failures == 1
+    assert row.last_error == TRAFFIC_SERVER_ERROR
+
+
+def test_a_madara_series_the_site_says_is_gone_is_not_recorded(
+    client, session_factory, madara, monkeypatch
+):
+    source_id, connector = madara
+    _serve(monkeypatch, connector, ConnectorHttpError("not found", status_code=404))
+
+    series = client.get(f"/sources/{source_id}/series/{SERIES}")
+    chapters = client.get(f"/sources/{source_id}/series/{SERIES}/chapters")
+
+    # A genuine 404 is the site working and saying no: the reader gets the
+    # same answers as ever, and the source's health hears nothing.
+    assert series.status_code == 404
+    assert chapters.status_code == 404
+    assert _row(session_factory, source_id) is None
+
+
+def test_a_madara_timeout_is_still_not_recorded(
+    client, session_factory, madara, monkeypatch
+):
+    source_id, connector = madara
+    _serve(monkeypatch, connector, _wrapped(httpx.ReadTimeout("timed out"), status=503))
+
+    client.get(f"/sources/{source_id}/series/{SERIES}")
+
+    assert _row(session_factory, source_id) is None
+
+
+def test_a_swallowed_failure_is_not_recorded_by_background_actors(
+    session_factory, madara, monkeypatch
+):
+    source_id, connector = madara
+    _serve(monkeypatch, connector, ConnectorHttpError("blocked", status_code=403))
+    db = session_factory()
+    try:
+        with pytest.raises(AppError):
+            BrowseService(mature_enabled=True, db=db).get_series(source_id, SERIES)
+    finally:
+        db.close()
+
+    assert _row(session_factory, source_id) is None
+
+
+def test_a_capture_nested_in_another_still_reaches_the_outer_one():
+    from connectors.http import swallowed
+
+    blocked = ConnectorHttpError("blocked", status_code=403)
+    swallowed.note(blocked)  # nobody capturing: a no-op, not an error
+    with swallowed.capture() as outer:
+        with swallowed.capture() as inner:
+            swallowed.note(blocked)
+    assert inner == [blocked]
+    assert outer == [blocked]

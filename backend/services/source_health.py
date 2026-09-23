@@ -55,6 +55,12 @@ reader at a time and a streak demotes the source for everyone:
   the site refused or a host that would not resolve. A timeout never counts --
   it is as likely to be this box's own congestion as the site -- and neither
   does any other 4xx, which is an answer about that one request.
+* A failure the connector swallowed counts too. Madara answers a blocked series
+  page with None and a blocked chapter list with [], so the failure never
+  reaches the reader's request as an exception; the connector notes it through
+  ``connectors.http.swallowed`` and the browse service reads it back only when
+  the answer came back empty. The reader still sees the None / [] they always
+  did.
 * A burst is one observation (:data:`TRAFFIC_FAILURE_SPACING`). Opening one
   series fires its series and chapter requests together; without this, a single
   tap on a blocked source would count twice and one retry would demote it.

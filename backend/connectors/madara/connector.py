@@ -10,6 +10,7 @@ from connectors.ids import fully_unquote
 from connectors.base import SourceConnector
 from connectors.http.cache import TTLCache
 from connectors.http.cf_client import CfSyncHttpClient
+from connectors.http import swallowed
 from connectors.http.client import ConnectorHttpError, SyncConnectorHttpClient
 from connectors.madara.config import MadaraSiteConfig
 from connectors.madara.mappers import MadaraHtml
@@ -230,7 +231,11 @@ class MadaraConnector(SourceConnector):
         path = self._html.series_id_to_path(api_key)
         try:
             html = self._http.get_text(path)
-        except ConnectorHttpError:
+        except ConnectorHttpError as exc:
+            # Still None to the reader -- a 404 is "no such series" -- but a
+            # Cloudflare 403 on this page is how linkmanga died, so whoever is
+            # recording source health gets to see what the None hid.
+            swallowed.note(exc)
             return None
 
         series = self._html.parse_series_detail(html, api_key)
@@ -395,7 +400,11 @@ class MadaraConnector(SourceConnector):
         path = self._html.series_id_to_path(api_key)
         try:
             html = self._http.get_text(path)
-        except ConnectorHttpError:
+        except ConnectorHttpError as exc:
+            # Same page as get_series fetches, same reason to note it. The
+            # AJAX fallbacks are NOT noted: five sites 400/403 admin-ajax as a
+            # matter of course, and that says nothing about the site being up.
+            swallowed.note(exc)
             return []
 
         return self._enrich_chapters(self._chapters_from_html(html, api_key, path))
