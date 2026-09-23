@@ -33,8 +33,11 @@ this file *is* the product.
 4. `PRAGMA integrity_check` + `foreign_key_check` **on the copy**; a bad copy
    is discarded and the run fails loudly (systemd unit → failed).
 5. `zstd -9`, atomic `mv` into `/srv/manhwamaniacs/backups/daily/`, `sync -f`.
-6. Rotation: 7 daily; on Sundays (or when `weekly/` is empty) hard-link into
-   `weekly/`, keep 4. `latest.db.zst` symlink → newest daily.
+6. Rotation: 7 daily; the first successful run of each ISO week is
+   hard-linked into `weekly/`, keep 4, so the 4 weeklies are always 4
+   different weeks. A manual run or a stage-restore later in the same week
+   does not take a second slot, and a failed or missed Sunday no longer
+   leaves its week without one. `latest.db.zst` symlink → newest daily.
 7. Copy `settings.json` to `backups/settings.json.bak`, refreshed in place
    rather than rotated. See below — it is the other half of this instance's
    state and nothing used to back it up.

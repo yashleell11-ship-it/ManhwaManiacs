@@ -36,8 +36,9 @@
 #
 # Layout (on the 49 GB /srv disk — never the 80 %-full root disk):
 #   $ROOT/daily/manhwamaniacs-YYYYmmdd-HHMMSS.db.zst   newest KEEP_DAILY
-#   $ROOT/weekly/manhwamaniacs-YYYYmmdd-HHMMSS.db.zst  hard-linked from daily on
-#                                                        WEEKLY_DOW, newest KEEP_WEEKLY
+#   $ROOT/weekly/manhwamaniacs-YYYYmmdd-HHMMSS.db.zst  hard-linked from the first
+#                                                        successful run of each ISO
+#                                                        week, newest KEEP_WEEKLY
 #   $ROOT/latest.db.zst -> daily/<newest>
 #   $ROOT/backup.log                                   one line per run (also on stdout / journal)
 #
@@ -78,7 +79,6 @@ write_status(){
 }
 KEEP_DAILY="${MM_BACKUP_KEEP_DAILY:-7}"
 KEEP_WEEKLY="${MM_BACKUP_KEEP_WEEKLY:-4}"
-WEEKLY_DOW="${MM_BACKUP_WEEKLY_DOW:-7}"      # ISO weekday, 7 = Sunday
 ZSTD_LEVEL="${MM_BACKUP_ZSTD_LEVEL:-9}"
 PY="${MM_PYTHON:-python3}"
 # The one list of cache tables, shared with the in-app export so the two cannot
@@ -249,9 +249,24 @@ cmd_run(){
   sync -f "$final"                     # flush the filesystem holding it
   ln -sfn "daily/$base.zst" "$ROOT/latest.db.zst"
 
-  # Weekly: hard-link (no extra space) on WEEKLY_DOW, or when weekly/ is empty
-  # so a fresh install has a weekly from day one.
-  if [ "$(date -u +%u)" = "$WEEKLY_DOW" ] || [ -z "$(ls -A "$ROOT/weekly")" ]; then
+  # Weekly: hard-link (no extra space) the first successful run of each ISO
+  # week, so every weekly slot is a distinct week. It used to link every run
+  # on a Sunday: a manual run or a stage-restore on a Sunday took a second slot
+  # for the same week (the live box held 4 weeklies covering 3 weeks), and a
+  # Sunday whose run failed, or that the box slept through, left its week with
+  # none at all. The week is read from the NEWEST weekly's own name rather than
+  # a stamp file, so deleting or restoring files by hand cannot desync it, and
+  # an empty weekly/ (a fresh install) links straight away. Both sides come from
+  # the run stamps, not a second `date` call, so a run that straddles midnight
+  # into Monday is judged by the week it was taken in.
+  local this_week last_weekly last_week=""
+  this_week="$(date -u -d "${stamp%%-*}" +%G-W%V)"
+  last_weekly="$(ls -1 "$ROOT/weekly"/manhwamaniacs-*.db.zst 2>/dev/null | sort | tail -n 1 || true)"
+  if [ -n "$last_weekly" ]; then
+    last_weekly="${last_weekly##*/manhwamaniacs-}"
+    last_week="$(date -u -d "${last_weekly%%-*}" +%G-W%V 2>/dev/null || true)"
+  fi
+  if [ "$this_week" != "$last_week" ]; then
     ln -f "$final" "$ROOT/weekly/$base.zst"
   fi
 
