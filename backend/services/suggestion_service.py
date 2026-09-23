@@ -679,8 +679,15 @@ class SuggestionService:
                     "source": row["source_id"],
                     "series_id": row["series_key"],
                     "title": row["title"],
+                    # Relative, the same path federated search and the
+                    # browse listing serve; each client resolves it against
+                    # its own API base. `base_url` is the request's own host,
+                    # which behind the web's /api rewrite is the backend's
+                    # container name and behind Caddy is plain http -- a
+                    # cover built on it never loaded on web and sent the
+                    # app's bearer token in clear text.
                     "cover_url": (
-                        f"{base_url.rstrip('/')}/sources/{row['source_id']}"
+                        f"/sources/{row['source_id']}"
                         f"/series/{quote(row['series_key'], safe='')}/cover"
                     ),
                     "author": row["author"],

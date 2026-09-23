@@ -208,7 +208,6 @@ async def federated_search(
         page=page,
         per_page=per_page,
         include_mature=service._gate_open(),
-        base_url=str(request.base_url),
         tier=tier,
         tier_ids=tier_ids,
     )

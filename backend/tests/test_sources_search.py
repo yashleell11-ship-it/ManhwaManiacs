@@ -269,6 +269,35 @@ def test_groups_carry_display_metadata(client, session_factory):
     assert source_group["error"] is None
 
 
+def test_cover_url_is_relative_whatever_host_the_request_arrived_on(
+    client, session_factory
+):
+    """Behind the web's /api rewrite the request's Host is the backend's
+    container name, and behind Caddy its scheme is plain http. A cover built
+    on either never loaded on web and sent the app's bearer token in clear
+    text, so the path comes back relative -- the same one the browse listing
+    serves -- for each client to resolve against its own API base."""
+    descriptors = [_FakeDescriptor("mangadex")]
+    connectors = {"mangadex": _FakeConnector([_series("md/1", "Lookism")])}
+
+    with patch(
+        "services.browse_service.list_installed_connectors",
+        _make_list_installed(descriptors),
+    ), patch(
+        "services.browse_service.create_connector",
+        side_effect=lambda source_id: connectors[source_id],
+    ):
+        payload = client.get(
+            "/sources/search",
+            params={"q": "lookism"},
+            headers={"host": "manhwamaniacs-backend:8000"},
+        ).json()
+
+    (item,) = _group(payload, "mangadex")["items"]
+    assert item["cover_url"] == "/sources/mangadex/series/md%2F1/cover"
+    assert payload["items"][0]["cover_url"] == item["cover_url"]
+
+
 def test_failing_source_becomes_an_error_group(client, session_factory):
     descriptors = [_FakeDescriptor("good"), _FakeDescriptor("bad")]
     connectors = {

@@ -159,11 +159,6 @@ _search_connectors: dict[str, SourceConnector] = {}
 _search_connectors_lock = threading.Lock()
 
 
-def _absolute_url(base_url: str, path: str) -> str:
-    """Join a request base URL (``http://host/``) with a relative API path."""
-    return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
-
-
 def _normalize_title(title: str) -> str:
     """Collapse whitespace + casefold for duplicate detection within a source."""
     return _WHITESPACE_RE.sub(" ", (title or "").strip()).casefold()
@@ -1033,7 +1028,6 @@ class BrowseService:
         descriptor: ConnectorDescriptor,
         outcome: PaginatedSeriesList | BaseException | None,
         *,
-        base_url: str,
         query_norm: str,
         tokens: list[str],
         health: SourceHealthState,
@@ -1089,10 +1083,16 @@ class BrowseService:
                         "source": source_id,
                         "series_id": str(series.id),
                         "title": series.title,
-                        "cover_url": _absolute_url(
-                            base_url,
+                        # Relative, like the browse listing's: each client
+                        # resolves it against its own API base. The request's
+                        # base URL is the wrong host to bake in -- behind the
+                        # web's /api rewrite it is the backend's container
+                        # name, and behind Caddy it is plain http, so an
+                        # absolute cover was unreachable on web and sent the
+                        # app's bearer token in clear text.
+                        "cover_url": (
                             f"/sources/{source_id}/series/"
-                            f"{quote(str(series.id), safe='')}/cover",
+                            f"{quote(str(series.id), safe='')}/cover"
                         ),
                         "author": series.author,
                         # Carried through so source-migration candidates can be
@@ -1136,7 +1136,6 @@ class BrowseService:
         include_mature: bool = False,
         local_items: list[dict[str, object]] | None = None,
         local_has_more: bool = False,
-        base_url: str = "",
         tier: int | None = None,
         tier_ids: list[str] | None = None,
     ) -> dict[str, object]:
@@ -1216,7 +1215,6 @@ class BrowseService:
             group, score = self._build_source_group(
                 descriptor,
                 outcomes.get(descriptor.source_type),
-                base_url=base_url,
                 query_norm=query_norm,
                 tokens=tokens,
                 health=state,

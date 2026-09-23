@@ -163,7 +163,9 @@ def test_every_item_carries_the_handle_the_reader_route_takes(
 
     assert item["source"] == SRC
     assert item["series_id"] == "cool-key"
-    assert item["cover_url"] == "http://x/sources/mangadex/series/cool-key/cover"
+    # Relative, never built on the request's host: behind the web's /api
+    # rewrite that host is the backend's container name.
+    assert item["cover_url"] == "/sources/mangadex/series/cool-key/cover"
 
 
 def test_nothing_openable_is_an_error_not_an_empty_shelf(
