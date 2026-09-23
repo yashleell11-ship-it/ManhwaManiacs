@@ -129,31 +129,74 @@ class TestSourcePins:
         # Nothing was written: the whole set is validated before it is applied.
         assert env["client"].get("/sources/pins").json() == []
 
-    def test_pin_survives_a_source_that_no_longer_resolves(self, env):
-        """``source_id`` is a connector key, not an FK. A pin whose connector was
-        unregistered is still returned, flagged unavailable, so the user can see
-        and remove it rather than have it silently disappear."""
+    def _seed_pin(self, env, source_id: str, sort_order: int) -> None:
         db = env["factory"]()
         try:
             db.add(
                 SourcePin(
                     user_id=env["user_id"],
                     profile_id=None,
-                    source_id="retired-source",
-                    sort_order=0,
+                    source_id=source_id,
+                    sort_order=sort_order,
                 )
             )
             db.commit()
         finally:
             db.close()
 
+    def _stored_ids(self, env) -> set[str]:
+        db = env["factory"]()
+        try:
+            return {pin.source_id for pin in db.query(SourcePin).all()}
+        finally:
+            db.close()
+
+    def test_a_pin_on_a_removed_source_is_not_served(self, env):
+        """``source_id`` is a connector key, not an FK. A pin whose connector was
+        unregistered (linkmanga, lilymanga) is left out of the list rather than
+        served as a dead row the user has to find and drop first."""
+        self._seed_pin(env, "retired-source", 0)
+        self._seed_pin(env, "asurascans", 1)
+
         pins = env["client"].get("/sources/pins").json()
 
-        assert len(pins) == 1
-        assert pins[0]["source_id"] == "retired-source"
-        assert pins[0]["available"] is False
-        assert pins[0]["name"] == "retired-source"
-        assert pins[0]["icon_url"] is None
+        assert [pin["source_id"] for pin in pins] == ["asurascans"]
+        assert pins[0]["available"] is True
+
+    def test_a_removed_source_does_not_block_later_pins_or_unpins(self, env):
+        """Both clients rebuild the whole set from the list they were given. One
+        that still holds the dead id sends it back with every edit, and that
+        used to refuse the whole request as "Unknown source."."""
+        client = env["client"]
+        self._seed_pin(env, "retired-source", 0)
+        self._seed_pin(env, "asurascans", 1)
+
+        pinned = client.put(
+            "/sources/pins",
+            json={"source_ids": ["retired-source", "asurascans", "mangadex"]},
+        )
+        assert pinned.status_code == 200, pinned.text
+        assert [p["source_id"] for p in pinned.json()] == ["asurascans", "mangadex"]
+
+        unpinned = client.put(
+            "/sources/pins", json={"source_ids": ["retired-source", "mangadex"]}
+        )
+        assert unpinned.status_code == 200, unpinned.text
+        assert [p["source_id"] for p in unpinned.json()] == ["mangadex"]
+
+        # A client that has the new list (no dead id) edits freely too, and the
+        # dead row is left alone rather than deleted, so it would come back if
+        # its connector did.
+        assert client.put("/sources/pins", json={"source_ids": []}).status_code == 200
+        assert self._stored_ids(env) == {"retired-source"}
+
+        # A NEW unresolvable id is still an error.
+        assert (
+            client.put(
+                "/sources/pins", json={"source_ids": ["another-retired"]}
+            ).status_code
+            == 422
+        )
 
     def test_mature_source_cannot_be_pinned_when_the_gate_is_off(self, env, monkeypatch):
         monkeypatch.setenv("MM_MATURE_CONTENT_ENABLED", "false")
