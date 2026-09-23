@@ -1,5 +1,6 @@
 "use client";
 
+import { memo } from "react";
 import { SearchX, TriangleAlert } from "lucide-react";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useGridNavigation } from "@/lib/keyboard";
@@ -16,7 +17,14 @@ interface SourceSeriesGridProps {
   onRetry?: () => void;
 }
 
-export function SourceSeriesGrid({
+/**
+ * Memoised so the browse view can re-render around the grid — its header count,
+ * the loader, the "Loading more…" line — without the grid walking every card it
+ * has ever loaded. It re-renders when `items` changes, which is a page landing
+ * or a new search, and then only the new cards render: `SourceSeriesCard` is
+ * memoised too.
+ */
+export const SourceSeriesGrid = memo(function SourceSeriesGrid({
   sourceId,
   items,
   isLoading,
@@ -80,4 +88,4 @@ export function SourceSeriesGrid({
       ))}
     </div>
   );
-}
+});
