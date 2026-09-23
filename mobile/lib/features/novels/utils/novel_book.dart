@@ -11,7 +11,9 @@
 /// the same, the formatting is Dart's.
 library;
 
+import 'package:manhwamaniacs/features/sources/models/source_series.dart';
 import 'package:manhwamaniacs/features/sources/utils/chapter_label.dart';
+import 'package:manhwamaniacs/shared/widgets/series_detail/series_chapter_sort.dart';
 
 // --- Front matter -----------------------------------------------------------
 
@@ -213,6 +215,101 @@ TocEntry tocEntry({required double? number, required String? title}) {
 String formatChapterNumber(double value) {
   if (value.isNaN || value.isInfinite) return '';
   return value % 1 == 0 ? value.toInt().toString() : value.toString();
+}
+
+// --- Go to chapter ----------------------------------------------------------
+
+/// "Chapter 120", "Ch. 45", "c-1: Prologue" — the number a source writes at
+/// the front of a title, behind a word for "chapter". "Chapter 12.5" is read
+/// whole.
+final RegExp _wordPrefix = RegExp(
+  r'^\s*(?:chapter|chap|ch|c)\s*\.?\s*[-#]?\s*(\d+(?:\.\d+)?)(?!\d)',
+  caseSensitive: false,
+);
+
+/// Royal Road's "1. Good Morning Brother", novelbin's "12 - " — a bare number
+/// and a separator. The web's `BARE_ORDINAL_PREFIX` (`chapter-label.ts`); the
+/// lookahead keeps "12.5 Special" from reading as 12.
+final RegExp _bareOrdinalPrefix =
+    RegExp(r'^\s*(\d+(?:\.\d+)?)\s*[.):\-–—]\s*(?=\D|$)');
+
+/// A title that is nothing but a number.
+final RegExp _bareNumber = RegExp(r'^\s*(\d+(?:\.\d+)?)\s*$');
+
+/// "Volume 2 Chapter 15: Return" — the word, anywhere in the title.
+final RegExp _wordAnywhere = RegExp(
+  r'\b(?:chapter|ch\.?)\s*[-#:]?\s*(\d+(?:\.\d+)?)(?!\d)',
+  caseSensitive: false,
+);
+
+/// The chapter number a reader would say — the one printed in the title.
+///
+/// Novel chapter keys and `number` are ROW ORDINALS, not the book's own
+/// numbering: TBATE's prologue is row 1 and a side story takes another row,
+/// so "Chapter 120" is row 122 there. A reader asking for chapter 120 means
+/// the title, so this reads the title first — in the shapes the novel sources
+/// actually write — and falls back to the row ordinal only for a title that
+/// carries no number at all ("Side Story: Sylvie"). Nothing is ever parsed
+/// out of, or computed into, a chapter KEY.
+///
+/// The web's `printedChapterNumber` (`book.ts`) is the same rule; both answer
+/// `backend/tests/fixtures/reading_navigation_cases.json`.
+double? printedChapterNumber({required String? title, required double? number}) {
+  final text = title ?? '';
+  for (final pattern in [
+    _wordPrefix,
+    _bareOrdinalPrefix,
+    _bareNumber,
+    _wordAnywhere,
+  ]) {
+    final match = pattern.firstMatch(text);
+    if (match != null) return double.parse(match.group(1)!);
+  }
+  return number;
+}
+
+/// The number in whatever was typed — "120", "ch 120", "Chapter 529" — or
+/// null.
+double? goToChapterQuery(String query) {
+  final match = RegExp(r'(\d+(?:\.\d+)?)').firstMatch(query);
+  return match == null ? null : double.parse(match.group(1)!);
+}
+
+/// Every chapter whose printed number is what was typed, in reading order.
+///
+/// A LIST, never a single answer: printed numbers are not unique. TBATE's
+/// rows 531 and 532 are both titled "Chapter 529", and "1" is both the
+/// prologue ("c-1: Prologue") and chapter one — so the caller shows each with
+/// its row and the reader picks. Works only from the chapter list already in
+/// hand, one regex pass per chapter: nothing for Shadow Slave's 3,188, and no
+/// source traffic.
+List<SourceChapterSummary> goToChapterMatches(
+  List<SourceChapterSummary> chapters,
+  String query,
+) {
+  final wanted = goToChapterQuery(query);
+  if (wanted == null) return const [];
+  return [
+    for (final chapter in sortSeriesChapters(
+      chapters,
+      numberOf: (chapter) => chapter.number,
+      order: SeriesChapterSortOrder.oldest,
+    ))
+      if (printedChapterNumber(title: chapter.title, number: chapter.number) ==
+          wanted)
+        chapter,
+  ];
+}
+
+/// Where a fixed-height contents list starts so [index] is in view with
+/// [rowsAbove] rows of context over it.
+///
+/// Fixed row heights are what make this arithmetic rather than a measurement:
+/// a lazily built list of 3,188 rows cannot be asked where row 3,000 is, but
+/// it can be told to start there.
+double contentsScrollOffset(int index, double rowExtent, {int rowsAbove = 2}) {
+  final first = index - rowsAbove;
+  return first <= 0 ? 0 : first * rowExtent;
 }
 
 // --- Chapter opener ---------------------------------------------------------

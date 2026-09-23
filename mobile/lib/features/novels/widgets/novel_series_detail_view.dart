@@ -19,6 +19,7 @@ import 'package:manhwamaniacs/features/novels/providers/series_audio_provider.da
 import 'package:manhwamaniacs/features/novels/utils/novel_book.dart';
 import 'package:manhwamaniacs/features/novels/utils/novel_progress.dart';
 import 'package:manhwamaniacs/features/novels/widgets/audiobook_picker_sheet.dart';
+import 'package:manhwamaniacs/features/novels/widgets/novel_contents_sheet.dart';
 import 'package:manhwamaniacs/features/sources/models/source_chapter_progress.dart';
 import 'package:manhwamaniacs/features/sources/models/source_series.dart';
 import 'package:manhwamaniacs/features/sources/providers/source_progress_provider.dart';
@@ -131,6 +132,28 @@ class _NovelSeriesDetailViewState extends ConsumerState<NovelSeriesDetailView> {
                   ),
                 ),
                 const Spacer(),
+                // Keys and numbers are row ordinals, so this finds chapters
+                // by the number their TITLE prints — see NovelContentsSheet.
+                if (widget.chapters.length > 1)
+                  IconButton(
+                    key: const Key('go-to-chapter'),
+                    tooltip: 'Go to chapter',
+                    icon: Icon(Icons.search_rounded, color: colors.muted),
+                    onPressed: () => NovelContentsSheet.show(
+                      context,
+                      sourceId: widget.sourceId,
+                      seriesKey: widget.seriesId,
+                      chapters: widget.chapters,
+                      startWithSearch: true,
+                      onOpen: (chapterKey) => context.push(
+                        RoutePaths.novelReader(
+                          widget.sourceId,
+                          widget.seriesId,
+                          chapterKey,
+                        ),
+                      ),
+                    ),
+                  ),
                 SeriesChapterSortToggle(
                   value: _sortOrder,
                   onChanged: (order) => setState(() => _sortOrder = order),

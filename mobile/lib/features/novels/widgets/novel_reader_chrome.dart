@@ -26,6 +26,7 @@ class NovelReaderChrome extends StatelessWidget {
     required this.onPrevious,
     required this.onNext,
     required this.onType,
+    this.onContents,
     this.onBookmark,
     this.onCast,
     this.audio,
@@ -44,6 +45,11 @@ class NovelReaderChrome extends StatelessWidget {
   final VoidCallback? onPrevious;
   final VoidCallback? onNext;
   final VoidCallback onType;
+
+  /// The book's contents, opened at this chapter. Previous and next were the
+  /// only way to move through a book, and Shadow Slave has 3,188 chapters.
+  /// Null only for a caller that has nowhere to list them.
+  final VoidCallback? onContents;
 
   /// Who reads this book, and the chance to decide otherwise. Null when the
   /// chapter has no attribution to show.
@@ -114,6 +120,13 @@ class NovelReaderChrome extends StatelessWidget {
                         color: surface.muted,
                       ),
                     ),
+                  IconButton(
+                    key: const Key('novel-contents'),
+                    onPressed: onContents,
+                    icon: const Icon(Icons.toc_rounded),
+                    color: onContents == null ? surface.rule : surface.ink,
+                    tooltip: 'Contents',
+                  ),
                   IconButton(
                     onPressed: onBookmark,
                     icon: const Icon(Icons.bookmark_add_outlined),
