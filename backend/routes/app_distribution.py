@@ -134,6 +134,45 @@ class Changelog(BaseModel):
 # consume the exact same source of truth.
 _RELEASE_NOTES: list[ChangelogEntry] = [
     ChangelogEntry(
+        version="3.4.0",
+        build=53,
+        date="September 2026",
+        highlights=[
+            "Narration and the voice previews play on iPhone. The narration "
+            "was in a format the iPhone's player cannot read at all, so every "
+            "narrated chapter and every voice sample was silent there; the app "
+            "now asks for a copy the iPhone can play. If a chapter's text has "
+            "changed since it was narrated, it still plays but stops "
+            "highlighting lines, rather than highlighting the wrong ones",
+            "Jump to a chapter by the number in its title — type 120 and you "
+            "get Chapter 120, even in a book whose list is numbered "
+            "differently. The novel reader has a Contents button that opens "
+            "the chapter list at the chapter you are on",
+            "Continue works the same way everywhere: the chapter you got "
+            "furthest in, where you left it, or the next one if you finished "
+            "it. Going back to reread an early chapter no longer drags it "
+            "back there. A book you have finished says All caught up",
+            "Library cards say where you are — Not started, Ch 118 of 120, "
+            "and how many chapters are new past where you stopped — instead "
+            "of a fixed Reading",
+            "More of your reading is saved: manga read in Single or Double "
+            "page mode on the website, chapters read from a series page on "
+            "the phone's Sources tab, a chapter whose last page is short, and "
+            "the last page you reached just before leaving",
+            "Downloads waiting when the app was closed start again on their "
+            "own, a queue paused for space restarts as soon as you make room, "
+            "pinning a series protects chapters you download after pinning "
+            "it, and a chapter whose files were deleted can be downloaded "
+            "again",
+            "On the website you can type in dialogs again (they lost focus "
+            "after one letter), a source page that fails to load more keeps "
+            "what it has and offers Retry, and signing out no longer leaves "
+            "the next person inside your profile",
+            "An Asura series no longer gets followed twice when the site "
+            "renames its link, so new chapters are not announced twice",
+        ],
+    ),
+    ChangelogEntry(
         version="3.3.0",
         build=52,
         date="September 2026",
