@@ -493,6 +493,30 @@ def test_chapters_completed_is_gated_and_profile_scoped(
     assert _stats(db_session, uid, pid, gate_open=False).chapters_completed() == 1
 
 
+def test_a_chapter_finished_under_two_asura_suffixes_counts_once(
+    db_session, acct, seed_follow, seed_progress
+):
+    """Asura rotates its slug suffix, so one finished chapter can hold a
+    completed row under last week's key and this week's. It is one chapter."""
+    uid, pid = acct
+    old, new = "nano-machine-08677664", "nano-machine-6f7fe6eb"
+    seed_follow(uid, pid, source_id="asurascans", series_key=old, title="Nano Machine")
+    seed_progress(
+        uid, pid, source_id="asurascans", series_key=old,
+        chapter_key=f"{old}:3", is_completed=True,
+    )
+    seed_progress(
+        uid, pid, source_id="asurascans", series_key=new,
+        chapter_key=f"{new}:3", is_completed=True,
+    )
+    seed_progress(
+        uid, pid, source_id="asurascans", series_key=new,
+        chapter_key=f"{new}:4", is_completed=True,
+    )
+
+    assert _stats(db_session, uid, pid).chapters_completed() == 2
+
+
 # --- the service + HTTP surface -------------------------------------------
 
 

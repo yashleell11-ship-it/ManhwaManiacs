@@ -943,10 +943,14 @@ class ReadingStatsService:
         session attached), while ``chapters_read`` counts chapters an actual
         recorded session touched. Gated like everything else so the count does
         not move when a gated profile cannot see the chapters behind it.
+
+        Counted per chapter IDENTITY, not per row: AsuraScans rotates its slug
+        suffix, so one chapter finished under last week's key and reopened
+        under this week's holds a completed row under each, and a row count
+        called it two chapters.
         """
         stmt = (
-            select(func.count())
-            .select_from(ChapterProgress)
+            select(ChapterProgress.source_id, ChapterProgress.chapter_key)
             .where(ChapterProgress.user_id == self._user_id)
             .where(ChapterProgress.is_completed.is_(True))
         )
@@ -964,7 +968,14 @@ class ReadingStatsService:
                     FollowedSeries.series_key == ChapterProgress.series_key,
                 ),
             ).where(self._progress_mature_case() == 0)
-        return int(self._db.execute(stmt).scalar_one() or 0)
+        from services.browse_service import chapter_identity
+
+        return len(
+            {
+                (source_id, chapter_identity(source_id, chapter_key))
+                for source_id, chapter_key in self._db.execute(stmt)
+            }
+        )
 
     def _progress_mature_case(self):
         """:meth:`_mature_case` against ``chapter_progress``' source column."""
