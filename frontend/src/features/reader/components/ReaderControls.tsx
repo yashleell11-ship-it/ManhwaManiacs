@@ -684,15 +684,22 @@ export function ReaderControls({
 
         Hidden, it also leaves `visibility`. Faded and slid away, its blurred
         panel was still a live backdrop-filter layer over the moving strip, and
-        its controls were still in the Tab order. `transition-all` carries
-        `visibility` too, and a visibility transition holds `visible` until
-        the end, so the bar still slides and fades out before it goes; on the
-        way back it is visible from the first frame.
+        its controls were still in the Tab order. Going out, `transition-all`
+        carries `visibility` too, and a visibility transition holds `visible`
+        until the end, so the bar still slides and fades out before it goes.
+        Coming back, `visibility` is left out of the transition so it flips at
+        once: a transition starting from `hidden` still reads as hidden at its
+        first instant, and the Tab press that reveals the bar would skip the
+        controls it just revealed.
       */}
       <div
         className={cn(
           "pointer-events-none fixed inset-x-0 bottom-0 z-30",
-          reduceMotion ? "" : "transition-all duration-300",
+          reduceMotion
+            ? ""
+            : visible
+              ? "transition-[opacity,translate] duration-300"
+              : "transition-all duration-300",
           visible ? "translate-y-0 opacity-100" : "invisible translate-y-full opacity-0",
         )}
       >

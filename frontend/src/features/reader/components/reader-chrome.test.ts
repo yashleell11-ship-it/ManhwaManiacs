@@ -76,6 +76,14 @@ describe("reader bottom bar", () => {
     expect(classes).toEqual(expect.arrayContaining(["translate-y-0", "opacity-100"]));
   });
 
+  it("comes back visible at once, so the Tab that reveals it can land in it", () => {
+    // A visibility transition out of `hidden` is still hidden at its first
+    // instant, which is when the browser moves focus for that same key press.
+    const classes = barWrapperClasses(renderControls({ visible: true }));
+    expect(classes).toContain("transition-[opacity,translate]");
+    expect(classes).not.toContain("transition-all");
+  });
+
   it("prints the chapter percent from the store the reader writes to", () => {
     const progress = createReadingPercent();
     progress.set(41.6);
