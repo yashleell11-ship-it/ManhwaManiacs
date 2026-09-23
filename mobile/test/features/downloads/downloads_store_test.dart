@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:manhwamaniacs/features/downloads/models/chapter_identity.dart';
 import 'package:manhwamaniacs/features/downloads/models/download_chapter_state.dart';
+import 'package:manhwamaniacs/features/downloads/services/retention_maintenance.dart';
 import 'package:manhwamaniacs/features/downloads/store/downloads_db.dart';
 import 'package:manhwamaniacs/features/downloads/store/downloads_store.dart';
 
@@ -277,6 +278,61 @@ void main() {
 
       final chapters = await store.listChapters();
       expect(chapters.every((c) => c.pinned), isTrue);
+    });
+
+    test('a chapter downloaded after the pin is pinned too', () async {
+      final store = harness.storeFor('u1p1');
+      const later = (
+        sourceId: 'asura',
+        seriesKey: 'solo-leveling',
+        chapterKey: 'c2',
+      );
+      const otherSeries = (
+        sourceId: 'asura',
+        seriesKey: 'omniscient-reader',
+        chapterKey: 'c1',
+      );
+      await _completeChapter(store, id: _chapter);
+      await store.setSeriesPinned(
+        series: (sourceId: 'asura', seriesKey: 'solo-leveling'),
+        pinned: true,
+      );
+
+      await _completeChapter(store, id: later);
+      await _completeChapter(store, id: otherSeries);
+
+      expect((await store.getChapter(later))!.pinned, isTrue);
+      // Only the pinned series, and only in the scope that pinned it.
+      expect((await store.getChapter(otherSeries))!.pinned, isFalse);
+      await _completeChapter(harness.storeFor('u1p2'), id: later);
+      expect((await harness.storeFor('u1p2').getChapter(later))!.pinned,
+          isFalse,);
+
+      // Which is what keeps retention off it once it has been read.
+      await store.markRead(later);
+      final maintenance = RetentionMaintenance(
+        database: harness.openDatabase(),
+        blobStore: harness.openBlobStore(),
+      );
+      await maintenance.evictOldestReadFirst(targetBytes: 0);
+      expect(await store.getChapter(later), isNotNull);
+    });
+
+    test('unpinning stops later chapters inheriting the pin', () async {
+      final store = harness.storeFor('u1p1');
+      const later = (
+        sourceId: 'asura',
+        seriesKey: 'solo-leveling',
+        chapterKey: 'c2',
+      );
+      const series = (sourceId: 'asura', seriesKey: 'solo-leveling');
+      await _completeChapter(store, id: _chapter);
+      await store.setSeriesPinned(series: series, pinned: true);
+      await store.setSeriesPinned(series: series, pinned: false);
+
+      await _completeChapter(store, id: later);
+
+      expect((await store.getChapter(later))!.pinned, isFalse);
     });
   });
 

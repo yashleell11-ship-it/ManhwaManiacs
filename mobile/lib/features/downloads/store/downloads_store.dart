@@ -48,6 +48,8 @@ class DownloadsStore {
   /// - `failed` → reset to `queued` with `retry_count` and `error` cleared —
   ///   this is also what a manual "Retry" tap calls.
   ///
+  /// A new row starts pinned when its series already is in this scope.
+  ///
   /// Returns the row id.
   Future<int> ensureQueued({
     required ChapterIdentity id,
@@ -77,6 +79,19 @@ class DownloadsStore {
       return existing[DownloadsSchema.colId]! as int;
     }
 
+    // A pin is on the series, not on the chapters that happened to exist
+    // when it was set: retention filters row by row, so a chapter downloaded
+    // after the pin that did not inherit it would be expired or evicted
+    // from a series the Downloads screen shows as pinned.
+    final seriesPinned = await db.query(
+      DownloadsSchema.savedChapters,
+      columns: [DownloadsSchema.colId],
+      where: '${DownloadsSchema.colScopeId} = ? AND ${DownloadsSchema.colSourceId} = ? AND '
+          '${DownloadsSchema.colSeriesKey} = ? AND ${DownloadsSchema.colPinned} = 1',
+      whereArgs: [scopeId, id.sourceId, id.seriesKey],
+      limit: 1,
+    );
+
     return db.insert(DownloadsSchema.savedChapters, {
       DownloadsSchema.colScopeId: scopeId,
       DownloadsSchema.colSourceId: id.sourceId,
@@ -88,7 +103,7 @@ class DownloadsStore {
       DownloadsSchema.colPageCount: 0,
       DownloadsSchema.colBytes: 0,
       DownloadsSchema.colState: DownloadChapterState.queued.wire,
-      DownloadsSchema.colPinned: 0,
+      DownloadsSchema.colPinned: seriesPinned.isEmpty ? 0 : 1,
       DownloadsSchema.colReadAt: null,
       DownloadsSchema.colCreatedAt: DateTime.now().toUtc().toIso8601String(),
       DownloadsSchema.colRetryCount: 0,

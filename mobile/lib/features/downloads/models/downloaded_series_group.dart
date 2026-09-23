@@ -25,7 +25,9 @@ class DownloadedSeriesGroup {
 
   /// A series is "pinned" once any of its chapters is — pinning always
   /// applies to every chapter at once (see [DownloadsStore.setSeriesPinned]),
-  /// but a chapter queued after the pin and not yet resolved could in theory
-  /// lag by one write, so this reads defensively rather than requiring all.
+  /// and a chapter queued after the pin inherits it
+  /// ([DownloadsStore.ensureQueued]), so any and all agree. Any is kept
+  /// because rows saved before chapters inherited the pin can still be
+  /// mixed; tapping the pin off and on again evens them out.
   bool get pinned => chapters.any((c) => c.pinned);
 }
