@@ -116,6 +116,25 @@ def _isolate_process_db(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def reset_session_sweep_counter():
+    """Start every test with the expired-session sweep counter at zero.
+
+    ``AuthService._resolves_since_sweep`` is class-level on purpose (the
+    service is built per request), so it also survives from one TEST to the
+    next: every 20th ``resolve_session`` in the whole process runs a bulk
+    sweep, and which test that lands in depends on how many resolves every
+    earlier test happened to make. A test asserting what resolve does to one
+    expired row then passed alone and failed in the full suite — the sweep's
+    ``synchronize_session=False`` delete removed the row behind the test's
+    identity map. Resetting here makes each test's resolves count from zero.
+    """
+    from services.auth_service import AuthService
+
+    AuthService._resolves_since_sweep = 0
+    yield
+
+
+@pytest.fixture(autouse=True)
 def reset_update_manager():
     """Reset the process-wide update scheduler around every test."""
     reset_update_manager_for_tests()
