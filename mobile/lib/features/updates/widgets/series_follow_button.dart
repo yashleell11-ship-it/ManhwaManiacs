@@ -31,6 +31,7 @@ class SeriesFollowButton extends ConsumerWidget {
     super.key,
     required this.sourceId,
     required this.seriesKey,
+    this.seriesIdentity,
     this.initialIsFollowed,
     this.initialFollowedId,
   });
@@ -40,6 +41,11 @@ class SeriesFollowButton extends ConsumerWidget {
 
   /// The connector's own id for the series.
   final String seriesKey;
+
+  /// The page payload's `series_identity`, when it has one. Finds a follow
+  /// made under an older key of the same series (Asura rotates its slugs);
+  /// see [UpdatesNotifier.followedFor].
+  final String? seriesIdentity;
 
   /// Follow state already known from the page's own payload, used only until
   /// the followed-series cache resolves. `GET /library/series/{id}` is
@@ -72,7 +78,11 @@ class SeriesFollowButton extends ConsumerWidget {
         ? null
         : ref
             .read(updatesProvider.notifier)
-            .followedFor(sourceId: sourceId, seriesKey: seriesKey);
+            .followedFor(
+              sourceId: sourceId,
+              seriesKey: seriesKey,
+              seriesIdentity: seriesIdentity,
+            );
     final bool? followed = state == null ? initialIsFollowed : series != null;
     final followedId = state == null ? initialFollowedId : series?.id;
     final isFollowed = followed ?? false;

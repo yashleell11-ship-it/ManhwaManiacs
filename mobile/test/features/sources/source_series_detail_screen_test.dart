@@ -571,6 +571,53 @@ void main() {
       expect(find.text('Follow'), findsNothing);
     });
 
+    testWidgets(
+        'shows Unfollow for a series followed under an older key of the same '
+        'series', (tester) async {
+      // Asura rotates slug suffixes: the follow keeps last week's key while
+      // this page opens under this week's. Matched by key alone the page
+      // offered Follow, and pressing it handed back the old follow.
+      final fakeLibrary = _FakeLibraryRepository(
+        followed: [
+          const FollowedSeries(
+            id: 42,
+            sourceId: 'mangadex',
+            seriesKey: 'manga-08677664',
+            seriesIdentity: 'manga',
+            title: 'Solo Leveling',
+            coverUrl: '',
+            isFavorite: false,
+            readingStatus: 'unread',
+            notify: true,
+            sortOrder: 0,
+            contentRating: 'safe',
+            rating: 'safe',
+            chapterCount: 0,
+          ),
+        ],
+      );
+      await _pumpScreen(
+        tester,
+        libraryRepo: fakeLibrary,
+        series: const SourceSeriesSummary(
+          id: 'manga-1',
+          sourceId: 'mangadex',
+          seriesIdentity: 'manga',
+          title: 'Solo Leveling',
+          chapterCount: 1,
+          genres: [],
+          coverUrl: 'http://example.test/cover.jpg',
+        ),
+      );
+
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(find.text('Unfollow'), findsOneWidget);
+      expect(find.text('Follow'), findsNothing);
+      expect(fakeLibrary.followCalled, isFalse);
+    });
+
     testWidgets('tapping Follow calls follow and flips to Unfollow',
         (tester) async {
       final fakeLibrary = _FakeLibraryRepository();

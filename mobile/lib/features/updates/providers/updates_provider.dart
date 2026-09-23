@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:manhwamaniacs/core/error/app_error.dart';
 import 'package:manhwamaniacs/features/content_mode/content_mode.dart';
 import 'package:manhwamaniacs/features/library/models/followed_series.dart';
+import 'package:manhwamaniacs/features/library/utils/all_followed.dart';
 import 'package:manhwamaniacs/features/updates/models/update_notification.dart';
 import 'package:manhwamaniacs/shared/providers/repository_providers.dart';
 
@@ -50,11 +51,6 @@ final updatesProvider =
   name: 'updates',
 );
 
-/// Followed series fetched per refresh — generous enough to cover a real
-/// household's library in one unpaginated call (mirrors the old trackers
-/// list, which had no pagination either).
-const _followedIndexPageSize = 200;
-
 /// When to look again after a "Check now" the server queued, as waits between
 /// looks: at about 3, 8 and 15 seconds. A queued check runs on the server's
 /// worker after the request has already answered (a pass took ~6 s in the run
@@ -101,13 +97,11 @@ class UpdatesNotifier extends AutoDisposeAsyncNotifier<UpdatesState> {
   /// reading downloaded chapters with no signal is an ordinary case, not a
   /// fault to report.
   Future<void> refreshFollowed() async {
-    final result = await ref
-        .read(libraryRepositoryProvider)
-        .listSeries(perPage: _followedIndexPageSize);
+    final result = await listAllFollowed(ref.read(libraryRepositoryProvider));
     if (result.isErr) return;
     final current = state.valueOrNull;
     if (current == null) return;
-    state = AsyncData(current.copyWith(followed: result.value.items));
+    state = AsyncData(current.copyWith(followed: result.value));
   }
 
   Future<UpdatesState> _fetch() async {
@@ -115,14 +109,16 @@ class UpdatesNotifier extends AutoDisposeAsyncNotifier<UpdatesState> {
     final libraryRepo = ref.read(libraryRepositoryProvider);
     final notifications = await updatesRepo.listNotifications();
     final unread = await updatesRepo.getUnreadCount();
-    final followed = await libraryRepo.listSeries(perPage: _followedIndexPageSize);
+    // Every page, not the first 200: this is the follow-state cache, and a
+    // follow missing from it reads as "not followed" on its own page.
+    final followed = await listAllFollowed(libraryRepo);
     if (notifications.isErr) throw notifications.error;
     if (unread.isErr) throw unread.error;
     if (followed.isErr) throw followed.error;
     return UpdatesState(
       notifications: notifications.value,
       unreadCount: unread.value,
-      followed: followed.value.items,
+      followed: followed.value,
     );
   }
 
@@ -299,11 +295,28 @@ class UpdatesNotifier extends AutoDisposeAsyncNotifier<UpdatesState> {
   /// Returns the followed-series row for the given source+series, or null if
   /// the active profile is not following it. Used by [SeriesFollowButton] to
   /// drive the Follow / Unfollow label and action.
-  FollowedSeries? followedFor({required String sourceId, required String seriesKey}) {
+  ///
+  /// By the exact key first. Failing that, by [seriesIdentity] — the series
+  /// page's own `series_identity` — because Asura rotates the suffix on its
+  /// slugs: a series followed under last week's key is served this week under
+  /// another, and matched by key alone the page offered "Follow" for a series
+  /// already followed (and pressing it handed back the old follow, so nothing
+  /// changed). The identity is the connector's answer, compared as given.
+  FollowedSeries? followedFor({
+    required String sourceId,
+    required String seriesKey,
+    String? seriesIdentity,
+  }) {
     final value = state.valueOrNull;
     if (value == null) return null;
     for (final series in value.followed) {
       if (series.sourceId == sourceId && series.seriesKey == seriesKey) {
+        return series;
+      }
+    }
+    if (seriesIdentity == null || seriesIdentity.isEmpty) return null;
+    for (final series in value.followed) {
+      if (series.sourceId == sourceId && series.identity == seriesIdentity) {
         return series;
       }
     }

@@ -27,11 +27,13 @@ FollowedSeries _followed({
   int id = 42,
   String sourceId = 'mangadex',
   String seriesKey = 'series-1',
+  String? seriesIdentity,
 }) =>
     FollowedSeries(
       id: id,
       sourceId: sourceId,
       seriesKey: seriesKey,
+      seriesIdentity: seriesIdentity,
       title: 'Solo Leveling',
       coverUrl: '',
       isFavorite: false,
@@ -148,13 +150,17 @@ class _FakeLibraryRepository implements LibraryRepository {
     String? readingStatus,
     bool? isFavorite,
   }) async {
+    // Paged the way the server pages, so a library bigger than one page is
+    // only whole to a caller that asks for every page.
+    final start = (page - 1) * perPage;
+    final end = (start + perPage).clamp(0, followed.length);
     return Ok(
       PagedResult(
-        items: followed,
+        items: start < followed.length ? followed.sublist(start, end) : const [],
         total: followed.length,
-        page: 1,
+        page: page,
         perPage: perPage,
-        hasNext: false,
+        hasNext: end < followed.length,
       ),
     );
   }
@@ -353,6 +359,106 @@ void main() {
         notifier.followedFor(sourceId: 'asurascans', seriesKey: 'series-1'),
         isNull,
       );
+    });
+
+    test('knows a follow that sorts past the first 200 of a big library', () async {
+      // 250 follows, the list serving 200 a page: the row at 240 was on page
+      // 2, which was never asked for, so its page offered "Follow".
+      final repo = _FakeLibraryRepository(
+        followed: [
+          for (var i = 1; i <= 250; i++) _followed(id: i, seriesKey: 'series-$i'),
+        ],
+      );
+      final container = ProviderContainer(
+        overrides: [
+          updatesRepositoryProvider.overrideWithValue(_FakeUpdatesRepository()),
+          libraryRepositoryProvider.overrideWithValue(repo),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(updatesProvider.future);
+      final notifier = container.read(updatesProvider.notifier);
+
+      expect(
+        notifier.followedFor(sourceId: 'mangadex', seriesKey: 'series-240')?.id,
+        240,
+      );
+      expect(container.read(updatesProvider).value!.followed, hasLength(250));
+    });
+
+    group('a series followed under an older Asura key', () {
+      const identity = 'the-great-mage-returns-after-4000-years';
+      const oldKey = '$identity-08677664';
+      const newKey = '$identity-05c7df14';
+
+      Future<UpdatesNotifier> notifierFor(List<FollowedSeries> followed) async {
+        final container = ProviderContainer(
+          overrides: [
+            updatesRepositoryProvider.overrideWithValue(_FakeUpdatesRepository()),
+            libraryRepositoryProvider
+                .overrideWithValue(_FakeLibraryRepository(followed: followed)),
+          ],
+        );
+        addTearDown(container.dispose);
+        await container.read(updatesProvider.future);
+        return container.read(updatesProvider.notifier);
+      }
+
+      test("is found from the new-key page by the page's identity", () async {
+        final notifier = await notifierFor([
+          _followed(
+            id: 7,
+            sourceId: 'asurascans',
+            seriesKey: oldKey,
+            seriesIdentity: identity,
+          ),
+        ]);
+
+        expect(
+          notifier
+              .followedFor(
+                sourceId: 'asurascans',
+                seriesKey: newKey,
+                seriesIdentity: identity,
+              )
+              ?.id,
+          7,
+        );
+      });
+
+      test('is not claimed by another series, another source, or no identity',
+          () async {
+        final notifier = await notifierFor([
+          _followed(
+            id: 7,
+            sourceId: 'asurascans',
+            seriesKey: oldKey,
+            seriesIdentity: identity,
+          ),
+        ]);
+
+        expect(
+          notifier.followedFor(
+            sourceId: 'asurascans',
+            seriesKey: 'the-great-mage-05c7df14',
+            seriesIdentity: 'the-great-mage',
+          ),
+          isNull,
+        );
+        expect(
+          notifier.followedFor(
+            sourceId: 'mangadex',
+            seriesKey: newKey,
+            seriesIdentity: identity,
+          ),
+          isNull,
+        );
+        expect(
+          notifier.followedFor(sourceId: 'asurascans', seriesKey: newKey),
+          isNull,
+        );
+      });
     });
   });
 

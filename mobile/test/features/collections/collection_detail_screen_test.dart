@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:manhwamaniacs/core/error/app_error.dart';
 import 'package:manhwamaniacs/core/utils/pagination.dart';
 import 'package:manhwamaniacs/core/utils/result.dart';
+import 'package:manhwamaniacs/features/collections/providers/collection_detail_provider.dart';
 import 'package:manhwamaniacs/features/collections/screens/collection_detail_screen.dart';
 import 'package:manhwamaniacs/features/library/models/collection.dart';
 import 'package:manhwamaniacs/features/library/models/collection_detail.dart';
@@ -187,16 +188,23 @@ class _MutableCollectionsRepository implements LibraryRepository {
     String? search,
     String? readingStatus,
     bool? isFavorite,
-  }) async =>
-      Ok(
-        PagedResult(
-          items: _pickerSeries,
-          total: _pickerSeries.length,
-          page: 1,
-          perPage: perPage,
-          hasNext: false,
-        ),
-      );
+  }) async {
+    // Paged the way the server pages (200 at most), so a library bigger than
+    // one page is only whole to a caller that asks for every page.
+    final start = (page - 1) * perPage;
+    final end = (start + perPage).clamp(0, _pickerSeries.length);
+    return Ok(
+      PagedResult(
+        items: start < _pickerSeries.length
+            ? _pickerSeries.sublist(start, end)
+            : const [],
+        total: _pickerSeries.length,
+        page: page,
+        perPage: perPage,
+        hasNext: end < _pickerSeries.length,
+      ),
+    );
+  }
 
   @override
   Future<Result<SeriesDetail>> getSeries(int followedId) => throw UnimplementedError();
@@ -458,6 +466,34 @@ void main() {
 
       expect(repo.removeSeriesCalls, 1);
       expect(find.text('This collection is empty'), findsOneWidget);
+    });
+  });
+
+  group('librarySeriesPickerProvider', () {
+    test('offers every follow, not only the first page of 200', () async {
+      // 250 follows: the picker read page 1 alone, so "Zombie 240" could
+      // never be added, and searching for it found nothing either.
+      final repo = _MutableCollectionsRepository(
+        collections: const [],
+        details: const {},
+        pickerSeries: [
+          for (var i = 1; i <= 250; i++)
+            _pickerSeriesItem(
+              sourceId: 'toonkor',
+              seriesKey: 'series-$i',
+              title: i == 240 ? 'Zombie $i' : 'Series $i',
+            ),
+        ],
+      );
+      final container = ProviderContainer(
+        overrides: [libraryRepositoryProvider.overrideWithValue(repo)],
+      );
+      addTearDown(container.dispose);
+
+      final offered = await container.read(librarySeriesPickerProvider.future);
+
+      expect(offered, hasLength(250));
+      expect(offered.map((s) => s.title), contains('Zombie 240'));
     });
   });
 }

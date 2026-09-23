@@ -4,6 +4,7 @@ class SourceSeriesSummary {
   const SourceSeriesSummary({
     required this.id,
     required this.sourceId,
+    this.seriesIdentity,
     required this.title,
     required this.chapterCount,
     this.description,
@@ -17,6 +18,10 @@ class SourceSeriesSummary {
 
   final String id;
   final String sourceId;
+
+  /// Which series [id] names, as the library's follows carry it too
+  /// (`FollowedSeries.seriesIdentity`). Null from an older server.
+  final String? seriesIdentity;
   final String title;
   final int chapterCount;
   final String? description;
@@ -32,6 +37,7 @@ class SourceSeriesSummary {
     return SourceSeriesSummary(
       id: json['id'] as String,
       sourceId: json['source_id'] as String,
+      seriesIdentity: json['series_identity'] as String?,
       title: json['title'] as String,
       chapterCount: (json['chapter_count'] as num?)?.toInt() ?? 0,
       description: json['description'] as String?,

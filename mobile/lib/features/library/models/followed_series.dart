@@ -13,6 +13,7 @@ class FollowedSeries {
     required this.id,
     required this.sourceId,
     required this.seriesKey,
+    this.seriesIdentity,
     required this.title,
     required this.coverUrl,
     required this.isFavorite,
@@ -33,6 +34,17 @@ class FollowedSeries {
   final int id;
   final String sourceId;
   final String seriesKey;
+
+  /// The connector's name for the series [seriesKey] names — equal to it
+  /// except on a source whose keys drift (Asura rotates its slug suffixes).
+  /// Compared against a series page's own `series_identity` to find a follow
+  /// made under an older key; never fetched with. Null from a server or a
+  /// library cache older than the field, which [identity] reads as the key.
+  final String? seriesIdentity;
+
+  /// [seriesIdentity], or the key itself where none was sent.
+  String get identity => seriesIdentity ?? seriesKey;
+
   final String title;
 
   /// Ready-to-use cover URL — either the source's own absolute URL or a
@@ -64,6 +76,7 @@ class FollowedSeries {
       id: id,
       sourceId: sourceId,
       seriesKey: seriesKey,
+      seriesIdentity: seriesIdentity,
       title: title,
       coverUrl: coverUrl,
       isFavorite: isFavorite ?? this.isFavorite,
@@ -86,6 +99,7 @@ class FollowedSeries {
         id: json['id'] as int,
         sourceId: json['source_id'] as String,
         seriesKey: json['series_key'] as String,
+        seriesIdentity: json['series_identity'] as String?,
         title: json['title'] as String,
         coverUrl: json['cover_url'] as String? ?? '',
         isFavorite: json['is_favorite'] as bool? ?? false,
@@ -117,6 +131,7 @@ class FollowedSeries {
         'id': id,
         'source_id': sourceId,
         'series_key': seriesKey,
+        'series_identity': seriesIdentity,
         'title': title,
         'cover_url': coverUrl,
         'is_favorite': isFavorite,

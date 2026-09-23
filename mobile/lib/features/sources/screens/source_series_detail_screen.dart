@@ -268,6 +268,7 @@ class _SeriesDetailBodyState extends ConsumerState<_SeriesDetailBody> {
         key: const Key('follow-toggle'),
         sourceId: widget.sourceId,
         seriesKey: widget.seriesId,
+        seriesIdentity: series.seriesIdentity,
       ),
       secondaryActions: [
         ChapterSelectionActions(

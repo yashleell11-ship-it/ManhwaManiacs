@@ -3,6 +3,7 @@ import 'package:manhwamaniacs/core/error/app_error.dart';
 import 'package:manhwamaniacs/features/collections/providers/collections_provider.dart';
 import 'package:manhwamaniacs/features/library/models/collection_detail.dart';
 import 'package:manhwamaniacs/features/library/models/followed_series.dart';
+import 'package:manhwamaniacs/features/library/utils/all_followed.dart';
 import 'package:manhwamaniacs/shared/providers/repository_providers.dart';
 
 final collectionDetailProvider = AsyncNotifierProvider.autoDispose
@@ -89,10 +90,13 @@ class CollectionDetailNotifier
   }
 }
 
+/// Every follow the add picker can offer — all pages, not the first 200, or a
+/// series that sorts late in a big library could never be added (its search
+/// box filters this list, so it could not be found either).
 final librarySeriesPickerProvider =
     FutureProvider.autoDispose<List<FollowedSeries>>((ref) async {
   final repo = ref.watch(libraryRepositoryProvider);
-  final result = await repo.listSeries(perPage: 200);
+  final result = await listAllFollowed(repo);
   if (result.isErr) throw result.error;
-  return result.value.items;
+  return result.value;
 });
