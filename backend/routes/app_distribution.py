@@ -138,6 +138,31 @@ class Changelog(BaseModel):
 # consume the exact same source of truth.
 _RELEASE_NOTES: list[ChangelogEntry] = [
     ChangelogEntry(
+        version="3.4.2",
+        build=55,
+        date="September 2026",
+        highlights=[
+            "Your place syncs between the phone and the website. Chapters "
+            "opened from a series page on the phone were only ever saved on "
+            "the phone, so both libraries said Not started; the first time "
+            "you open this version, what the phone remembers is sent to your "
+            "account",
+            "An Asura series keeps your place after the site renames its "
+            "link, which it does every few days",
+            "The Continue shelf names each series on the phone, and the "
+            "website's library shows it on a computer too",
+            "The website scrolls smoothly: covers, badges, chapter lists and "
+            "the reader no longer re-blur what is behind them on every frame, "
+            "and big grids stop redrawing on every keystroke",
+            "The reader's controls get out of the way: scrolling hides them, "
+            "and only a tap or moving to the top or bottom edge brings them "
+            "back, not every twitch of the mouse",
+            "The website's novel reader saves where you were when you leave "
+            "the page, and OCR accepts a chapter released since the last "
+            "update check",
+        ],
+    ),
+    ChangelogEntry(
         version="3.4.1",
         build=54,
         date="September 2026",
