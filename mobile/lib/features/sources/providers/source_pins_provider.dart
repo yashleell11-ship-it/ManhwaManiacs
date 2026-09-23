@@ -10,6 +10,10 @@ import 'package:manhwamaniacs/shared/providers/core_providers.dart';
 import 'package:manhwamaniacs/shared/providers/repository_providers.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+/// The server's cap on one scope's pins (`SourcePinService.MAX_PINS`). A
+/// longer legacy list would be refused outright, so it is cut to fit.
+const maxSourcePins = 50;
+
 /// The pinned set plus whether it is safe to write back.
 class SourcePinsState {
   const SourcePinsState({this.pins = const [], this.synced = false});
@@ -51,6 +55,7 @@ final pinnedSourceIdsProvider = Provider<List<String>>(
 
 class SourcePinsNotifier extends AsyncNotifier<SourcePinsState> {
   String _cacheKey = sourcePinsCacheKeyFor(userId: null, profileId: null);
+  bool _migrating = false;
 
   @override
   Future<SourcePinsState> build() async {
@@ -148,21 +153,66 @@ class SourcePinsNotifier extends AsyncNotifier<SourcePinsState> {
   /// everything. The empty check below is only a don't-clobber guard for the
   /// single run the flag permits. Running it *after* a successful GET means an
   /// offline launch never burns the flag.
+  ///
+  /// The flag is only set once the server has taken the list, or once there is
+  /// nothing left worth sending. The server holds no pin rows for this scope
+  /// yet, so every legacy id is new to it, and one new id it cannot resolve
+  /// makes it refuse the whole set. An old device list that still names a
+  /// removed connector would otherwise take every other pin down with it. So
+  /// ids the server no longer lists are dropped first, and a refusal leaves
+  /// the legacy list in place for the next launch to try again.
   Future<List<SourcePin>> _migrateLegacyPins(
     SharedPreferences prefs, {
     required List<SourcePin> serverPins,
   }) async {
-    if (sourcePinsMigrated(prefs)) return serverPins;
+    if (sourcePinsMigrated(prefs) || _migrating) return serverPins;
 
     final legacy = readLegacyPinnedSources(prefs);
-    await completeSourcePinsMigration(prefs);
-    if (legacy.isEmpty || serverPins.isNotEmpty) return serverPins;
-
-    final migrated = await ref.read(sourcesRepositoryProvider).replacePins(legacy);
-    if (migrated.isErr) {
-      appLogger.w('Failed to migrate device pins to the server', migrated.error);
+    if (legacy.isEmpty || serverPins.isNotEmpty) {
+      await completeSourcePinsMigration(prefs);
       return serverPins;
     }
-    return migrated.value;
+
+    // A rebuild (a profile switch) while the requests below are in flight must
+    // not start a second migration into another scope.
+    _migrating = true;
+    try {
+      final repo = ref.read(sourcesRepositoryProvider);
+
+      final installed = await repo.listSources();
+      if (installed.isErr) {
+        appLogger.w(
+          'Could not list sources; device pin migration retries next launch',
+          installed.error,
+        );
+        return serverPins;
+      }
+
+      final known = {for (final source in installed.value) source.id};
+      final ids = <String>[];
+      for (final raw in legacy) {
+        final id = raw.trim();
+        if (known.contains(id) && !ids.contains(id)) ids.add(id);
+        if (ids.length == maxSourcePins) break;
+      }
+
+      if (ids.isEmpty) {
+        await completeSourcePinsMigration(prefs);
+        return serverPins;
+      }
+
+      final migrated = await repo.replacePins(ids);
+      if (migrated.isErr) {
+        appLogger.w(
+          'Server refused device pins; migration retries next launch',
+          migrated.error,
+        );
+        return serverPins;
+      }
+      await completeSourcePinsMigration(prefs);
+      return migrated.value;
+    } finally {
+      _migrating = false;
+    }
   }
 }
