@@ -12,10 +12,12 @@ import 'package:manhwamaniacs/features/downloads/providers/series_download_statu
 import 'package:manhwamaniacs/features/downloads/queue/download_queue_controller.dart';
 import 'package:manhwamaniacs/features/downloads/widgets/chapter_download_action.dart';
 import 'package:manhwamaniacs/features/downloads/widgets/download_series_button.dart';
+import 'package:manhwamaniacs/features/library/utils/resume_location.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_typography.dart';
 import 'package:manhwamaniacs/features/novels/providers/novel_series_providers.dart';
 import 'package:manhwamaniacs/features/novels/providers/series_audio_provider.dart';
 import 'package:manhwamaniacs/features/novels/utils/novel_book.dart';
+import 'package:manhwamaniacs/features/novels/utils/novel_progress.dart';
 import 'package:manhwamaniacs/features/novels/widgets/audiobook_picker_sheet.dart';
 import 'package:manhwamaniacs/features/sources/models/source_chapter_progress.dart';
 import 'package:manhwamaniacs/features/sources/models/source_series.dart';
@@ -68,7 +70,13 @@ class _NovelSeriesDetailViewState extends ConsumerState<NovelSeriesDetailView> {
     final series = widget.series;
     final colors = context.colors;
     final identity = (sourceId: widget.sourceId, seriesKey: widget.seriesId);
-    final progressMap = ref.watch(sourceProgressProvider);
+    // This phone's records and the server's, merged: the novel reader and
+    // the web save only to the server.
+    final progressMap = ref.watch(
+      sourceSeriesProgressProvider(
+        (sourceId: widget.sourceId, seriesId: widget.seriesId),
+      ),
+    );
     final hasScope = ref.watch(activeDownloadsScopeIdProvider) != null;
     final downloadStatuses =
         ref.watch(seriesChapterDownloadStatusProvider(identity)).valueOrNull;
@@ -152,11 +160,7 @@ class _NovelSeriesDetailViewState extends ConsumerState<NovelSeriesDetailView> {
               return _TocRow(
                 chapter: chapter,
                 wordCount: wordCounts[chapter.id],
-                progress: progressMap[sourceProgressKey(
-                  sourceId: widget.sourceId,
-                  seriesId: widget.seriesId,
-                  chapterId: chapter.id,
-                )],
+                progress: progressMap[chapter.id],
                 hasScope: hasScope,
                 status: downloadStatuses?[chapter.id],
                 audioSaved: narration[chapter.id]?.state ==
@@ -403,11 +407,12 @@ class _FrontMatter extends ConsumerWidget {
 /// "Start reading" / "Continue" — the one control a book page needs above
 /// everything else.
 ///
-/// The resume rule is the manga screen's, unchanged: a finished chapter
-/// advances to the next unread one at the top, an unfinished one reopens at
-/// the stored position. The only difference is what the stored position means
-/// — a paragraph bucket rather than a page — and since both ride `?page=`,
-/// this needs no arithmetic of its own.
+/// The one Continue rule ([seriesContinue]): the chapter the reader got
+/// furthest in, at its stored position — a paragraph bucket rather than a
+/// page, and since both ride `?page=` this needs no arithmetic of its own —
+/// or the chapter after it once that is finished. With nothing after it the
+/// reader is caught up, and the button says so rather than reopening the
+/// last chapter.
 class _ReadButton extends ConsumerWidget {
   const _ReadButton({
     required this.sourceId,
@@ -422,44 +427,37 @@ class _ReadButton extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     // Watched, not read: finishing a chapter in the reader and coming back
-    // must flip this from "Continue" to the next chapter without a refresh.
-    ref.watch(sourceProgressProvider);
-    final resume = ref.read(sourceProgressProvider.notifier).latestForSeries(
-          sourceId: sourceId,
-          seriesId: seriesId,
-        );
-    final ordered = sortSeriesChapters(
-      chapters,
-      numberOf: (chapter) => chapter.number,
-      order: SeriesChapterSortOrder.oldest,
+    // must move this on to the next chapter without a refresh.
+    final progress = ref.watch(
+      sourceSeriesProgressProvider((sourceId: sourceId, seriesId: seriesId)),
     );
-
-    String target;
-    if (resume != null) {
-      final index = ordered.indexWhere((c) => c.id == resume.chapterId);
-      final next = resume.progress.completed &&
-              index != -1 &&
-              index + 1 < ordered.length
-          ? ordered[index + 1]
-          : null;
-      if (next != null) {
-        target = RoutePaths.novelReader(sourceId, seriesId, next.id);
-      } else {
-        target = '${RoutePaths.novelReader(sourceId, seriesId, resume.chapterId)}'
-            '?page=${resume.progress.page}';
-      }
-    } else {
-      target = RoutePaths.novelReader(sourceId, seriesId, ordered.first.id);
-    }
+    final continueTo = seriesContinue(chapters: chapters, progress: progress);
+    final point = continueTo?.point;
+    final isStart = continueTo?.kind == SeriesContinueKind.start;
 
     return PrimaryPillButton(
       key: const Key('read-primary'),
       expanded: true,
-      onPressed: () => context.push(target),
-      icon: resume != null
-          ? Icons.play_arrow_rounded
-          : Icons.menu_book_outlined,
-      label: resume != null ? 'Continue' : 'Start reading',
+      onPressed: point == null
+          ? null
+          : () => context.push(
+                resumeLocation(
+                  sourceId: sourceId,
+                  seriesKey: seriesId,
+                  point: point,
+                  isNovel: true,
+                ),
+              ),
+      icon: isStart
+          ? Icons.menu_book_outlined
+          : point == null
+              ? Icons.done_all_rounded
+              : Icons.play_arrow_rounded,
+      label: isStart
+          ? 'Start reading'
+          : point == null
+              ? 'All caught up'
+              : 'Continue',
     );
   }
 }
@@ -499,6 +497,15 @@ class _TocRow extends ConsumerWidget {
     // Words and minutes when the phone actually has the chapter; otherwise
     // nothing, rather than a guess. A novel chapter's page count is always 0.
     final length = formatChapterLength(wordCount);
+
+    // The stored page is a progress BUCKET out of pageCount, not a percent:
+    // a short chapter has only a handful of buckets, so 13 of 16 is 81%.
+    final stored = progress;
+    final percentIn = stored == null
+        ? null
+        : stored.pageCount > 0
+            ? chapterPercent(stored.page, stored.pageCount)
+            : stored.page;
 
     return InkWell(
       onTap: onOpen,
@@ -548,8 +555,8 @@ class _TocRow extends ConsumerWidget {
                           if (length != null) length,
                           if (read)
                             'Read'
-                          else if (progress != null)
-                            '${progress!.page}% in',
+                          else if (percentIn != null)
+                            '$percentIn% in',
                           if (audioSaved) 'Audio saved',
                         ].join('  ·  '),
                         style: TextStyle(fontSize: 11, color: colors.muted),

@@ -17,6 +17,7 @@ import 'package:manhwamaniacs/features/settings/repositories/mature_settings_rep
 import 'package:manhwamaniacs/features/settings/repositories/mature_settings_repository_impl.dart';
 import 'package:manhwamaniacs/features/settings/services/image_cache_service.dart';
 import 'package:manhwamaniacs/features/sources/providers/source_pins_provider.dart';
+import 'package:manhwamaniacs/features/sources/providers/source_progress_provider.dart';
 import 'package:manhwamaniacs/features/sources/providers/sources_provider.dart';
 import 'package:manhwamaniacs/features/updates/providers/updates_provider.dart';
 import 'package:manhwamaniacs/shared/providers/core_providers.dart';
@@ -90,8 +91,8 @@ const Set<String> kMatureGatedBackendServices = {
   'browse_service',
   'followed_series_service',
   'ocr_ingest_service',
-  // Progress rows are written through the gate but no screen renders a list
-  // from it: every surface that shows progress reads one of the others.
+  // Progress rows are written through the gate, and a series' own rows are
+  // read back through it by the source and book pages.
   'progress_service',
   'reading_stats_service',
   'source_cache_service',
@@ -138,6 +139,9 @@ final List<void Function(Ref ref)> matureScopedInvalidators = [
   // Dialogue search and per-series coverage (ocr_ingest_service), families.
   (ref) => ref.invalidate(ocrSearchProvider),
   (ref) => ref.invalidate(ocrCoverageProvider),
+  // One series' stored positions (progress_service), family — a withheld
+  // series answers no rows, so a page open across the toggle must re-ask.
+  (ref) => ref.invalidate(sourceSeriesServerProgressProvider),
   // Collections list only the series the gate allows through, because their
   // rows come from the same followed-series read.
   (ref) => ref.invalidate(collectionsProvider),

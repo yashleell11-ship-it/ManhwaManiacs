@@ -34,6 +34,7 @@ import 'package:manhwamaniacs/features/reader/utils/reader_wakelock.dart';
 import 'package:manhwamaniacs/features/reader/utils/reading_clock.dart';
 import 'package:manhwamaniacs/features/reader/widgets/reader_error_state.dart';
 import 'package:manhwamaniacs/features/settings/providers/settings_provider.dart';
+import 'package:manhwamaniacs/features/sources/providers/source_progress_provider.dart';
 import 'package:manhwamaniacs/shared/providers/core_providers.dart';
 
 /// How often a scroll is turned into a progress position. The manga reader
@@ -596,6 +597,18 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
             ),
           );
     }
+    // Also into this phone's own store, as the manga reader does: the book
+    // page merges it with the server's rows, and the outbox may not have
+    // flushed by the time Back lands there — Continue must already know.
+    // Last, so the saves that matter are never behind this one.
+    if (!mounted) return;
+    await ref.read(sourceProgressProvider.notifier).record(
+          sourceId: chapter.sourceId,
+          seriesId: chapter.seriesKey,
+          chapterId: chapter.chapterKey,
+          page: position.bucket,
+          pageCount: position.buckets,
+        );
   }
 
   // ── Seamless continuation ────────────────────────────────────────────────

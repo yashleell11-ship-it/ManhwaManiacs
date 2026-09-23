@@ -18,6 +18,7 @@ import 'package:manhwamaniacs/features/downloads/widgets/chapter_download_action
 import 'package:manhwamaniacs/features/downloads/widgets/chapter_selection_actions.dart';
 import 'package:manhwamaniacs/features/downloads/widgets/download_series_button.dart';
 import 'package:manhwamaniacs/features/downloads/widgets/series_download_progress.dart';
+import 'package:manhwamaniacs/features/library/utils/resume_location.dart';
 import 'package:manhwamaniacs/features/novels/widgets/novel_series_detail_view.dart';
 import 'package:manhwamaniacs/features/reader/widgets/read_all_button.dart';
 import 'package:manhwamaniacs/features/sources/models/source_chapter_progress.dart';
@@ -214,7 +215,13 @@ class _SeriesDetailBodyState extends ConsumerState<_SeriesDetailBody> {
     _ensureSorted();
     final series = widget.series;
     final chapters = widget.chapters;
-    final progressMap = ref.watch(sourceProgressProvider);
+    // This phone's records and the server's, merged — the novel reader and
+    // the web save only to the server.
+    final progressMap = ref.watch(
+      sourceSeriesProgressProvider(
+        (sourceId: widget.sourceId, seriesId: widget.seriesId),
+      ),
+    );
     // Watched once for the whole page rather than per row: one store query
     // and one queue subscription drive every chapter's download state.
     final downloadStatuses = ref
@@ -226,10 +233,9 @@ class _SeriesDetailBodyState extends ConsumerState<_SeriesDetailBody> {
     final sortedChapters = _sortOrder == SeriesChapterSortOrder.newest
         ? _newestFirst
         : _oldestFirst;
-    final latestRead = ref.read(sourceProgressProvider.notifier).latestForSeries(
-          sourceId: widget.sourceId,
-          seriesId: widget.seriesId,
-        );
+    // The one Continue rule — see [seriesContinue].
+    final continueTo =
+        seriesContinue(chapters: chapters, progress: progressMap);
 
     return SeriesDetailBody(
       cover: series.coverUrl.isEmpty
@@ -250,12 +256,12 @@ class _SeriesDetailBodyState extends ConsumerState<_SeriesDetailBody> {
             chapters.isNotEmpty ? chapters.length : series.chapterCount,
       ),
       description: series.description,
-      primaryAction: chapters.isEmpty
+      primaryAction: continueTo == null
           ? null
           : _ReadPrimaryButton(
               sourceId: widget.sourceId,
               seriesId: widget.seriesId,
-              latestRead: latestRead,
+              continueTo: continueTo,
               orderedChapters: _oldestFirst,
             ),
       followAction: SeriesFollowButton(
@@ -327,7 +333,7 @@ class _SeriesDetailBodyState extends ConsumerState<_SeriesDetailBody> {
           _buildChapterTile(
             chapter: chapter,
             progressMap: progressMap,
-            latestRead: latestRead,
+            continueTo: continueTo,
             hasScope: hasScope,
             status: downloadStatuses?[chapter.id],
             downloadProgress: activeProgress?.chapterKey == chapter.id
@@ -351,12 +357,7 @@ class _SeriesDetailBodyState extends ConsumerState<_SeriesDetailBody> {
           key: chapter.id,
           number: chapter.number,
           title: chapter.title,
-          isRead: progressMap[sourceProgressKey(
-                sourceId: widget.sourceId,
-                seriesId: widget.seriesId,
-                chapterId: chapter.id,
-              )]?.completed ??
-              false,
+          isRead: progressMap[chapter.id]?.completed ?? false,
           isDownloaded: downloadStatuses?[chapter.id]?.state ==
               DownloadChapterState.complete,
         ),
@@ -366,16 +367,12 @@ class _SeriesDetailBodyState extends ConsumerState<_SeriesDetailBody> {
   Widget _buildChapterTile({
     required SourceChapterSummary chapter,
     required Map<String, SourceChapterProgress> progressMap,
-    required LatestSourceRead? latestRead,
+    required SeriesContinue? continueTo,
     required bool hasScope,
     required ChapterDownloadStatus? status,
     required ChapterDownloadProgress? downloadProgress,
   }) {
-    final progress = progressMap[sourceProgressKey(
-      sourceId: widget.sourceId,
-      seriesId: widget.seriesId,
-      chapterId: chapter.id,
-    )];
+    final progress = progressMap[chapter.id];
     final completed = progress?.completed ?? false;
     // Prefer the page count captured while reading (authoritative for this
     // reader), falling back to the source-provided count.
@@ -393,9 +390,11 @@ class _SeriesDetailBodyState extends ConsumerState<_SeriesDetailBody> {
       ),
       inProgress: progress != null && !completed,
       isRead: completed,
-      // "Reading" marks the chapter Continue would resume -- the last one
+      // "Reading" marks the chapter Continue would resume -- the furthest one
       // opened, and only while it is unfinished.
-      isCurrent: latestRead?.chapterId == chapter.id && !completed,
+      isCurrent: continueTo?.point?.chapterKey == chapter.id &&
+          progress != null &&
+          !completed,
       // While selecting, a row tap ticks the box instead of opening the
       // chapter: nothing else would explain what the checkbox is for.
       onTap: _selection.isActive
@@ -435,20 +434,21 @@ class _SeriesDetailBodyState extends ConsumerState<_SeriesDetailBody> {
 }
 
 /// Primary read CTA. "Continue" when there is progress — resuming the
-/// latest-read chapter at its saved page while it is still in progress, or
-/// advancing to the next chapter at page 1 once that chapter is finished —
-/// otherwise "Read Online" from the earliest chapter at page 1.
+/// chapter the reader got furthest in at its saved page while it is still in
+/// progress, or advancing to the next chapter at page 1 once that chapter is
+/// finished — otherwise "Read Online" from the earliest chapter at page 1.
+/// "All caught up", and inert, when the last chapter is read.
 class _ReadPrimaryButton extends StatelessWidget {
   const _ReadPrimaryButton({
     required this.sourceId,
     required this.seriesId,
-    required this.latestRead,
+    required this.continueTo,
     required this.orderedChapters,
   });
 
   final String sourceId;
   final String seriesId;
-  final LatestSourceRead? latestRead;
+  final SeriesContinue continueTo;
 
   /// Chapters in reading order (nulls-last ascending) — same comparator used
   /// for the earliest-chapter / auto-queue-next logic. Never empty (the button
@@ -457,32 +457,8 @@ class _ReadPrimaryButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final resume = latestRead;
-    final String target;
-    if (resume != null) {
-      final index =
-          orderedChapters.indexWhere((c) => c.id == resume.chapterId);
-      final nextChapter = resume.progress.completed &&
-              index != -1 &&
-              index + 1 < orderedChapters.length
-          ? orderedChapters[index + 1]
-          : null;
-      if (nextChapter != null) {
-        // The latest-read chapter is finished — advance to the next unread
-        // chapter at page 1 instead of reopening the completed one.
-        target = RoutePaths.sourceReader(sourceId, seriesId, nextChapter.id);
-      } else {
-        // Still mid-chapter (or nothing after a finished last chapter) —
-        // resume in place at the saved page.
-        final path =
-            RoutePaths.sourceReader(sourceId, seriesId, resume.chapterId);
-        target = '$path?page=${resume.progress.page}';
-      }
-    } else {
-      target =
-          RoutePaths.sourceReader(sourceId, seriesId, orderedChapters.first.id);
-    }
-    final isContinue = resume != null;
+    final point = continueTo.point;
+    final isStart = continueTo.kind == SeriesContinueKind.start;
 
     return Row(
       children: [
@@ -490,11 +466,28 @@ class _ReadPrimaryButton extends StatelessWidget {
           child: PrimaryPillButton(
             key: const Key('read-primary'),
             expanded: true,
-            onPressed: () => context.go(target),
-            icon: isContinue
-                ? Icons.play_arrow_rounded
-                : Icons.menu_book_outlined,
-            label: isContinue ? 'Continue' : 'Read Online',
+            // Caught up: everything to the last chapter is read, and
+            // Continue's answer — the book's page — is this page.
+            onPressed: point == null
+                ? null
+                : () => context.go(
+                      resumeLocation(
+                        sourceId: sourceId,
+                        seriesKey: seriesId,
+                        point: point,
+                        isNovel: false,
+                      ),
+                    ),
+            icon: isStart
+                ? Icons.menu_book_outlined
+                : point == null
+                    ? Icons.done_all_rounded
+                    : Icons.play_arrow_rounded,
+            label: isStart
+                ? 'Read Online'
+                : point == null
+                    ? 'All caught up'
+                    : 'Continue',
           ),
         ),
         SizedBox(width: context.space.sm),
@@ -511,23 +504,13 @@ class _ReadPrimaryButton extends StatelessWidget {
   }
 
   /// Where a Read-all session opens: the chapter Continue would open, or the
-  /// first chapter when nothing has been read. The mode is about how the
-  /// series is presented, not about starting over.
-  String _readAllStartId() {
-    final resume = latestRead;
-    if (resume == null) return orderedChapters.first.id;
-    final index = orderedChapters.indexWhere((c) => c.id == resume.chapterId);
-    if (resume.progress.completed &&
-        index != -1 &&
-        index + 1 < orderedChapters.length) {
-      return orderedChapters[index + 1].id;
-    }
-    return resume.chapterId;
-  }
+  /// first chapter when nothing is left to continue into. The mode is about
+  /// how the series is presented, not about starting over.
+  String _readAllStartId() =>
+      continueTo.point?.chapterKey ?? orderedChapters.first.id;
 
   String _readAllPageSuffix() {
-    final resume = latestRead;
-    if (resume == null || resume.progress.completed) return '';
-    return '&page=${resume.progress.page}';
+    final page = continueTo.point?.page ?? 1;
+    return page > 1 ? '&page=$page' : '';
   }
 }

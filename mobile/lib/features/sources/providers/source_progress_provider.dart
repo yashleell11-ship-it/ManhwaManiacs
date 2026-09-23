@@ -2,8 +2,10 @@ import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:manhwamaniacs/features/profiles/providers/profiles_providers.dart';
+import 'package:manhwamaniacs/features/reader/models/reading_progress.dart';
 import 'package:manhwamaniacs/features/sources/models/source_chapter_progress.dart';
 import 'package:manhwamaniacs/shared/providers/core_providers.dart';
+import 'package:manhwamaniacs/shared/providers/repository_providers.dart';
 
 /// SharedPreferences key prefix holding the full source-progress map as a JSON
 /// object mapping `"sourceId:seriesId:chapterId"` → the progress record. The
@@ -19,9 +21,6 @@ String sourceProgressKey({
   required String chapterId,
 }) =>
     '$sourceId:$seriesId:$chapterId';
-
-/// The latest-read chapter for a series and its progress record.
-typedef LatestSourceRead = ({String chapterId, SourceChapterProgress progress});
 
 /// Holds the decoded source-progress map, hydrated from SharedPreferences.
 ///
@@ -198,27 +197,110 @@ class SourceProgressNotifier
           entry.key.substring(prefix.length): entry.value,
     };
   }
-
-  /// The most recently read chapter for a series (max ``updatedAt``), or
-  /// ``null`` when the series has no progress yet.
-  LatestSourceRead? latestForSeries({
-    required String sourceId,
-    required String seriesId,
-  }) {
-    MapEntry<String, SourceChapterProgress>? best;
-    for (final entry in forSeries(sourceId: sourceId, seriesId: seriesId)
-        .entries) {
-      if (best == null || entry.value.updatedAt.isAfter(best.value.updatedAt)) {
-        best = entry;
-      }
-    }
-    if (best == null) return null;
-    return (chapterId: best.key, progress: best.value);
-  }
 }
 
 final sourceProgressProvider =
     NotifierProvider<SourceProgressNotifier, Map<String, SourceChapterProgress>>(
   SourceProgressNotifier.new,
   name: 'sourceProgress',
+);
+
+/// One series, as the per-series progress providers are keyed.
+typedef SourceSeriesRef = ({String sourceId, String seriesId});
+
+/// The server's stored positions for ONE series (`GET /reader/progress/series`),
+/// keyed by chapter key, in this store's record shape.
+///
+/// The series screens used to read only the store above, which only the manga
+/// reader writes and only on THIS phone: the novel reader saves to the server
+/// alone, so a book read here or on the web showed nothing read and offered
+/// "Start reading" however far in the reader was. The web merges the same
+/// endpoint under its own store (`series-progress.ts`).
+///
+/// 18+-gated: a withheld series answers an empty list, so this is dropped with
+/// the other gated caches when the switch flips (`matureScopedInvalidators`).
+/// Watches the active profile, so a profile switch refetches it — positions
+/// are per (user, profile).
+final sourceSeriesServerProgressProvider = FutureProvider.autoDispose
+    .family<Map<String, SourceChapterProgress>, SourceSeriesRef>(
+  (ref, series) async {
+    final profileId = ref.watch(activeProfileProvider)?.id;
+    if (profileId == null) return const {};
+    final result = await ref.watch(readerRepositoryProvider).seriesProgress(
+          sourceId: series.sourceId,
+          seriesKey: series.seriesId,
+        );
+    if (result.isErr) throw result.error;
+    return serverProgressMap(result.value);
+  },
+  name: 'sourceSeriesServerProgress',
+);
+
+/// Server rows in this store's record shape, keyed by chapter key.
+///
+/// `last_page` is a page for a manga chapter and a progress BUCKET for a novel
+/// one, which is the unit the local record already holds for each.
+Map<String, SourceChapterProgress> serverProgressMap(
+  List<ReadingProgress> rows,
+) {
+  return {
+    for (final row in rows)
+      if (row.chapterKey.isNotEmpty)
+        row.chapterKey: SourceChapterProgress(
+          page: row.lastPage < 1 ? 1 : row.lastPage,
+          pageCount: row.pageCount < 0 ? 0 : row.pageCount,
+          completed: row.isCompleted,
+          updatedAt: row.lastReadAt?.toUtc() ??
+              DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
+        ),
+  };
+}
+
+/// One series' positions from both stores, furthest-wins per chapter.
+///
+/// The server's own merge rule (`merge_progress`), not "server wins": the
+/// manga reader writes this phone's store on every page and the server only
+/// when its outbox flushes, so the local record is often the newer of the two
+/// and replacing it would rewind the page the reader just left.
+Map<String, SourceChapterProgress> mergeSourceProgress(
+  Map<String, SourceChapterProgress> local,
+  Map<String, SourceChapterProgress> server,
+) {
+  final merged = {...local};
+  for (final entry in server.entries) {
+    final mine = merged[entry.key];
+    final theirs = entry.value;
+    merged[entry.key] = mine == null
+        ? theirs
+        : SourceChapterProgress(
+            page: mine.page > theirs.page ? mine.page : theirs.page,
+            pageCount: mine.pageCount > theirs.pageCount
+                ? mine.pageCount
+                : theirs.pageCount,
+            completed: mine.completed || theirs.completed,
+            updatedAt: mine.updatedAt.isAfter(theirs.updatedAt)
+                ? mine.updatedAt
+                : theirs.updatedAt,
+          );
+  }
+  return merged;
+}
+
+/// Everything a series screen shows about reading position: this phone's
+/// records and the server's, merged. Rebuilds when the reader records a page
+/// here, and again when the server's answer lands.
+final sourceSeriesProgressProvider = Provider.autoDispose
+    .family<Map<String, SourceChapterProgress>, SourceSeriesRef>(
+  (ref, series) {
+    ref.watch(sourceProgressProvider);
+    final local = ref.read(sourceProgressProvider.notifier).forSeries(
+          sourceId: series.sourceId,
+          seriesId: series.seriesId,
+        );
+    final server =
+        ref.watch(sourceSeriesServerProgressProvider(series)).valueOrNull ??
+            const <String, SourceChapterProgress>{};
+    return mergeSourceProgress(local, server);
+  },
+  name: 'sourceSeriesProgress',
 );

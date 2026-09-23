@@ -30,9 +30,8 @@ const Map<String, List<String>> _providersByService = {
     'collectionDetailProvider',
   ],
   'ocr_ingest_service': ['ocrSearchProvider', 'ocrCoverageProvider'],
-  // Progress is written through the gate but never listed from it: every
-  // screen that shows a reading position reads one of the other services.
-  'progress_service': [],
+  // A series' own positions, read back by the source and book pages.
+  'progress_service': ['sourceSeriesServerProgressProvider'],
   'reading_stats_service': [
     'statisticsProvider',
     'recommendationsProvider',
