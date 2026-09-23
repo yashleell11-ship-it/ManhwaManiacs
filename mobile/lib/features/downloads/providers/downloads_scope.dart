@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:manhwamaniacs/core/logging/app_logger.dart';
 import 'package:manhwamaniacs/features/auth/models/auth_state.dart';
 import 'package:manhwamaniacs/features/auth/providers/auth_controller.dart';
 import 'package:manhwamaniacs/features/downloads/services/blob_store.dart';
@@ -43,22 +46,120 @@ final activeDownloadsScopeIdProvider = Provider<String?>(
 /// platform-channel error.
 const _openTimeout = Duration(seconds: 3);
 
+/// How [downloadsDatabaseProvider] opens the database. A provider only so a
+/// test can stand in a failing or hanging open.
+final downloadsDatabaseOpenerProvider = Provider<Future<Database> Function()>(
+  (ref) => openDownloadsDatabase,
+  name: 'downloadsDatabaseOpener',
+);
+
+/// How [blobStoreProvider] locates the blob tree; see
+/// [downloadsDatabaseOpenerProvider].
+final blobStoreOpenerProvider = Provider<Future<BlobStore> Function()>(
+  (ref) => BlobStore.forApplicationDocuments,
+  name: 'blobStoreOpener',
+);
+
 /// The single shared database backing every scope's `saved_chapters` /
 /// `saved_pages` rows and the cross-scope `blobs` table. Opened once
 /// (`keepAlive` — a `Provider`, not `autoDispose`) and reused for the life of
 /// the app; switching profiles only changes which `scope_id` rows a
 /// [DownloadsStore] built on top of it will read or write.
+///
+/// Only a SUCCESSFUL open is kept: see [_retriedOnFailure].
 final downloadsDatabaseProvider = Provider<Future<Database>>(
-  (ref) => openDownloadsDatabase().timeout(_openTimeout),
+  (ref) => _retriedOnFailure(
+    ref,
+    ref.watch(downloadsDatabaseOpenerProvider)().timeout(_openTimeout),
+    failures: ref.watch(_databaseOpenFailuresProvider),
+    what: 'downloads database',
+  ),
   name: 'downloadsDatabase',
 );
 
 /// The content-addressed blob tree under `Documents/mm-store/blobs` — shared
 /// across scopes for cross-profile dedup, same reasoning as the database.
 final blobStoreProvider = Provider<Future<BlobStore>>(
-  (ref) => BlobStore.forApplicationDocuments().timeout(_openTimeout),
+  (ref) => _retriedOnFailure(
+    ref,
+    ref.watch(blobStoreOpenerProvider)().timeout(_openTimeout),
+    failures: ref.watch(_blobStoreOpenFailuresProvider),
+    what: 'blob store',
+  ),
   name: 'blobStore',
 );
+
+/// Failed opens in a row, kept outside the provider it counts for because
+/// that provider's own state is discarded on every retry.
+class _OpenFailures {
+  int count = 0;
+}
+
+final _databaseOpenFailuresProvider = Provider<_OpenFailures>(
+  (ref) => _OpenFailures(),
+  name: 'downloadsDatabaseOpenFailures',
+);
+
+final _blobStoreOpenFailuresProvider = Provider<_OpenFailures>(
+  (ref) => _OpenFailures(),
+  name: 'blobStoreOpenFailures',
+);
+
+/// The longest [_retriedOnFailure] waits between two attempts.
+const _maxRetryDelay = Duration(seconds: 30);
+
+/// [opening], with the provider building it invalidated if it fails.
+///
+/// These providers live for the whole process, so a failed Future they
+/// returned used to be THE answer until the app was killed: one slow cold
+/// start that tripped [_openTimeout] left every progress save throwing before
+/// its POST and every outbox flush failing silently, for the rest of the
+/// session. Invalidated, the next read opens again — and a store built on
+/// the old Future is rebuilt with it, since [downloadsStoreProvider] watches
+/// this one.
+///
+/// The first failure is retried at once. Further ones in a row wait 1 s, 2 s,
+/// 4 s … up to [_maxRetryDelay]: every screen watching the store rebuilds on
+/// each invalidation and opens again as it does, so an open that fails
+/// straight away, every time (a corrupt file), would otherwise be retried
+/// once a frame.
+Future<T> _retriedOnFailure<T>(
+  Ref ref,
+  Future<T> opening, {
+  required _OpenFailures failures,
+  required String what,
+}) {
+  var disposed = false;
+  Timer? retry;
+  ref.onDispose(() {
+    disposed = true;
+    retry?.cancel();
+  });
+  unawaited(
+    opening.then<void>(
+      (_) => failures.count = 0,
+      onError: (Object error, StackTrace stackTrace) {
+        final inARow = failures.count++;
+        appLogger.w(
+          'Opening the $what failed ($inARow before it in a row); retrying',
+          error,
+          stackTrace,
+        );
+        if (disposed) return;
+        if (inARow == 0) {
+          ref.invalidateSelf();
+          return;
+        }
+        final seconds = 1 << (inARow - 1).clamp(0, 5);
+        final wait = Duration(seconds: seconds) > _maxRetryDelay
+            ? _maxRetryDelay
+            : Duration(seconds: seconds);
+        retry = Timer(wait, ref.invalidateSelf);
+      },
+    ),
+  );
+  return opening;
+}
 
 /// The on-device chapter store for the active `(user, profile)` scope, or
 /// `null` when no scope is resolvable — the structural half of isolation
