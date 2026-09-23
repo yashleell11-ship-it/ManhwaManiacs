@@ -1195,8 +1195,8 @@ export function ChapterReader({
         just answers those requests from the cache when the network is gone.
       */}
       {/* `data-reader-chrome` here and on the controls below: resting the
-          pointer or keyboard focus in either holds the chrome up, and focus
-          arriving in either brings it back (`chrome-autohide.ts`). */}
+          pointer or Tab-reached focus in either holds the chrome up, and Tab
+          reaching either brings it back (`chrome-autohide.ts`). */}
       <div onClick={(event) => event.stopPropagation()} role="presentation" data-reader-chrome="">
         <DownloadChapterControl
           chapter={chapter}

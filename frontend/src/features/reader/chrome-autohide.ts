@@ -13,11 +13,13 @@
  * - A mouse or pen reveals it only by moving into the band where the chrome
  *   lives: the bottom {@link CHROME_BOTTOM_BAND_PX} or the top
  *   {@link CHROME_TOP_BAND_PX} of the reader. Touch never reveals by moving.
- * - Scroll and page keys never reveal it; Tab does, and so does focus landing
- *   inside it, so a keyboard can always reach the controls.
- * - Reaching the end of the strip reveals it (the reader wires that).
- * - It never auto-hides from under a pointer resting on it or a control inside
- *   it that has keyboard focus.
+ * - Scroll and page keys never reveal it; they hide it, as reading. Tab reveals
+ *   it, and so does focus reaching it from the keyboard, so a keyboard can
+ *   always reach the controls.
+ * - Reaching the end of the strip reveals it (the reader wires that), and
+ *   nothing hides it there.
+ * - It never auto-hides from under a pointer resting on it, a control in it
+ *   that Tab reached, or its page box while it is being typed in.
  *
  * The decisions are pure functions; {@link installChromeAutohide} wires them to
  * events against plain `EventTarget`s, so all of it runs under node.
@@ -33,9 +35,9 @@ export const CHROME_BOTTOM_BAND_PX = 120;
 export const CHROME_TOP_BAND_PX = 80;
 
 /**
- * Marks an element (and everything inside it) as reader chrome. Hovering or
- * keyboard-focusing anything under it holds the chrome up; focus arriving in
- * it reveals the chrome.
+ * Marks an element (and everything inside it) as reader chrome. Hovering it, or
+ * focusing a control in it from the keyboard, holds the chrome up; keyboard
+ * focus arriving in it reveals the chrome.
  */
 export const READER_CHROME_SELECTOR = "[data-reader-chrome]";
 
@@ -103,8 +105,8 @@ export function followScroll(
  *
  * - `focus`: Tab / Shift+Tab, moving keyboard focus — reveals, so the bar can
  *   take focus (hidden, it is out of the Tab order).
- * - `navigation`: the keys that scroll or turn pages. Never reveal; if they
- *   move the strip, the scroll hides the chrome.
+ * - `navigation`: the keys that scroll or turn pages. Never reveal. They are
+ *   reading, so they let go of any focus hold and hide the chrome.
  * - `other`: everything else, reader shortcuts included. Their own action
  *   decides (C toggles cinema, Escape peels it); the key itself is not
  *   activity.
@@ -149,23 +151,88 @@ export function withinChrome(target: unknown): boolean {
   return closest.call(target, READER_CHROME_SELECTOR) != null;
 }
 
+/** Just enough of an element to classify it; duck-typed so node can test it. */
+interface ElementLike {
+  tagName?: unknown;
+  type?: unknown;
+  isContentEditable?: unknown;
+  getAttribute?: unknown;
+}
+
+function tagOf(element: ElementLike): string {
+  return typeof element.tagName === "string" ? element.tagName.toUpperCase() : "";
+}
+
+function roleOf(target: unknown): string | null {
+  const getAttribute = (target as ElementLike).getAttribute;
+  if (typeof getAttribute !== "function") return null;
+  const role: unknown = getAttribute.call(target, "role");
+  return typeof role === "string" ? role : null;
+}
+
+/** Widgets whose arrow, Home/End or Space keys work the widget, not the page. */
+const KEY_WIDGET_ROLES = new Set([
+  "combobox",
+  "grid",
+  "listbox",
+  "menu",
+  "menubar",
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "option",
+  "radio",
+  "radiogroup",
+  "searchbox",
+  "slider",
+  "spinbutton",
+  "tab",
+  "tablist",
+  "textbox",
+  "tree",
+  "treeitem",
+]);
+
 /**
- * Keyboard focus is inside the chrome. `:focus-visible` rather than any focus:
- * a mouse click leaves focus on the button it clicked, and holding the chrome
- * up for that would bring back the bug this module exists to fix.
+ * Whether a key pressed on `target` works that control rather than the page:
+ * a caret moving in the page box, the scrub bar stepping, a slider sliding.
+ * Those keys are not reading, whatever `classifyChromeKey` calls them.
  */
-function keyboardFocusInChrome(active: Element | null): boolean {
-  if (!active || !withinChrome(active)) return false;
-  try {
-    return active.matches(":focus-visible");
-  } catch {
-    // No `:focus-visible` support: any focus holds, per the plain rule.
-    return true;
+export function ownsKeys(target: unknown): boolean {
+  if (target == null || typeof target !== "object") return false;
+  const element = target as ElementLike;
+  const tag = tagOf(element);
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (element.isContentEditable === true) return true;
+  const role = roleOf(target);
+  return role != null && KEY_WIDGET_ROLES.has(role);
+}
+
+const TEXT_INPUT_TYPES = new Set(["", "text", "search", "url", "tel", "email", "password", "number"]);
+
+/**
+ * Whether `target` takes typing: a text field, a textarea, or editable text.
+ * The page box is one. Focus in it holds the chrome however it got there, or
+ * the bar would slide away from under a page number being typed.
+ */
+export function isTextEntry(target: unknown): boolean {
+  if (target == null || typeof target !== "object") return false;
+  const element = target as ElementLike;
+  const tag = tagOf(element);
+  if (tag === "TEXTAREA" || element.isContentEditable === true) return true;
+  if (tag === "INPUT") {
+    const type = typeof element.type === "string" ? element.type.toLowerCase() : "";
+    return TEXT_INPUT_TYPES.has(type);
   }
+  const role = roleOf(target);
+  return role === "textbox" || role === "searchbox";
 }
 
 export interface ChromeAutohide {
-  /** The pointer rests on the chrome, or a control in it has keyboard focus. */
+  /**
+   * The pointer rests on the chrome, a control in it has focus that Tab put
+   * there, or its page box has focus.
+   */
   held: () => boolean;
   teardown: () => void;
 }
@@ -174,6 +241,13 @@ export interface ChromeAutohide {
  * Wire the rules to real events. `reveal` and `conceal` are the caller's (they
  * differ by mode); this only decides when to call them, and never calls
  * `conceal` while {@link ChromeAutohide.held}.
+ *
+ * Whether focus in the chrome came from the keyboard is decided by the input
+ * before it — a Tab or a pointer press — and not by `:focus-visible`. After a
+ * mouse click on Prev, Next or Save the button keeps focus, and the next key
+ * press, Space included, makes browsers call that keyboard focus and match
+ * `:focus-visible`: one click and a Space pinned the bar for the rest of the
+ * chapter.
  */
 export function installChromeAutohide({
   events,
@@ -200,8 +274,27 @@ export function installChromeAutohide({
   let pointerOnChrome = false;
   let lastPoint: { x: number; y: number } | null = null;
   let run: ScrollRun | null = scroller ? { top: scroller.scrollTop, down: 0 } : null;
+  // What the reader last did that says where focus came from: a Tab, a
+  // pointer press, or a scroll or page key (back to the pages).
+  let lastInput: "tab" | "pointer" | "reading" | null = null;
+  // Focus came into the chrome on a Tab and has not left it since.
+  let keyboardFocus = false;
 
-  const held = () => pointerOnChrome || keyboardFocusInChrome(activeElement());
+  const held = () => {
+    if (pointerOnChrome) return true;
+    const active = activeElement();
+    if (!active || !withinChrome(active)) return false;
+    return keyboardFocus || isTextEntry(active);
+  };
+
+  const onPointerDown = (event: Event) => {
+    lastInput = "pointer";
+    keyboardFocus = false;
+    const { target } = event;
+    // Using the bar is activity: in cinema mode it restarts the idle timer.
+    // Hidden, the chrome takes no pointer, so this never brings it back.
+    if (withinChrome(target)) reveal();
+  };
 
   const onPointerMove = (event: Event) => {
     const { pointerType, clientX, clientY } = event as PointerEvent;
@@ -223,11 +316,38 @@ export function installChromeAutohide({
   };
 
   const onKeyDown = (event: Event) => {
-    if (classifyChromeKey(event as KeyboardEvent) === "focus") reveal();
+    const kind = classifyChromeKey(event as KeyboardEvent);
+    if (kind === "focus") {
+      lastInput = "tab";
+      reveal();
+      return;
+    }
+    if (kind !== "navigation" || ownsKeys(event.target)) return;
+    // Reading. Whatever focus is in the chrome, the reader has gone back to
+    // the pages.
+    lastInput = "reading";
+    keyboardFocus = false;
+    if (!atEnd() && !held()) conceal();
   };
 
   const onFocusIn = (event: Event) => {
-    if (withinChrome(event.target)) reveal();
+    if (!withinChrome(event.target)) return;
+    if (lastInput === "tab") {
+      keyboardFocus = true;
+      reveal();
+    } else if (lastInput === null) {
+      // Nothing says how it got here (a screen reader, say): show the bar it
+      // landed in, but do not hold it.
+      reveal();
+    }
+    // After a click, focus in the chrome is the click's, and the pointer has
+    // already shown the bar. After a scroll key the reader is on the pages.
+    // Either way, the same focus coming back with the window is not a reason
+    // to bring the bar up.
+  };
+
+  const onFocusOut = (event: Event) => {
+    if (!withinChrome((event as FocusEvent).relatedTarget)) keyboardFocus = false;
   };
 
   const onScroll = () => {
@@ -237,22 +357,29 @@ export function installChromeAutohide({
     if (step.conceal && !atEnd() && !held()) conceal();
   };
 
+  // Presses and keys in the capture phase: the chrome stops clicks from
+  // bubbling out of it, and the reader must still see every one.
   const passive = { passive: true } as const;
+  const early = { passive: true, capture: true } as const;
+  events.addEventListener("pointerdown", onPointerDown, early);
+  events.addEventListener("keydown", onKeyDown, early);
   events.addEventListener("pointermove", onPointerMove, passive);
   events.addEventListener("pointerover", onPointerOver, passive);
   events.addEventListener("pointerout", onPointerOut, passive);
-  events.addEventListener("keydown", onKeyDown, passive);
   events.addEventListener("focusin", onFocusIn, passive);
+  events.addEventListener("focusout", onFocusOut, passive);
   scroller?.addEventListener("scroll", onScroll, passive);
 
   return {
     held,
     teardown() {
+      events.removeEventListener("pointerdown", onPointerDown, early);
+      events.removeEventListener("keydown", onKeyDown, early);
       events.removeEventListener("pointermove", onPointerMove);
       events.removeEventListener("pointerover", onPointerOver);
       events.removeEventListener("pointerout", onPointerOut);
-      events.removeEventListener("keydown", onKeyDown);
       events.removeEventListener("focusin", onFocusIn);
+      events.removeEventListener("focusout", onFocusOut);
       scroller?.removeEventListener("scroll", onScroll);
     },
   };
