@@ -127,7 +127,7 @@ class _FakeUpdatesRepository implements UpdatesRepository {
   Future<Result<void>> markRead(int notificationId) => throw UnimplementedError();
 
   @override
-  Future<Result<void>> markAllRead() => throw UnimplementedError();
+  Future<Result<void>> markAllRead({String? contentKind}) => throw UnimplementedError();
 
   @override
   Future<Result<List<UpdateRun>>> listRuns({int limit = 20}) =>

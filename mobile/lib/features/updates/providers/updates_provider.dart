@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:manhwamaniacs/core/error/app_error.dart';
+import 'package:manhwamaniacs/features/content_mode/content_mode.dart';
 import 'package:manhwamaniacs/features/library/models/followed_series.dart';
 import 'package:manhwamaniacs/features/updates/models/update_notification.dart';
 import 'package:manhwamaniacs/shared/providers/repository_providers.dart';
@@ -10,6 +11,7 @@ class UpdatesState {
     required this.unreadCount,
     required this.followed,
     this.actionPending = false,
+    this.checking = false,
   });
 
   final List<UpdateNotification> notifications;
@@ -21,17 +23,24 @@ class UpdatesState {
   final List<FollowedSeries> followed;
   final bool actionPending;
 
+  /// A "Check now" is in flight: sent, and — when the server queued it on its
+  /// worker — still being waited out. The button says so instead of looking
+  /// like a check that finished and found nothing.
+  final bool checking;
+
   UpdatesState copyWith({
     List<UpdateNotification>? notifications,
     int? unreadCount,
     List<FollowedSeries>? followed,
     bool? actionPending,
+    bool? checking,
   }) =>
       UpdatesState(
         notifications: notifications ?? this.notifications,
         unreadCount: unreadCount ?? this.unreadCount,
         followed: followed ?? this.followed,
         actionPending: actionPending ?? this.actionPending,
+        checking: checking ?? this.checking,
       );
 }
 
@@ -46,9 +55,32 @@ final updatesProvider =
 /// list, which had no pagination either).
 const _followedIndexPageSize = 200;
 
+/// When to look again after a "Check now" the server queued, as waits between
+/// looks: at about 3, 8 and 15 seconds. A queued check runs on the server's
+/// worker after the request has already answered (a pass took ~6 s in the run
+/// log), so re-reading the list straight away shows the old one. Stops early
+/// once the unread count moves. An override point for tests.
+final updateCheckPollDelaysProvider = Provider<List<Duration>>(
+  (ref) => const [
+    Duration(seconds: 3),
+    Duration(seconds: 5),
+    Duration(seconds: 7),
+  ],
+  name: 'updateCheckPollDelays',
+);
+
 class UpdatesNotifier extends AutoDisposeAsyncNotifier<UpdatesState> {
+  /// Riverpod 2.6 has no `ref.mounted`, and a queued check's follow-up looks
+  /// can outlive the screen. Re-armed on every build, since a rebuild runs the
+  /// dispose callbacks on this same instance.
+  bool _alive = false;
+
   @override
-  Future<UpdatesState> build() async => _fetch();
+  Future<UpdatesState> build() async {
+    _alive = true;
+    ref.onDispose(() => _alive = false);
+    return _fetch();
+  }
 
   Future<void> refresh() async {
     // Keep the current data visible while re-fetching so action-driven reloads
@@ -83,20 +115,56 @@ class UpdatesNotifier extends AutoDisposeAsyncNotifier<UpdatesState> {
     return null;
   }
 
-  Future<AppError?> markAllRead() async {
+  /// Marks every unread notification read — only [mode]'s when given, which
+  /// is what the screen passes while it lists one content mode (see
+  /// `markAllReadMode`). Null clears every mode.
+  Future<AppError?> markAllRead({ContentMode? mode}) async {
     final repo = ref.read(updatesRepositoryProvider);
-    final result = await repo.markAllRead();
+    final result = await repo.markAllRead(contentKind: mode?.wire);
     if (result.isErr) return result.error;
     await refresh();
     return null;
   }
 
+  /// "Check now". When the server runs the check inline the answer already
+  /// holds its result; when it queues it on its worker (production, with the
+  /// scheduler up) nothing has been fetched yet, so this keeps looking for a
+  /// few seconds — see [updateCheckPollDelaysProvider] — before the final
+  /// reload, instead of reloading once, too early, and showing no new
+  /// chapters for a check that found some.
   Future<AppError?> triggerCheck() async {
     final repo = ref.read(updatesRepositoryProvider);
+    _setChecking(true);
     final result = await repo.triggerCheck();
-    if (result.isErr) return result.error;
+    if (result.isErr) {
+      _setChecking(false);
+      return result.error;
+    }
+    if (result.value.queued) {
+      await _awaitQueuedCheck(before: state.valueOrNull?.unreadCount);
+    }
+    if (!_alive) return null;
+    // A fresh fetch, so `checking` is back to false with the new list.
     await refresh();
     return null;
+  }
+
+  Future<void> _awaitQueuedCheck({required int? before}) async {
+    final delays = ref.read(updateCheckPollDelaysProvider);
+    final repo = ref.read(updatesRepositoryProvider);
+    for (final delay in delays) {
+      await Future<void>.delayed(delay);
+      if (!_alive) return;
+      final count = await repo.getUnreadCount();
+      if (count.isOk && count.value != before) return;
+    }
+  }
+
+  void _setChecking(bool checking) {
+    final current = state.valueOrNull;
+    if (current != null) {
+      state = AsyncData(current.copyWith(checking: checking));
+    }
   }
 
   Future<AppError?> unfollow(int followedId) async {

@@ -24,7 +24,9 @@ abstract interface class UpdatesRepository {
 
   Future<Result<void>> markRead(int notificationId);
 
-  Future<Result<void>> markAllRead();
+  /// `POST /updates/notifications/read-all`. [contentKind] (`'manga'` /
+  /// `'novel'`) clears only that content mode's rows; null clears every mode.
+  Future<Result<void>> markAllRead({String? contentKind});
 
   Future<Result<List<UpdateRun>>> listRuns({int limit = 20});
 

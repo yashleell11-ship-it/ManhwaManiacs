@@ -241,7 +241,7 @@ class _FakeUpdatesRepository implements UpdatesRepository {
   Future<Result<void>> markRead(int notificationId) async => const Ok(null);
 
   @override
-  Future<Result<void>> markAllRead() async => const Ok(null);
+  Future<Result<void>> markAllRead({String? contentKind}) async => const Ok(null);
 
   @override
   Future<Result<UpdateSettings>> getSettings() => throw UnimplementedError();

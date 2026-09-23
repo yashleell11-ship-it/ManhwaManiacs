@@ -12,6 +12,7 @@ import 'package:manhwamaniacs/features/content_mode/content_mode.dart';
 import 'package:manhwamaniacs/features/content_mode/content_mode_controller.dart';
 import 'package:manhwamaniacs/features/content_mode/widgets/content_mode_chip.dart';
 import 'package:manhwamaniacs/features/library/models/followed_series.dart';
+import 'package:manhwamaniacs/features/updates/mark_all_read.dart';
 import 'package:manhwamaniacs/features/updates/models/update_notification.dart';
 import 'package:manhwamaniacs/features/updates/providers/updates_provider.dart';
 import 'package:manhwamaniacs/shared/widgets/empty_state.dart';
@@ -57,7 +58,9 @@ class UpdatesScreen extends ConsumerWidget {
           IconButton(
             tooltip: 'Check now',
             color: context.colors.primary,
-            onPressed: () => _run(context, notifier.triggerCheck()),
+            onPressed: updatesAsync.valueOrNull?.checking ?? false
+                ? null
+                : () => _run(context, notifier.triggerCheck()),
             icon: const Icon(Icons.refresh),
           ),
         ],
@@ -85,6 +88,12 @@ class UpdatesScreen extends ConsumerWidget {
             for (final f in state.followed) f.id: f.title,
           };
           final unread = notifications.where((n) => !n.isRead).length;
+          // Clears the mode this list shows, not the whole account: the other
+          // mode's chapters were never on screen to be "read".
+          final markAllMode = markAllReadMode(
+            novelsEnabled: scope.novelsEnabled,
+            mode: scope.mode,
+          );
           final gutter = context.space.xl2;
           return RefreshIndicator(
             color: context.colors.primary,
@@ -115,17 +124,23 @@ class UpdatesScreen extends ConsumerWidget {
                             runSpacing: context.space.sm,
                             children: [
                               PrimaryPillButton(
-                                label: 'Check all now',
+                                label: state.checking
+                                    ? 'Checking…'
+                                    : 'Check all now',
                                 icon: Icons.sync,
-                                onPressed: () =>
-                                    _run(context, notifier.triggerCheck()),
+                                onPressed: state.checking
+                                    ? null
+                                    : () =>
+                                        _run(context, notifier.triggerCheck()),
                               ),
                               if (unread > 0)
                                 GhostPillButton(
-                                  label: 'Mark all read',
+                                  label: markAllReadLabel(markAllMode),
                                   icon: Icons.done_all,
-                                  onPressed: () =>
-                                      _run(context, notifier.markAllRead()),
+                                  onPressed: () => _run(
+                                    context,
+                                    notifier.markAllRead(mode: markAllMode),
+                                  ),
                                 ),
                             ],
                           ),

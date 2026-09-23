@@ -97,9 +97,12 @@ class UpdatesRepositoryImpl implements UpdatesRepository {
   }
 
   @override
-  Future<Result<void>> markAllRead() async {
+  Future<Result<void>> markAllRead({String? contentKind}) async {
     try {
-      await _dio.post<void>('/updates/notifications/read-all');
+      await _dio.post<void>(
+        '/updates/notifications/read-all',
+        data: contentKind == null ? null : {'content_kind': contentKind},
+      );
       return const Ok(null);
     } on DioException catch (e) {
       return Err(_err(e));

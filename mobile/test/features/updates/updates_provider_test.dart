@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:manhwamaniacs/core/error/app_error.dart';
 import 'package:manhwamaniacs/core/utils/pagination.dart';
 import 'package:manhwamaniacs/core/utils/result.dart';
+import 'package:manhwamaniacs/features/content_mode/content_mode.dart';
 import 'package:manhwamaniacs/features/library/models/collection.dart';
 import 'package:manhwamaniacs/features/library/models/collection_detail.dart';
 import 'package:manhwamaniacs/features/library/models/continue_reading_item.dart';
@@ -50,8 +51,23 @@ class _FakeUpdatesRepository implements UpdatesRepository {
     this.unreadCount = 0,
   });
 
-  final List<UpdateNotification> notifications;
-  final int unreadCount;
+  List<UpdateNotification> notifications;
+  int unreadCount;
+
+  /// What the last read-all asked to clear, and how many there were.
+  String? markAllKind;
+  int markAllCalls = 0;
+
+  /// Answer "Check now" the way production does with its scheduler up: queued
+  /// on the worker, nothing fetched yet.
+  bool queueChecks = false;
+
+  /// What the queued check will find, and on which unread-count read after
+  /// queueing the server's worker has finished and written it.
+  UpdateNotification? queuedFind;
+  int findOnRead = 2;
+  int readsSinceQueued = 0;
+  bool _queued = false;
 
   @override
   Future<Result<List<UpdateNotification>>> listNotifications({
@@ -61,13 +77,27 @@ class _FakeUpdatesRepository implements UpdatesRepository {
       Ok(notifications);
 
   @override
-  Future<Result<int>> getUnreadCount() async => Ok(unreadCount);
+  Future<Result<int>> getUnreadCount() async {
+    if (_queued) {
+      readsSinceQueued++;
+      if (queuedFind != null && readsSinceQueued >= findOnRead) {
+        notifications = [...notifications, queuedFind!];
+        unreadCount++;
+        queuedFind = null;
+      }
+    }
+    return Ok(unreadCount);
+  }
 
   @override
   Future<Result<void>> markRead(int notificationId) async => const Ok(null);
 
   @override
-  Future<Result<void>> markAllRead() async => const Ok(null);
+  Future<Result<void>> markAllRead({String? contentKind}) async {
+    markAllCalls++;
+    markAllKind = contentKind;
+    return const Ok(null);
+  }
 
   @override
   Future<Result<UpdateSettings>> getSettings() => throw UnimplementedError();
@@ -85,8 +115,11 @@ class _FakeUpdatesRepository implements UpdatesRepository {
   Future<Result<List<UpdateRun>>> listRuns({int limit = 20}) => throw UnimplementedError();
 
   @override
-  Future<Result<UpdateCheckOutcome>> triggerCheck({List<int>? followedIds}) async =>
-      const Ok(UpdateCheckOutcome(queued: false));
+  Future<Result<UpdateCheckOutcome>> triggerCheck({List<int>? followedIds}) async {
+    if (!queueChecks) return const Ok(UpdateCheckOutcome(queued: false));
+    _queued = true;
+    return const Ok(UpdateCheckOutcome(queued: true));
+  }
 
   @override
   Future<Result<UpdateRun>> checkFollowed(int followedId) => throw UnimplementedError();
@@ -512,6 +545,118 @@ void main() {
 
       expect(followed, hasLength(1));
       expect(followed.single.isFavorite, isTrue);
+    });
+  });
+
+  /// Production answers "Check now" with `{queued: true}` before its worker
+  /// has fetched anything, and the screen used to reload once, straight away,
+  /// then never again — so a check that found a chapter looked like one that
+  /// found nothing.
+  group('UpdatesNotifier.triggerCheck', () {
+    UpdateNotification found() => const UpdateNotification(
+          id: 7,
+          followedSeriesId: 42,
+          sourceId: 'mangadex',
+          seriesKey: 'series-1',
+          chapterKey: 'ch-7',
+          chapterTitle: 'Chapter 7',
+          isRead: false,
+        );
+
+    Future<ProviderContainer> loaded(_FakeUpdatesRepository updates) async {
+      final container = ProviderContainer(
+        overrides: [
+          updatesRepositoryProvider.overrideWithValue(updates),
+          libraryRepositoryProvider.overrideWithValue(
+            _FakeLibraryRepository(followed: [_followed()]),
+          ),
+          updateCheckPollDelaysProvider.overrideWithValue(
+            const [Duration.zero, Duration.zero, Duration.zero],
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      // The screen watching it, as in the app: an autoDispose provider with
+      // no listener is disposed between the awaits a queued check makes.
+      container.listen(updatesProvider, (_, __) {});
+      await container.read(updatesProvider.future);
+      return container;
+    }
+
+    test('a queued check shows the chapters it finds once the worker is done',
+        () async {
+      final updates = _FakeUpdatesRepository()
+        ..queueChecks = true
+        ..queuedFind = found()
+        ..findOnRead = 2;
+      final container = await loaded(updates);
+
+      final error = await container.read(updatesProvider.notifier).triggerCheck();
+
+      expect(error, isNull);
+      final state = container.read(updatesProvider).value!;
+      expect(state.notifications.map((n) => n.id), [7]);
+      expect(state.unreadCount, 1);
+      expect(state.checking, isFalse);
+    });
+
+    test('stops looking as soon as the unread count moves', () async {
+      final updates = _FakeUpdatesRepository()
+        ..queueChecks = true
+        ..queuedFind = found()
+        ..findOnRead = 1;
+      final container = await loaded(updates);
+
+      await container.read(updatesProvider.notifier).triggerCheck();
+
+      // One look found it, then one reload — not the other two looks.
+      expect(updates.readsSinceQueued, 2);
+    });
+
+    test('a queued check that finds nothing gives up after the last look',
+        () async {
+      final updates = _FakeUpdatesRepository()..queueChecks = true;
+      final container = await loaded(updates);
+
+      await container.read(updatesProvider.notifier).triggerCheck();
+
+      // Three looks, then the final reload.
+      expect(updates.readsSinceQueued, 4);
+      final state = container.read(updatesProvider).value!;
+      expect(state.notifications, isEmpty);
+      expect(state.checking, isFalse);
+    });
+
+    test('says it is checking while the check is out', () async {
+      final updates = _FakeUpdatesRepository()..queueChecks = true;
+      final container = await loaded(updates);
+
+      final pending = container.read(updatesProvider.notifier).triggerCheck();
+      expect(container.read(updatesProvider).value!.checking, isTrue);
+      await pending;
+      expect(container.read(updatesProvider).value!.checking, isFalse);
+    });
+  });
+
+  group('UpdatesNotifier.markAllRead', () {
+    test('asks the server to clear only the given mode', () async {
+      final updates = _FakeUpdatesRepository();
+      final container = ProviderContainer(
+        overrides: [
+          updatesRepositoryProvider.overrideWithValue(updates),
+          libraryRepositoryProvider.overrideWithValue(_FakeLibraryRepository()),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(updatesProvider.future);
+      final notifier = container.read(updatesProvider.notifier);
+
+      await notifier.markAllRead(mode: ContentMode.novel);
+      expect(updates.markAllKind, 'novel');
+
+      await notifier.markAllRead();
+      expect(updates.markAllKind, isNull);
+      expect(updates.markAllCalls, 2);
     });
   });
 }
