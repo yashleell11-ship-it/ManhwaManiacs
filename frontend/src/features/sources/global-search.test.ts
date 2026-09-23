@@ -1,15 +1,20 @@
 import { describe, expect, it } from "vitest";
+import { env } from "@/config/env";
+import { withCoverWidth } from "@/lib/cover-url";
+import { sourceImageUrl } from "./api";
 import {
   globalSearchHref,
   globalSearchScopeLabel,
   LOCAL_SEARCH_GROUP_KEY,
   replaceSearchGroup,
+  resolveSearchCovers,
   searchGroupFromSourceSeries,
   searchGroupKey,
   searchGroupNote,
   searchGroupWithError,
   searchResultCount,
   splitSearchGroups,
+  withResolvedCover,
 } from "./global-search";
 import { prettifySourceId } from "./source-branding";
 import type {
@@ -258,6 +263,61 @@ describe("searchGroupFromSourceSeries", () => {
     const next = searchGroupFromSourceSeries(failed, page([]), absolute);
     expect(next.status).toBe("empty");
     expect(next.error).toBeNull();
+  });
+});
+
+describe("resolveSearchCovers", () => {
+  // What `sourcesApi.federatedSearch` resolves with.
+  const resolve = (path: string) => sourceImageUrl(path);
+  const relative = "/sources/mangadex/series/md%2F1/cover";
+
+  function response(items: GlobalSearchItem[]): GlobalSearchResponse {
+    return {
+      items,
+      groups: [group({ items })],
+      sources_queried: 1,
+      sources_failed: 0,
+      page: 1,
+      has_more: false,
+    };
+  }
+
+  it("resolves a relative cover against the API base, in groups and flat items", () => {
+    // The backend can no longer send an absolute cover: the host it sees
+    // behind the /api rewrite is its own container name.
+    const resolved = resolveSearchCovers(response([item({ cover_url: relative })]), resolve);
+    const expected = `${env.apiUrl}/sources/mangadex/series/md%2F1/cover`;
+    expect(resolved.groups[0].items[0].cover_url).toBe(expected);
+    expect(resolved.items[0].cover_url).toBe(expected);
+  });
+
+  it("leaves a missing cover missing and an absolute one untouched", () => {
+    const resolved = resolveSearchCovers(
+      response([
+        item({ series_id: "a", cover_url: null }),
+        item({ series_id: "b", cover_url: "https://cdn.example.com/cover.jpg" }),
+      ]),
+      resolve,
+    );
+    expect(resolved.groups[0].items.map((hit) => hit.cover_url)).toEqual([
+      null,
+      "https://cdn.example.com/cover.jpg",
+    ]);
+  });
+
+  it("hands the card a URL it can still size", () => {
+    const resolved = resolveSearchCovers(response([item({ cover_url: relative })]), resolve);
+    expect(withCoverWidth(resolved.groups[0].items[0].cover_url!, "80px")).toMatch(
+      /\/cover\?w=\d+$/,
+    );
+  });
+});
+
+describe("withResolvedCover", () => {
+  it("keeps a suggestion's own fields", () => {
+    const suggestion = { ...item({ cover_url: "/sources/x/series/k/cover" }), why: "Swords." };
+    const resolved = withResolvedCover(suggestion, (path) => `/api${path}`);
+    expect(resolved).toEqual({ ...suggestion, cover_url: "/api/sources/x/series/k/cover" });
   });
 });
 

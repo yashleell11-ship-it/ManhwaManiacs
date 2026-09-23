@@ -129,8 +129,9 @@ export type SourceGenre = SourceBrowseMode;
  * the local library and every enabled remote source into one feed.
  *
  * `series_id` is always a STRING (local ids are numeric strings, source ids are
- * opaque source-defined strings) and `cover_url` is already an ABSOLUTE URL, so
- * it is consumed verbatim — never run through a cover-url helper.
+ * opaque source-defined strings). `cover_url` arrives as a backend-relative
+ * `/sources/{id}/series/{key}/cover` path and is resolved against the API base
+ * once, where the response lands (`resolveSearchCovers`) — never again after.
  */
 export interface GlobalSearchItem {
   /** `"local"` for a library series, `"source"` for a remote source series. */
@@ -139,7 +140,7 @@ export interface GlobalSearchItem {
   source: string | null;
   series_id: string;
   title: string;
-  /** Absolute cover URL served by the backend; use directly. */
+  /** Cover URL, already resolved against the API base; use directly. */
   cover_url: string | null;
   author: string | null;
   /**

@@ -1,6 +1,7 @@
 import { env } from "@/config/env";
 import { withCoverWidth } from "@/lib/cover-url";
 import { http } from "@/services/http";
+import { resolveSearchCovers } from "./global-search";
 import type {
   GlobalSearchResponse,
   PaginatedSourceSeries,
@@ -57,7 +58,12 @@ export const sourcesApi = {
   federatedSearch: (
     params: { q: string; page?: number; per_page?: number; tier?: 1 | 2 },
   ) =>
-    http.get<GlobalSearchResponse>("/sources/search", { query: params }),
+    http
+      .get<GlobalSearchResponse>("/sources/search", { query: params })
+      // Covers arrive relative; see `resolveSearchCovers`.
+      .then((response) =>
+        resolveSearchCovers(response, (path) => sourceImageUrl(path)),
+      ),
 
   listPins: () => http.get<SourcePin[]>("/sources/pins"),
 

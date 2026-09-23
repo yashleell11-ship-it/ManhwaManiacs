@@ -12,9 +12,10 @@ import { CoverImage } from "@/components/ui/cover-image";
  * The result card's cover box, a fixed `w-[80px]`.
  *
  * Applied here rather than in `searchGroupFromSourceSeries`, which builds the
- * retry path's rows: the federated payload arrives with its `cover_url` already
- * absolute, so the only place that knows the box for BOTH the first response
- * and a retried section is the card that paints them. See `lib/cover-url.ts`.
+ * retry path's rows: both that path and the federated payload hand over a
+ * `cover_url` already resolved against the API base (`resolveSearchCovers`),
+ * so the only place that knows the box for BOTH the first response and a
+ * retried section is the card that paints them. See `lib/cover-url.ts`.
  */
 const COVER_SIZES = "80px";
 

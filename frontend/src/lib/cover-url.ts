@@ -116,8 +116,8 @@ export function coverRequestWidth(sizes: string): number | null {
  * A cover URL is not always ours: `libraryCoverUrl` and `sourceImageUrl` pass
  * absolute source URLs straight through, and appending a query to a third
  * party's CDN URL ranges from useless to breaking a signed link. The route's
- * own `/cover` suffix is the test, which works the same for the relative form
- * the browse payload carries and the absolute form federated search builds.
+ * own `/cover` suffix is the test, which works the same whether the proxy path
+ * was resolved against a same-origin `/api` base or an absolute one.
  */
 function isCoverProxyUrl(url: string): boolean {
   return url.split(/[?#]/, 1)[0].endsWith(COVER_PROXY_SUFFIX);

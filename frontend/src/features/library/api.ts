@@ -1,4 +1,6 @@
 import { env } from "@/config/env";
+import { sourceImageUrl } from "@/features/sources/api";
+import { withResolvedCover } from "@/features/sources/global-search";
 import { withCoverWidth } from "@/lib/cover-url";
 import { http } from "@/services/http";
 import type { SeriesId } from "@/types/api";
@@ -119,7 +121,15 @@ export const libraryApi = {
    * fired by an explicit submit — never on mount, never per keystroke.
    */
   suggest: (body: { prompt: string; limit?: number }) =>
-    http.post<SuggestResponse>("/library/suggest", body),
+    http
+      .post<SuggestResponse>("/library/suggest", body)
+      // Covers arrive relative, like a search hit's; see `withResolvedCover`.
+      .then((response) => ({
+        ...response,
+        items: response.items.map((item) =>
+          withResolvedCover(item, (path) => sourceImageUrl(path)),
+        ),
+      })),
 
   /** Whether `suggest` can run. Free and local on the server. */
   suggestAvailability: () =>

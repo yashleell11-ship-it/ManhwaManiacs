@@ -97,6 +97,46 @@ export function splitSearchGroups(groups: GlobalSearchGroup[]): {
 }
 
 /**
+ * One search hit with its `cover_url` resolved by `resolveCoverUrl`.
+ *
+ * The backend serves search and suggestion covers as the same relative
+ * `/sources/{id}/series/{key}/cover` path the browse listing does: it cannot
+ * build an absolute one, because the host it sees behind the `/api` rewrite is
+ * its own container name. Generic so a `Suggestion` keeps its `why`.
+ */
+export function withResolvedCover<T extends GlobalSearchItem>(
+  item: T,
+  resolveCoverUrl: (path: string) => string,
+): T {
+  return item.cover_url
+    ? { ...item, cover_url: resolveCoverUrl(item.cover_url) }
+    : item;
+}
+
+/**
+ * Resolve every cover in a federated search response, once, as it arrives.
+ *
+ * Done here rather than in the card because the retry path
+ * (`searchGroupFromSourceSeries`) already resolves its own rows: a card that
+ * resolved again would prefix those twice (`/api/api/sources/...`).
+ */
+export function resolveSearchCovers(
+  response: GlobalSearchResponse,
+  resolveCoverUrl: (path: string) => string,
+): GlobalSearchResponse {
+  const resolve = (item: GlobalSearchItem) =>
+    withResolvedCover(item, resolveCoverUrl);
+  return {
+    ...response,
+    items: response.items.map(resolve),
+    groups: response.groups.map((group) => ({
+      ...group,
+      items: group.items.map(resolve),
+    })),
+  };
+}
+
+/**
  * Swap one section into a cached search response, preserving group order.
  *
  * The flat `items` list is deliberately left untouched: it is the legacy view
@@ -121,9 +161,9 @@ export function replaceSearchGroup(
  * path. Retrying goes to `/sources/{id}/series` rather than re-running the
  * federation, which would pay for every source to fix one.
  *
- * `resolveCoverUrl` turns a browse cover path into the absolute URL the
- * federated payload already carries, so retried cards render identically to the
- * ones that arrived with the original search.
+ * `resolveCoverUrl` turns a browse cover path into the same resolved URL
+ * `resolveSearchCovers` gives the federated payload, so retried cards render
+ * identically to the ones that arrived with the original search.
  */
 export function searchGroupFromSourceSeries(
   group: GlobalSearchGroup,
