@@ -23,7 +23,7 @@ from database.models import Base
 from database.session import run_alembic_migrations
 
 _BASELINE = "0001_source_native"
-_HEAD = "0015_novel_audio_jobs"
+_HEAD = "0016_backfill_last_login"
 
 # Every revision, oldest first. A new migration is added here deliberately —
 # the point of the guard is that revisions arrive on purpose, not that there is
@@ -44,6 +44,7 @@ _REVISIONS = [
     "0013_novel_attribution.py",
     "0014_narrator_voice.py",
     "0015_novel_audio_jobs.py",
+    "0016_backfill_last_login.py",
 ]
 
 # Every ORM-mapped table the baseline must create (spec §3).
@@ -696,3 +697,57 @@ def test_session_duration_listener_rounds_the_way_the_backfill_does(tmp_path):
     assert backfilled["straddles-late"] == 59
     assert backfilled["exact"] == 300
     assert backfilled["backwards-fractional"] == 0
+
+
+# --- 0016_backfill_last_login ---------------------------------------------
+
+
+def test_last_login_backfill_reads_the_newest_session_and_nothing_else(tmp_path):
+    """Accounts that only ever registered held a live session and a NULL
+    ``last_login_at``, so Members said "never signed in" for accounts in daily
+    use. 0016 fills those from their newest session, and must not touch a
+    stamp a login already wrote or invent one for an account with no session.
+    """
+    engine = create_engine(f"sqlite:///{tmp_path / 'login.db'}")
+    _upgrade_to(engine, "0015_novel_audio_jobs")
+    with engine.begin() as conn:
+        users = [
+            # id, last_login_at
+            (1, None),                    # registered, two sessions
+            (2, "2026-09-20 08:00:00"),   # has logged in since: left alone
+            (3, None),                    # no session left: stays NULL
+        ]
+        for uid, last_login in users:
+            conn.execute(
+                text(
+                    "INSERT INTO users (id, username, password_hash, is_admin,"
+                    " is_active, created_at, updated_at, last_login_at) VALUES"
+                    " (:i, :u, 'x', 0, 1, '2026-01-01', '2026-01-01', :l)"
+                ),
+                {"i": uid, "u": f"user{uid}", "l": last_login},
+            )
+        sessions = [
+            (1, "2026-09-01 10:00:00"),
+            (1, "2026-09-10 12:30:00"),
+            (2, "2026-09-22 09:00:00"),
+        ]
+        for n, (uid, created) in enumerate(sessions):
+            conn.execute(
+                text(
+                    "INSERT INTO sessions (user_id, token_hash, created_at,"
+                    " last_used_at, expires_at) VALUES"
+                    " (:u, :t, :c, :c, '2026-12-31 00:00:00')"
+                ),
+                {"u": uid, "t": f"{n:064d}", "c": created},
+            )
+
+    _upgrade_to(engine, "0016_backfill_last_login")
+    _upgrade_to(engine, "head")  # and a re-run at head is a no-op
+
+    with engine.connect() as conn:
+        stored = dict(conn.execute(text("SELECT id, last_login_at FROM users")).all())
+    assert {uid: (str(v)[:19] if v else None) for uid, v in stored.items()} == {
+        1: "2026-09-10 12:30:00",
+        2: "2026-09-20 08:00:00",
+        3: None,
+    }

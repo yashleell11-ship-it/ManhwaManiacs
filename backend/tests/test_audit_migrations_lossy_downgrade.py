@@ -38,7 +38,7 @@ from alembic.config import Config
 
 import database.session as dbs
 
-_HEAD = "0015_novel_audio_jobs"
+_HEAD = "0016_backfill_last_login"
 _BEFORE_0010 = "0009_reading_session_duration"
 _BEFORE_0002 = "0001_source_native"
 
