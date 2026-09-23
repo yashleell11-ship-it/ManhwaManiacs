@@ -363,6 +363,43 @@ void main() {
       expect(follower.voicing.value, isFalse);
     });
 
+    test('the finish reported after the stop does not start the voice again',
+        () {
+      // just_audio reports completion as a position of the full duration,
+      // on a different stream from the state change the player bar turns
+      // into null. Arriving second, it must not leave the chapter "voicing"
+      // — auto-next waits on that, and would never come.
+      for (final audio in [good, unvouched()]) {
+        final follower = NovelAudioFollower(paragraphs);
+        addTearDown(follower.dispose);
+
+        follower.onPosition(3900, audio);
+        expect(follower.voicing.value, isTrue);
+        follower.onPosition(null, audio);
+        follower.onPosition(audio.totalMs, audio);
+
+        expect(follower.voicing.value, isFalse);
+        expect(follower.range.value, isNull);
+      }
+    });
+
+    test('a map with no total ends where its last sentence does', () {
+      final follower = NovelAudioFollower(paragraphs);
+      addTearDown(follower.dispose);
+      final untimed = NovelAudio(
+        available: true,
+        totalMs: 0,
+        bytes: good.bytes,
+        segments: good.segments,
+        highlightSafe: true,
+      );
+
+      follower.onPosition(3999, untimed);
+      expect(follower.voicing.value, isTrue);
+      follower.onPosition(4000, untimed);
+      expect(follower.voicing.value, isFalse);
+    });
+
     test('says so under Listen when it will not follow, and only then', () {
       expect(novelFollowAlongNote(good, paragraphs), isNull);
       expect(

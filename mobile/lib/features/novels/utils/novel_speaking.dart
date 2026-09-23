@@ -165,12 +165,31 @@ class NovelAudioFollower {
   bool _follows = false;
 
   void onPosition(int? positionMs, NovelAudio audio) {
-    voicing.value = positionMs != null;
+    voicing.value = positionMs != null && !_atEnd(positionMs, audio);
     if (positionMs == null || !_canFollow(audio)) {
       _publish(-1, audio);
       return;
     }
     _publish(audio.segmentAt(positionMs), audio);
+  }
+
+  /// Whether [positionMs] is the end of the audio rather than a place in it.
+  ///
+  /// The player reports the finish as a position too — just_audio's position
+  /// stream fires on the completion event with the full duration — and it
+  /// can arrive AFTER the null the player bar sends for the same finish: the
+  /// two come through different streams, with no order between them. Taken
+  /// for a voice still reading, it would leave [voicing] true for good, and
+  /// auto-next would never fire on a chapter listened to the end. [range]
+  /// never had this problem because [NovelAudio.segmentAt] already answers
+  /// -1 from the last segment's end on.
+  ///
+  /// The later of the two ends the map knows: a map with no total, or one
+  /// whose last sentence runs past it, still has an end.
+  static bool _atEnd(int positionMs, NovelAudio audio) {
+    final lastEnd = audio.segments.isEmpty ? 0 : audio.segments.last.endMs;
+    final end = audio.totalMs > lastEnd ? audio.totalMs : lastEnd;
+    return end > 0 && positionMs >= end;
   }
 
   bool _canFollow(NovelAudio audio) {

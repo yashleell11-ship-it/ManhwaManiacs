@@ -112,7 +112,16 @@ class _NovelAudioPlayerBarState extends State<NovelAudioPlayerBar> {
     player.positionStream.listen((position) {
       if (!mounted) return;
       setState(() => _position = position);
-      widget.onPosition(position.inMilliseconds);
+      // The finish is reported as a position too, and it can land after the
+      // null the state listener below sends for it. A finished player is
+      // not reading, whatever its playhead says — and a file a few
+      // milliseconds shorter than the map's total would otherwise look like
+      // a voice with one breath left, holding auto-next off for good.
+      widget.onPosition(
+        player.processingState == ProcessingState.completed
+            ? null
+            : position.inMilliseconds,
+      );
     });
     player.playerStateStream.listen((state) {
       if (!mounted) return;
