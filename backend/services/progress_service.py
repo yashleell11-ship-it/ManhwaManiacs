@@ -13,7 +13,8 @@ silently rewinds a reader that synced an older device.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import json
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from time import sleep
@@ -346,6 +347,77 @@ def merge_progress(
     )
 
 
+def respell_chapter_key(
+    source_id: str,
+    chapter_key: str,
+    *,
+    stored_under: str,
+    series_key: str,
+    chapters: Iterable[Any] | None = None,
+) -> str:
+    """``chapter_key``, issued under ``stored_under``, as ``series_key`` spells it.
+
+    The two series keys name ONE series (their ``series_identity`` is equal);
+    what is asked is which spelling of the same chapter goes with
+    ``series_key``. Asura's chapter keys embed the series key they were issued
+    under (``<slug>-<suffix>:<n>``), so a chapter read under this week's suffix
+    is a different string from the same chapter in a follow's list.
+
+    The connector is the only authority on what a key means, so every answer
+    is checked against its ``chapter_identity`` and nothing here parses a key:
+
+    * a chapter key that literally begins with the series key it was issued
+      under, with ``series_key`` put in its place -- kept only when the
+      connector says the result names the same chapter;
+    * else the entry of ``chapters`` (a follow's ``known_chapters``) the
+      connector says is the same chapter;
+    * else the key as it came. A chapter key whose identity is itself does
+      not drift, and is the same string under every spelling of its series.
+    """
+    if stored_under == series_key:
+        return chapter_key
+    identity = chapter_identity(source_id, chapter_key)
+    if identity == chapter_key:
+        return chapter_key
+    if chapter_key.startswith(stored_under):
+        candidate = series_key + chapter_key[len(stored_under) :]
+        if chapter_identity(source_id, candidate) == identity:
+            return candidate
+    for chapter in chapters or ():
+        key = chapter.get("key") if isinstance(chapter, dict) else None
+        if isinstance(key, str) and key and chapter_identity(source_id, key) == identity:
+            return key
+    return chapter_key
+
+
+def _chapter_list(value: str | None) -> list[Any]:
+    """A ``known_chapters`` blob as a list; anything unreadable is empty."""
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except (ValueError, TypeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _outranks(row: ChapterProgress, held: ChapterProgress, preferred_key: str) -> bool:
+    """Whether ``row`` is further into ONE chapter than ``held`` is.
+
+    Two rows for one chapter exist only when it was read under two spellings
+    of its series. The furthest-wins rule decides between them exactly as
+    :func:`merge_progress` would have had they been one row: the position
+    first, the newer read on a tie, and the spelling asked for on a full tie.
+    """
+    mine = _position(_resolve_number(row.chapter_number, held.chapter_number), row.last_page)
+    theirs = _position(_resolve_number(held.chapter_number, row.chapter_number), held.last_page)
+    if mine != theirs:
+        return mine > theirs
+    if row.last_read_at and held.last_read_at and row.last_read_at != held.last_read_at:
+        return row.last_read_at > held.last_read_at
+    return row.series_key == preferred_key and held.series_key != preferred_key
+
+
 def _row_to_merged(row: ChapterProgress) -> MergedProgress:
     return MergedProgress(
         chapter_number=row.chapter_number,
@@ -394,6 +466,11 @@ class ProgressService:
         # Resolved once per request: the gate is a property of the (user,
         # profile) pair and cannot change mid-request.
         self._gate_cache: bool | None = None
+        # ``(source_id, sent series_key) -> (follow's key, its chapter list)``,
+        # or None when the push stays where it was sent; see ``_storage_keys``.
+        # Plain values only, so a busy-retry's rollback cannot leave it
+        # holding detached rows, and emptied at the start of every write unit.
+        self._spellings: dict[tuple[str, str], tuple[str, list[Any]] | None] = {}
 
     # --- progress ----------------------------------------------------------
 
@@ -512,13 +589,42 @@ class ProgressService:
         :meth:`_mature_case` resolved in Python because it answers for a single
         series — calling the authority directly for one row is one fewer place
         for the two to drift.
+
+        The follow is found the way ``FollowedSeriesService.follow`` finds it:
+        under this key, or, on a source whose keys drift, under any key the
+        connector says names the same series. The positions this read returns
+        for such a source include those stored under the other keys, so a
+        follow under any of them that is 18+ for this profile withholds all
+        of them -- as ``follow`` already 404s this key for it.
         """
         if self._gate_open():
             return True
+        follows = self._follows_of(
+            source_id, series_key, series_identity(source_id, series_key)
+        )
+        return not any(self._follow_hidden(follow) for follow in follows)
+
+    def _follows_of(
+        self, source_id: str, series_key: str, identity: str
+    ) -> list[FollowedSeries]:
+        """This profile's follows of the series ``series_key`` names, oldest first.
+
+        Under that exact key, and -- only when ``identity`` differs from it,
+        i.e. the source's keys drift -- under every other key with the same
+        ``series_identity``: the rule ``_followed_under_another_key`` in the
+        library recognises a follow by. The ``LIKE`` prefix only narrows the
+        candidates; the connector's identity decides, so a different series
+        that happens to share the prefix is never one of them.
+        """
+        same_series = (
+            FollowedSeries.series_key == series_key
+            if identity == series_key
+            else FollowedSeries.series_key.startswith(identity, autoescape=True)
+        )
         stmt = select(FollowedSeries).where(
             FollowedSeries.user_id == self._user_id,
             FollowedSeries.source_id == source_id,
-            FollowedSeries.series_key == series_key,
+            same_series,
         )
         # Unconditional profile predicate, exactly as ``_scope`` reads it: the
         # unscoped bucket is a bucket, not a wildcard over the account.
@@ -527,12 +633,74 @@ class ProgressService:
             if self._profile_id is None
             else stmt.where(FollowedSeries.profile_id == self._profile_id)
         )
-        follow = self._db.execute(stmt).scalar_one_or_none()
-        if follow is None:
-            return True
+        rows = self._db.execute(stmt.order_by(FollowedSeries.id)).scalars().all()
+        return [
+            row
+            for row in rows
+            if row.series_key == series_key
+            or series_identity(source_id, row.series_key) == identity
+        ]
+
+    def _follow_hidden(self, follow: FollowedSeries) -> bool:
+        """The library's ``_hidden``: 18+ for this profile while its gate is shut."""
         return (
-            resolve_tracker_rating(follow, descriptor_for_source(source_id))
-            != TRACKER_RATING_MATURE
+            not self._gate_open()
+            and resolve_tracker_rating(follow, descriptor_for_source(follow.source_id))
+            == TRACKER_RATING_MATURE
+        )
+
+    def _storage_keys(
+        self, source_id: str, series_key: str, chapter_key: str
+    ) -> tuple[str, str]:
+        """The ``(series_key, chapter_key)`` a push is stored under.
+
+        The keys it was sent with, except when this profile follows the same
+        series under ANOTHER key. Asura rotates the suffix on its slugs every
+        few days and the old one keeps resolving, so a series followed under
+        ``...-08677664`` is read from Browse as ``...-05c7df14``. Stored as
+        sent, that reading sat under a key no follow has, and the library --
+        which joins progress to a follow on the follow's key -- showed the
+        card "Not started" and left the series off Continue. It is stored
+        under the follow's key instead, the chapter key re-spelled to match
+        (:func:`respell_chapter_key`), and the ordinary furthest-wins merge
+        then folds it into whatever that key already holds.
+
+        Left where it was sent:
+
+        * every source whose keys do not drift -- ``series_identity`` returns
+          the key itself, and that is decided without a query;
+        * a push whose own key is followed: that follow owns it;
+        * a follow this profile's 18+ gate hides. The response carries the
+          stored key, and it must not name a follow the profile cannot see.
+          Nothing is lost: the library counts rows stored under any key of a
+          follow's series (``FollowedSeriesService._alias_filter``).
+
+        The follow keeps its key, as ``follow`` always leaves it: its
+        ``known_chapters`` and notifications are stored under that key, and it
+        is still fetched with.
+        """
+        identity = series_identity(source_id, series_key)
+        if identity == series_key:
+            return series_key, chapter_key
+        memo = (source_id, series_key)
+        if memo not in self._spellings:
+            target = None
+            follows = self._follows_of(source_id, series_key, identity)
+            if follows and not any(f.series_key == series_key for f in follows):
+                follow = follows[0]
+                if not self._follow_hidden(follow):
+                    target = (follow.series_key, _chapter_list(follow.known_chapters))
+            self._spellings[memo] = target
+        target = self._spellings[memo]
+        if target is None:
+            return series_key, chapter_key
+        follow_key, chapters = target
+        return follow_key, respell_chapter_key(
+            source_id,
+            chapter_key,
+            stored_under=series_key,
+            series_key=follow_key,
+            chapters=chapters,
         )
 
     def _prefetch(
@@ -545,12 +713,18 @@ class ProgressService:
         offline catch-up issued 200 point queries before it wrote anything.
         Row-value ``IN`` collapses them, chunked exactly like the library's
         lookups so the statement stays inside SQLite's variable ceiling.
+
+        Keyed by where each push will be STORED (``_storage_keys``), which is
+        what ``_apply_one`` looks it up by.
         """
         keys = [
             (
                 p.source_id,
-                fully_unquote(p.series_key),
-                fully_unquote(p.chapter_key),
+                *self._storage_keys(
+                    p.source_id,
+                    fully_unquote(p.series_key),
+                    fully_unquote(p.chapter_key),
+                ),
             )
             for p in payloads
         ]
@@ -588,11 +762,16 @@ class ProgressService:
         a second payload for the same chapter later in the batch merges onto
         the same object rather than inserting a duplicate — exactly what the
         per-item SELECT + flush used to guarantee.
+
+        The row is the one ``_storage_keys`` names: the sent keys, or this
+        profile's follow of the same series under another key.
         """
         user_id, profile_id = self._require_profile()
         source_id = payload.source_id
-        series_key = fully_unquote(payload.series_key)
-        chapter_key = fully_unquote(payload.chapter_key)
+        sent_chapter_key = fully_unquote(payload.chapter_key)
+        series_key, chapter_key = self._storage_keys(
+            source_id, fully_unquote(payload.series_key), sent_chapter_key
+        )
 
         if prefetched is not None:
             row = prefetched.get((source_id, series_key, chapter_key))
@@ -696,9 +875,10 @@ class ProgressService:
             profile_id,
             source_id,
             series_key,
-            # Both spellings: the canonical one this row is keyed by, and the
-            # raw one the client sent. See the helper for why.
-            {chapter_key, payload.chapter_key},
+            # Every spelling: the one this row is keyed by, the unquoted one
+            # the client sent (they differ when the push was re-keyed onto a
+            # follow) and the raw one. See the helper for why.
+            {chapter_key, sent_chapter_key, payload.chapter_key},
         )
 
         return row, merged
@@ -922,6 +1102,7 @@ class ProgressService:
 
     def save_one(self, payload: ProgressInput) -> dict[str, Any]:
         def apply() -> dict[str, Any]:
+            self._spellings = {}
             row, merged = self._apply_one(payload)
             self._db.commit()
             return {**self._serialize(row), "advanced": merged.advanced}
@@ -938,7 +1119,10 @@ class ProgressService:
         """
         def apply() -> dict[str, Any]:
             # Prefetched inside, so a retry after a busy writer re-reads rather
-            # than merging onto rows a rollback has already detached.
+            # than merging onto rows a rollback has already detached. The
+            # follow each push is re-keyed onto is looked up once per series
+            # for the whole batch, by the prefetch, and re-read on a retry.
+            self._spellings = {}
             prefetched = self._prefetch(payloads)
             applied = [self._apply_one(p, prefetched=prefetched) for p in payloads]
             self._db.commit()
@@ -979,23 +1163,81 @@ class ProgressService:
         opened, and it is the same answer for the same reason.
         ``OcrIngestService.coverage`` resolves the identical pair the identical
         way.
+
+        On a source whose keys drift (Asura), the positions stored under every
+        other key of the same series are included, each spelled the way THIS
+        key spells its chapters. Both series pages match these rows against
+        the chapter list they fetched under the key they were opened with, and
+        a push made under that key may have been stored under the follow's
+        (``_storage_keys``): without this, reading a chapter from Browse would
+        blank the very page it was read from.
         """
         self._require_owner()
         series_key = fully_unquote(series_key)
         self._browse().ensure_visible(source_id)
         if not self._series_visible(source_id, series_key):
             return []
+        identity = series_identity(source_id, series_key)
+        same_series = (
+            ChapterProgress.series_key == series_key
+            if identity == series_key
+            else ChapterProgress.series_key.startswith(identity, autoescape=True)
+        )
         rows = self._db.execute(
             self._scope(
                 select(ChapterProgress)
-                .where(
-                    ChapterProgress.source_id == source_id,
-                    ChapterProgress.series_key == series_key,
-                )
+                .where(ChapterProgress.source_id == source_id, same_series)
                 .order_by(ChapterProgress.chapter_number)
             )
         ).scalars().all()
-        return [self._serialize(r) for r in rows]
+        if identity == series_key:
+            return [self._serialize(r) for r in rows]
+        return self._spelled_for(source_id, series_key, identity, rows)
+
+    def _spelled_for(
+        self,
+        source_id: str,
+        series_key: str,
+        identity: str,
+        rows: list[ChapterProgress],
+    ) -> list[dict[str, Any]]:
+        """``rows`` of one series as ``series_key`` spells them, one per chapter.
+
+        A chapter read under two spellings has two rows; the furthest speaks
+        for it (:func:`_outranks`) and completion stays sticky, as the merge
+        would have kept them had they been one row. The order is the one the
+        rows came in.
+        """
+        best: dict[str, ChapterProgress] = {}
+        finished: dict[str, ChapterProgress] = {}
+        for row in rows:
+            if (
+                row.series_key != series_key
+                and series_identity(source_id, row.series_key) != identity
+            ):
+                continue  # a different series that only shares the prefix
+            key = respell_chapter_key(
+                source_id,
+                row.chapter_key,
+                stored_under=row.series_key,
+                series_key=series_key,
+            )
+            held = best.get(key)
+            if held is None or _outranks(row, held, series_key):
+                best[key] = row
+            if row.is_completed and key not in finished:
+                finished[key] = row
+        out = []
+        for key, row in best.items():
+            item = self._serialize(row)
+            item["series_key"] = series_key
+            item["chapter_key"] = key
+            done = finished.get(key)
+            if done is not None and not item["is_completed"]:
+                item["is_completed"] = True
+                item["completed_at"] = _iso(done.completed_at)
+            out.append(item)
+        return out
 
     def reading_history(
         self, *, limit: int = 50, offset: int = 0, collapse: str = "none"
