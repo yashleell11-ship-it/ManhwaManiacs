@@ -286,3 +286,63 @@ def test_ocr_upload_is_rate_limited(ocr_client):
     assert limited.status_code == 429, limited.text
     assert limited.json()["code"] == "rate_limited"
     assert "retry-after" in {k.lower() for k in limited.headers}
+
+
+# --- change-password is login by another door --------------------------------
+
+
+@pytest.fixture
+def password_client(client, monkeypatch, make_user, as_user):
+    """Two signed-in accounts whose stored hash matches no password, so every
+    change-password attempt is a wrong guess (401) until the limiter says 429."""
+    monkeypatch.setenv("MM_RATE_LIMIT_CHANGE_PASSWORD", "3/minute")
+    get_settings.cache_clear()
+    first = make_user("guesser-a")
+    second = make_user("guesser-b")
+    yield client, as_user(first.id), as_user(second.id)
+    get_settings.cache_clear()
+
+
+def _change_password(client: TestClient, headers: dict, ip: str):
+    return client.post(
+        "/auth/change-password",
+        json={"current_password": "a-guess-123", "new_password": "new-pass-123"},
+        headers={**headers, "CF-Connecting-IP": ip},
+    )
+
+
+@pytest.mark.rate_limit
+def test_change_password_flood_is_rejected_with_429(password_client):
+    """Every attempt is an Argon2 verify of the current password. With no
+    bucket, a token holder could guess it without the login limit, and a flood
+    of wrong guesses allocated 64 MiB apiece."""
+    api, headers, _ = password_client
+    codes = [_change_password(api, headers, "203.0.113.120").status_code for _ in range(3)]
+    assert codes == [401, 401, 401]
+
+    limited = _change_password(api, headers, "203.0.113.120")
+    assert limited.status_code == 429, limited.text
+    assert limited.json()["code"] == "rate_limited"
+
+
+@pytest.mark.rate_limit
+def test_change_password_limit_follows_the_session_across_ips(password_client):
+    """Rotating the client address must not buy a token holder a new bucket."""
+    api, headers, _ = password_client
+    codes = [
+        _change_password(api, headers, f"203.0.113.{130 + n}").status_code
+        for n in range(4)
+    ]
+    assert codes[:3] == [401, 401, 401]
+    assert codes[3] == 429
+
+
+@pytest.mark.rate_limit
+def test_change_password_limit_also_holds_per_ip_across_accounts(password_client):
+    """Minting more accounts from one address must not multiply the budget."""
+    api, first, second = password_client
+    for _ in range(3):
+        _change_password(api, first, "203.0.113.150")
+    assert _change_password(api, second, "203.0.113.150").status_code == 429
+    # ...while that second account, from its own address, is untouched.
+    assert _change_password(api, second, "203.0.113.151").status_code == 401

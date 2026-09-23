@@ -237,6 +237,15 @@ class Settings(BaseModel):
     # are combined with ";" (slowapi/limits parse_many), so a burst cap and an
     # hourly cap both apply.
     rate_limit_register: str = "5/minute;30/hour"
+    # POST /auth/change-password verifies the current password with Argon2
+    # (64 MiB, ~100 ms each), exactly like login — so unlimited, it is both a
+    # password-guessing oracle for anyone holding a session token and a way
+    # for any self-registered account to exhaust the box's memory. It is
+    # charged twice: once per client IP and once per session token, so neither
+    # rotating IPs with one token nor minting accounts from one IP escapes it.
+    # A person changes their password a few times a year; one typo'd retry
+    # never comes near this. MM_RATE_LIMIT_CHANGE_PASSWORD.
+    rate_limit_change_password: str = "5/minute;20/hour"
     # GET /auth/bootstrap-status is unauthenticated and announces exactly when
     # the bootstrap window is open — i.e. a free polling oracle for the moment
     # a freshly wiped instance can be claimed. A real client calls it about
@@ -378,6 +387,7 @@ def get_settings() -> Settings:
     for env_key, field in (
         ("MM_RATE_LIMIT_AUTH", "rate_limit_auth"),
         ("MM_RATE_LIMIT_REGISTER", "rate_limit_register"),
+        ("MM_RATE_LIMIT_CHANGE_PASSWORD", "rate_limit_change_password"),
         ("MM_RATE_LIMIT_BOOTSTRAP_STATUS", "rate_limit_bootstrap_status"),
         ("MM_RATE_LIMIT_IMPORT", "rate_limit_import"),
         ("MM_RATE_LIMIT_SOURCES", "rate_limit_sources"),

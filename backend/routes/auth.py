@@ -19,8 +19,10 @@ from core.errors import AppError
 from core.rate_limit import (
     auth_limit,
     bootstrap_status_limit,
+    change_password_limit,
     limiter,
     register_limit,
+    session_key,
 )
 from database.models import User
 from services.auth_service import (
@@ -333,9 +335,12 @@ def me(user: CurrentUser) -> UserOut:
 
 
 @router.post("/change-password", status_code=204)
+@limiter.limit(change_password_limit)
+@limiter.limit(change_password_limit, key_func=session_key)
 def change_password(
     body: ChangePasswordRequest,
-    response: Response,
+    request: Request,
+    response: Response,  # slowapi injects X-RateLimit-* headers into this
     auth: AuthDep,
     user: CurrentUser,
     token: Annotated[str | None, Depends(get_session_token)],
@@ -344,7 +349,12 @@ def change_password(
 
     One call, one transaction: the revocation used to be a second commit here,
     so a failure between them left the new password live and every old session
-    with it."""
+    with it.
+
+    Rate-limited like login (MM_RATE_LIMIT_CHANGE_PASSWORD), per IP and per
+    session: the current-password check is an Argon2 verify, so an unlimited
+    route is a guessing oracle for a stolen token and a memory flood for any
+    account."""
     auth.change_password(
         user, body.current_password, body.new_password, keep_token=token
     )

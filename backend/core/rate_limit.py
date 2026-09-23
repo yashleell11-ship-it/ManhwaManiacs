@@ -4,7 +4,7 @@ A single process-wide limiter, keyed by the real client IP as reported by the
 outermost proxy (the app runs behind Caddy/Cloudflare, so the socket peer is
 the proxy — see :func:`client_ip` for why that is *not* X-Forwarded-For).
 Applied selectively to the expensive/abusable endpoints — auth
-(login/register), the admin backup restore-upload, source proxying
+(login/register/change-password), the admin backup restore-upload, source proxying
 (browse/search/cover/page-image), the bulk chapter windows, and the OCR
 transcript upload — via the per-bucket limit callables below.
 
@@ -81,6 +81,37 @@ def register_limit() -> str:
     creation is rare, so a hard cap costs a real user nothing). The value may
     combine several limits with ";" (e.g. "5/minute;30/hour")."""
     return get_settings().rate_limit_register
+
+
+def change_password_limit() -> str:
+    """Limit for POST /auth/change-password. Every call is an Argon2 verify of
+    the current password, so it is login by another door: without a bucket a
+    token holder guesses the password with no limit, and a flood of wrong
+    guesses allocates 64 MiB apiece. See Settings.rate_limit_change_password;
+    the route applies it per IP *and* per session (:func:`session_key`)."""
+    return get_settings().rate_limit_change_password
+
+
+def session_key(request: Request) -> str:
+    """Rate-limit key: the caller's session, for routes that require one.
+
+    An IP key alone is the wrong shape for a signed-in route: whoever holds a
+    token can rotate addresses and get a fresh bucket each time, while a
+    hostel full of readers behind one NAT would share a single one. The token
+    itself is the stable identity here. Only its SHA-256 is used, as in the
+    sessions table, so the limiter's storage never holds a live credential.
+    Falls back to the client IP when there is no token (the route rejects
+    those with 401 before the limit is checked anyway)."""
+    from core.auth import hash_session_token
+    from services.auth_service import SESSION_COOKIE_NAME, _extract_token
+
+    token = _extract_token(
+        request.cookies.get(SESSION_COOKIE_NAME),
+        request.headers.get("authorization"),
+    )
+    if token:
+        return "session:" + hash_session_token(token)
+    return client_ip(request)
 
 
 def bootstrap_status_limit() -> str:
