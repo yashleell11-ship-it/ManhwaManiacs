@@ -7,6 +7,7 @@ import { useScrollContainer } from "@/lib/scroll-container";
 import { useUiStore } from "@/stores/ui-store";
 import { cn } from "@/lib/cn";
 import { moodReaderMargin, useActiveProfileStore } from "@/features/profiles";
+import { createReadingPercent } from "@/features/novels/reading-percent";
 import { DownloadChapterControl } from "@/features/offline";
 import {
   BookmarkNotice,
@@ -246,7 +247,11 @@ export function ChapterReader({
   const pendingScrollPageRef = useRef<number | null>(null);
   const restoreDoneRef = useRef(false);
   const readingModeRef = useRef(readingMode);
-  const [scrollProgress, setScrollProgress] = useState(0);
+  // How far through the chapter, for the chrome's "· 62%". Not state: in the
+  // strip it moves with the scroll, and as state every whole-percent step
+  // re-rendered this reader and all of its chrome for one number. Only the
+  // read-out subscribes (see `reading-percent.ts`, the novel reader's twin).
+  const [percentStore] = useState(createReadingPercent);
   const [visiblePage, setVisiblePage] = useState(Math.max(1, initialPage));
   const [activeChapterKey, setActiveChapterKey] = useState(entryChapterKey);
   const [atTop, setAtTop] = useState(false);
@@ -633,10 +638,10 @@ export function ChapterReader({
     if (range && range.end > range.start) {
       const span = Math.max(1, range.end - range.start - clientHeight);
       const ratio = (scrollTop - range.start) / span;
-      setScrollProgress(Math.round(Math.min(1, Math.max(0, ratio)) * 100));
+      percentStore.set(Math.min(1, Math.max(0, ratio)) * 100);
     } else {
       const maxScroll = Math.max(scrollHeight - clientHeight, 0);
-      setScrollProgress(maxScroll > 0 ? Math.round((scrollTop / maxScroll) * 100) : 100);
+      percentStore.set(maxScroll > 0 ? (scrollTop / maxScroll) * 100 : 100);
     }
     setAtTop(scrollTop <= SCROLL_EDGE_THRESHOLD);
     setAtBottom(scrollTop + clientHeight >= scrollHeight - SCROLL_EDGE_THRESHOLD);
@@ -655,7 +660,15 @@ export function ChapterReader({
     // percentage is against, and pulling a chapter onto the head moves every
     // range in the strip. Either, followed by STOPPING, would otherwise leave a
     // stale read-out with no further scroll to correct it.
-  }, [activeChapterKey, chapters, scrollElement]);
+  }, [activeChapterKey, chapters, percentStore, scrollElement]);
+
+  // The paged modes have no scroll, so their percent is the page's place in
+  // the chapter. A layout effect, so a page turn and its new percent reach
+  // the screen in the same frame.
+  const pagedPercent = continuous ? null : scrubPercent(visiblePage, pages.length);
+  useLayoutEffect(() => {
+    if (pagedPercent != null) percentStore.set(pagedPercent);
+  }, [pagedPercent, percentStore]);
 
   useEffect(() => {
     if (!scrollElement) return;
@@ -1266,9 +1279,7 @@ export function ChapterReader({
         <ReaderControls
           chapterTitle={chapterTitle}
           chapterPosition={chapterPosition}
-          scrollProgress={
-            continuous ? scrollProgress : Math.round(scrubPercent(visiblePage, pages.length))
-          }
+          progress={percentStore}
           visiblePage={visiblePage}
           pageCount={pages.length}
           zoom={zoom}

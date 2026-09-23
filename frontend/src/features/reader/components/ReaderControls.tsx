@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import {
   ArrowLeftRight,
   ArrowRightLeft,
@@ -36,6 +36,7 @@ import { formatKeyCombo } from "@/lib/keyboard";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { usePrefersReducedMotion } from "@/components/premium/use-prefers-reduced-motion";
+import type { ReadingPercentStore } from "@/features/novels/reading-percent";
 import { MAX_AUTO_SCROLL_SPEED, MIN_AUTO_SCROLL_SPEED } from "../auto-scroll";
 import {
   AUTO_SCROLL_SHORTCUT_KEYS,
@@ -146,7 +147,11 @@ interface ReaderControlsProps {
    * that "which chapter am I in?" stops being obvious.
    */
   chapterPosition?: string | null;
-  scrollProgress: number;
+  /**
+   * How far through the chapter, as a store rather than a number: in the strip
+   * it moves with the scroll, and only the read-out that prints it subscribes.
+   */
+  progress: ReadingPercentStore;
   visiblePage: number;
   pageCount: number;
   zoom: number;
@@ -219,7 +224,7 @@ interface ReaderControlsProps {
 export function ReaderControls({
   chapterTitle,
   chapterPosition,
-  scrollProgress,
+  progress,
   visiblePage,
   pageCount,
   zoom,
@@ -696,7 +701,7 @@ export function ReaderControls({
                 </p>
                 <p className="mt-0.5 font-mono text-xs tabular-nums text-primary">
                   Page {visiblePage} / {pageCount}
-                  <span className="text-muted"> · {scrollProgress}%</span>
+                  <ChapterPercent store={progress} />
                 </p>
               </div>
               {/*
@@ -844,6 +849,16 @@ export function ReaderControls({
       </div>
     </>
   );
+}
+
+/**
+ * The chapter percent: the one part of the chrome a scroll frame changes, so
+ * the only part that re-renders for it. `store.get` doubles as the server
+ * snapshot; the strip is measured on the client, so zero is the honest start.
+ */
+function ChapterPercent({ store }: { store: ReadingPercentStore }) {
+  const percent = useSyncExternalStore(store.subscribe, store.get, store.get);
+  return <span className="text-muted"> · {percent}%</span>;
 }
 
 /**
