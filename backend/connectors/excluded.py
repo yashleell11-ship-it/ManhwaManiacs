@@ -142,4 +142,8 @@ RETIRED_MATURE_SOURCES: frozenset[str] = frozenset({
     "hentaisco",
     "lilymanga",
     "linkmanga",
+    # Missed on the first pass, found by diffing every ``mature=True`` source
+    # git history ever registered against the installed registry.
+    "topmanhua",  # 2026-09-05 -- its CDN answers 526 for every page image
+    "toonilyme",  # deregistered as a duplicate of beehentai (registry.py)
 })

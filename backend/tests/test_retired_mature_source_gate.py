@@ -49,6 +49,8 @@ def test_the_premise_the_source_is_really_gone():
 def test_a_removed_adult_source_is_still_adult():
     assert is_mature_source(RETIRED)
     assert is_mature_source("linkmanga")
+    assert is_mature_source("topmanhua")
+    assert is_mature_source("toonilyme")
     assert RETIRED in gated_source_ids()
     # The set only ever adds: an id it never named is not swept in with it.
     assert not is_mature_source("never-a-source")

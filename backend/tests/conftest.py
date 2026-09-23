@@ -135,6 +135,25 @@ def reset_session_sweep_counter():
 
 
 @pytest.fixture(autouse=True)
+def reset_connector_directory():
+    """Start and end every test with an empty connector-directory index.
+
+    ``core.connector_directory`` keys its index on the registry's SIZE, and a
+    dozen test files register a stub connector and pop it again without
+    resetting. The index built while one test's stub was in ``_REGISTRY`` then
+    stays cached under that size, and the next test to register a DIFFERENT
+    stub at the same size is served the first one's index: its own stub is
+    "not installed". ``test_retired_mature_source_gate`` passed alone and
+    failed in the full suite exactly that way.
+    """
+    from core import connector_directory
+
+    connector_directory.reset_cache()
+    yield
+    connector_directory.reset_cache()
+
+
+@pytest.fixture(autouse=True)
 def reset_update_manager():
     """Reset the process-wide update scheduler around every test."""
     reset_update_manager_for_tests()
