@@ -47,6 +47,11 @@ class DownloadsStore {
   ///   re-queues a finished chapter.
   /// - `failed` → reset to `queued` with `retry_count` and `error` cleared —
   ///   this is also what a manual "Retry" tap calls.
+  /// - `complete` but with page files gone from disk → the rows naming the
+  ///   missing files are dropped and the chapter is queued again the same
+  ///   way, so the queue fetches just those pages. Otherwise a chapter the
+  ///   user emptied through the Files app claims to be saved and nothing can
+  ///   download it again. Saved narration is left to its own save path.
   ///
   /// A new row starts pinned when its series already is in this scope.
   ///
@@ -64,7 +69,19 @@ class DownloadsStore {
       final state = DownloadChapterState.fromWire(
         existing[DownloadsSchema.colState]! as String,
       );
-      if (state == DownloadChapterState.failed) {
+      final existingKind =
+          DownloadKind.fromWire(existing[DownloadsSchema.colKind] as String?);
+      var vanished = false;
+      if (state == DownloadChapterState.complete && !existingKind.isAudio) {
+        final dropped = await pruneVanishedPages(
+          db: db,
+          blobStore: await blobStore,
+          chapterRowId: existing[DownloadsSchema.colId]! as int,
+          scopeId: scopeId,
+        );
+        vanished = dropped > 0;
+      }
+      if (state == DownloadChapterState.failed || vanished) {
         await db.update(
           DownloadsSchema.savedChapters,
           {
@@ -481,6 +498,57 @@ class DownloadsStore {
     final paths = await localPagePaths(id);
     return paths.length == chapter.pageCount &&
         paths.values.every((f) => f.existsSync() && f.lengthSync() > 0);
+  }
+
+  /// Chapter keys of [series] whose rows say `complete` but at least one of
+  /// whose page files is no longer on disk — what a chapter the user emptied
+  /// through the Files app looks like. Such a chapter will not open offline
+  /// ([isAvailableOffline] is false), so nothing should call it saved.
+  ///
+  /// One query for the whole series, and one stat per distinct blob, off the
+  /// UI isolate: a series page re-asks this on every queue revision. Saved
+  /// narration is not a chapter here, as in [listChapters].
+  Future<Set<String>> vanishedChapterKeys(SeriesIdentity series) async {
+    final db = await database;
+    final rows = await db.rawQuery(
+      '''
+      SELECT c.${DownloadsSchema.colChapterKey} AS chapter_key,
+             p.${DownloadsSchema.colBlobHash} AS blob_hash
+      FROM ${DownloadsSchema.savedChapters} c
+      JOIN ${DownloadsSchema.savedPages} p
+        ON p.${DownloadsSchema.colChapterRowId} = c.${DownloadsSchema.colId}
+       AND p.${DownloadsSchema.colScopeId} = c.${DownloadsSchema.colScopeId}
+      WHERE c.${DownloadsSchema.colScopeId} = ?
+        AND c.${DownloadsSchema.colSourceId} = ?
+        AND c.${DownloadsSchema.colSeriesKey} = ?
+        AND c.${DownloadsSchema.colState} = ?
+        AND c.${DownloadsSchema.colKind} IS NOT ?
+      ''',
+      [
+        scopeId,
+        series.sourceId,
+        series.seriesKey,
+        DownloadChapterState.complete.wire,
+        kAudioDownloadKind,
+      ],
+    );
+    if (rows.isEmpty) return const {};
+
+    final blob = await blobStore;
+    final hashes = {for (final row in rows) row['blob_hash']! as String};
+    final present = <String>{};
+    await Future.wait(
+      hashes.map((hash) async {
+        final stat = await blob.pathFor(hash).stat();
+        if (stat.type != FileSystemEntityType.notFound && stat.size > 0) {
+          present.add(hash);
+        }
+      }),
+    );
+    return {
+      for (final row in rows)
+        if (!present.contains(row['blob_hash'])) row['chapter_key']! as String,
+    };
   }
 
   /// Absolute on-disk paths for every page of [id] currently present in this

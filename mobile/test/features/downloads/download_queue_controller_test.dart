@@ -11,6 +11,7 @@ import 'package:manhwamaniacs/features/downloads/models/storage_cap.dart';
 import 'package:manhwamaniacs/features/downloads/providers/downloads_scope.dart';
 import 'package:manhwamaniacs/features/downloads/providers/downloads_storage_providers.dart';
 import 'package:manhwamaniacs/features/downloads/providers/retention_maintenance_provider.dart';
+import 'package:manhwamaniacs/features/downloads/providers/series_download_status_provider.dart';
 import 'package:manhwamaniacs/features/downloads/providers/storage_settings_provider.dart';
 import 'package:manhwamaniacs/features/downloads/queue/download_constants.dart';
 import 'package:manhwamaniacs/features/downloads/queue/download_queue_controller.dart';
@@ -603,6 +604,61 @@ void main() {
       1,
     );
     expect(await harness.storeFor('u1p1').pendingChapters(), hasLength(5));
+  });
+
+  group('a chapter whose files were deleted by hand', () {
+    Future<DownloadsStore> savedThenEmptied() async {
+      final store = harness.storeFor('u1p1');
+      final rowId = await store.ensureQueued(id: _id);
+      await store.updateManifestInfo(rowId: rowId, pageCount: 3);
+      for (var page = 1; page <= 3; page++) {
+        await store.savePage(rowId: rowId, pageNumber: page, bytes: [page]);
+      }
+      expect(await store.markCompleteIfAllPagesPresent(rowId), isTrue);
+      await (await store.localPagePaths(_id))[2]!.delete();
+      return store;
+    }
+
+    test('no longer reads as saved on the series page', () async {
+      await savedThenEmptied();
+      final container = buildContainer(
+        readerRepository: _ScriptedReaderRepository(
+          () async => Ok(_manifestWithPages(3)),
+        ),
+        pageFetcher: _ScriptedPageFetcher((url) async => [2]),
+      );
+
+      final statuses = await container.read(
+        seriesChapterDownloadStatusProvider(
+          (sourceId: _id.sourceId, seriesKey: _id.seriesKey),
+        ).future,
+      );
+
+      expect(statuses, isEmpty);
+    });
+
+    test('downloading it again fetches just the missing page', () async {
+      final store = await savedThenEmptied();
+      final requested = <String>[];
+      final container = buildContainer(
+        readerRepository: _ScriptedReaderRepository(
+          () async => Ok(_manifestWithPages(3)),
+        ),
+        pageFetcher: _ScriptedPageFetcher(
+          (url) async => [2],
+          onFetch: requested.add,
+        ),
+      );
+
+      final controller =
+          container.read(downloadQueueControllerProvider.notifier);
+      await controller.enqueueChapter(id: _id);
+      await controller.debugWaitUntilIdle();
+
+      expect(requested, hasLength(1));
+      expect(requested.single, contains('/2/image'));
+      expect(await store.isAvailableOffline(_id), isTrue);
+    });
   });
 
   group('a scope appearing after the first pass', () {

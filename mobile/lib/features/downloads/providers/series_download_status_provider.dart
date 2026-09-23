@@ -23,6 +23,11 @@ typedef ChapterDownloadProgress = ({int pagesDone, int pageTotal});
 /// needing its own polling.
 /// Resolves to an empty map with no active scope — no store, no statuses,
 /// matching "no scope → UI shows nothing downloaded".
+///
+/// A complete chapter whose page files have gone from disk (deleted through
+/// the Files app) is left out too: it will not open offline, so it reads as
+/// not downloaded, and its Download button is what re-fetches the missing
+/// pages (see [DownloadsStore.ensureQueued]).
 final seriesChapterDownloadStatusProvider = FutureProvider.autoDispose
     .family<Map<String, ChapterDownloadStatus>, SeriesIdentity>((ref, series) async {
   final store = ref.watch(downloadsStoreProvider);
@@ -31,9 +36,12 @@ final seriesChapterDownloadStatusProvider = FutureProvider.autoDispose
   if (store == null) return const {};
 
   final chapters = await store.listChapters();
+  final vanished = await store.vanishedChapterKeys(series);
   return {
     for (final chapter in chapters)
-      if (chapter.sourceId == series.sourceId && chapter.seriesKey == series.seriesKey)
+      if (chapter.sourceId == series.sourceId &&
+          chapter.seriesKey == series.seriesKey &&
+          !vanished.contains(chapter.chapterKey))
         chapter.chapterKey: (state: chapter.state, error: chapter.error),
   };
 });

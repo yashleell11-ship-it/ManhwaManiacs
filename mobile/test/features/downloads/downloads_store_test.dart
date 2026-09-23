@@ -249,6 +249,88 @@ void main() {
     });
   });
 
+  group('a chapter whose files were deleted by hand', () {
+    test('is reported as vanished, and only while its files are missing',
+        () async {
+      final store = harness.storeFor('u1p1');
+      const intact = (
+        sourceId: 'asura',
+        seriesKey: 'solo-leveling',
+        chapterKey: 'c2',
+      );
+      await _completeChapter(store, id: _chapter);
+      await _completeChapter(
+        store,
+        id: intact,
+        bytesFor: (page) => [9, page],
+      );
+      const series = (sourceId: 'asura', seriesKey: 'solo-leveling');
+      expect(await store.vanishedChapterKeys(series), isEmpty);
+
+      await (await store.localPagePaths(_chapter))[2]!.delete();
+
+      expect(await store.vanishedChapterKeys(series), {'c1'});
+      // Scoped like everything else: another profile has nothing vanished.
+      expect(await harness.storeFor('u1p2').vanishedChapterKeys(series),
+          isEmpty,);
+    });
+
+    test('queueing it again drops the missing pages and re-queues it',
+        () async {
+      final store = harness.storeFor('u1p1');
+      await _completeChapter(store, id: _chapter);
+      final before = await store.getChapter(_chapter);
+      final missing = (await store.localPagePaths(_chapter))[2]!;
+      await missing.delete();
+
+      final rowId = await store.ensureQueued(id: _chapter);
+
+      expect(rowId, before!.rowId);
+      final after = await store.getChapter(_chapter);
+      expect(after!.state, DownloadChapterState.queued);
+      expect(after.retryCount, 0);
+      // Pages still on disk stay, so only the missing one is fetched again.
+      expect(await store.existingPageNumbers(rowId), {1, 3});
+      expect(after.bytes, before.bytes - 3);
+      // Its bytes no longer count against the cap.
+      final db = await harness.openDatabase();
+      expect(await db.query('blobs'), hasLength(2));
+    });
+
+    test('a blob another chapter still holds keeps that reference', () async {
+      final store = harness.storeFor('u1p1');
+      const sharing = (
+        sourceId: 'asura',
+        seriesKey: 'solo-leveling',
+        chapterKey: 'c2',
+      );
+      await _completeChapter(store, id: _chapter, pageCount: 1);
+      await _completeChapter(store, id: sharing, pageCount: 1);
+      await (await store.localPagePaths(_chapter))[1]!.delete();
+
+      await store.ensureQueued(id: _chapter);
+
+      final db = await harness.openDatabase();
+      final blobs = await db.query('blobs');
+      expect(blobs.single['refcount'], 1);
+      expect((await store.getChapter(sharing))!.state,
+          DownloadChapterState.complete,);
+    });
+
+    test('an intact chapter is left complete', () async {
+      final store = harness.storeFor('u1p1');
+      await _completeChapter(store, id: _chapter);
+
+      await store.ensureQueued(id: _chapter);
+
+      expect((await store.getChapter(_chapter))!.state,
+          DownloadChapterState.complete,);
+      expect(await store.existingPageNumbers(
+        (await store.getChapter(_chapter))!.rowId,
+      ), {1, 2, 3},);
+    });
+  });
+
   group('pin / read-state bookkeeping', () {
     test('marking read then re-opening clears the stamp', () async {
       final store = harness.storeFor('u1p1');

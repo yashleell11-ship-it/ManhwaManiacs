@@ -162,6 +162,73 @@ Future<int> prunePagesBeyond({
   return freedBytes;
 }
 
+/// Drops every saved page of [chapterRowId] whose blob file is no longer on
+/// disk — deleted by hand through the Files app, which the Storage card
+/// tells users they can do — releasing the references those rows held and
+/// subtracting their bytes from the chapter's total. Returns how many pages
+/// it dropped.
+///
+/// A row naming a missing file is worse than no row: the queue skips every
+/// page number that has one ([DownloadsStore.existingPageNumbers]), so a
+/// chapter carrying them can never fetch those pages again, and the storage
+/// cap keeps counting bytes that are not there. Only this chapter's rows go;
+/// another chapter sharing the same blob keeps its reference, and its file
+/// comes back the next time any of them saves that page.
+Future<int> pruneVanishedPages({
+  required Database db,
+  required BlobStore blobStore,
+  required int chapterRowId,
+  required String scopeId,
+}) async {
+  const chapterFilter = '${DownloadsSchema.colScopeId} = ? AND '
+      '${DownloadsSchema.colChapterRowId} = ?';
+  final unreferenced = <String>{};
+  var dropped = 0;
+
+  await db.transaction((txn) async {
+    final pages = await txn.query(
+      DownloadsSchema.savedPages,
+      where: chapterFilter,
+      whereArgs: [scopeId, chapterRowId],
+    );
+    final vanished = [
+      for (final page in pages)
+        if (!blobStore.exists(page[DownloadsSchema.colBlobHash]! as String))
+          page,
+    ];
+    if (vanished.isEmpty) return;
+
+    final freedBytes = await _releaseBlobRefs(txn, vanished, unreferenced);
+    for (final page in vanished) {
+      await txn.delete(
+        DownloadsSchema.savedPages,
+        where: '$chapterFilter AND ${DownloadsSchema.colPageNumber} = ?',
+        whereArgs: [
+          scopeId,
+          chapterRowId,
+          page[DownloadsSchema.colPageNumber],
+        ],
+      );
+    }
+    await txn.rawUpdate(
+      'UPDATE ${DownloadsSchema.savedChapters} '
+      'SET ${DownloadsSchema.colBytes} = ${DownloadsSchema.colBytes} - ? '
+      'WHERE ${DownloadsSchema.colId} = ? AND ${DownloadsSchema.colScopeId} = ?',
+      [freedBytes, chapterRowId, scopeId],
+    );
+    dropped = vanished.length;
+  });
+
+  // Nothing to unlink for the missing files themselves; this only settles
+  // any hash whose last reference went with them.
+  await reclaimUnreferencedBlobs(
+    db: db,
+    blobStore: blobStore,
+    hashes: unreferenced,
+  );
+  return dropped;
+}
+
 /// Drops one reference each from the blobs [pages] name, deleting the `blobs`
 /// row of any that reaches zero and collecting that hash into [unreferenced]
 /// for the caller's post-commit reclaim. Returns the bytes released.
