@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import case, func, literal
 from sqlalchemy.orm import Session
 
-from core.connector_directory import mature_source_ids
+from core.connector_directory import gated_source_ids, is_mature_source
 from database.models import FollowedSeries, ReadingProfile
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -214,11 +214,20 @@ def resolve_tracker_rating(
     ``series_trackers`` columns), and the source's own maturity comes from the
     connector descriptor. A follow carries no genres of its own -- the rating
     was derived from them at follow time and stored.
+
+    With no descriptor the source may have been REMOVED rather than never
+    existed, and a follow outlives its connector: an adult source's id stays
+    adult (:func:`core.connector_directory.is_mature_source`), or deregistering
+    it would show its unrated follows to a profile with 18+ off.
     """
     return resolve_series_rating(
         followed.content_rating,
         mature_override=followed.mature_override,
-        source_mature=bool(descriptor is not None and descriptor.mature),
+        source_mature=(
+            bool(descriptor.mature)
+            if descriptor is not None
+            else is_mature_source(followed.source_id)
+        ),
     )
 
 
@@ -242,6 +251,9 @@ def mature_tracker_case(source_column):
     four surfaces and printed by name on the fifth.
 
     Unknown stays 0, for the reason recorded on :func:`resolve_series_rating`.
+    The source half reads :func:`core.connector_directory.gated_source_ids`, not
+    the installed adult set, so a removed 18+ source keeps its rows gated here
+    exactly as it does in the Python rule.
 
     The *join* supplying the ``followed_series`` row stays with the caller and
     is deliberately NOT uniform -- outer or inner, conditional or
@@ -249,7 +261,7 @@ def mature_tracker_case(source_column):
     answers for a different table for reasons recorded at each call site. Only
     the rating rule is shared here; the shape of the read is not.
     """
-    mature_sources = mature_source_ids()
+    mature_sources = gated_source_ids()
     source_mature = (
         case((source_column.in_(mature_sources), 1), else_=0)
         if mature_sources

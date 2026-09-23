@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from connectors.excluded import RETIRED_MATURE_SOURCES
 from connectors.registry import list_installed_connectors
 from core.config import get_settings
 
@@ -89,6 +90,44 @@ def mature_source_ids() -> tuple[str, ...]:
     order would give SQLAlchemy a different cache key for the same query.
     """
     return tuple(sorted(d.source_type for d in descriptors_by_source().values() if d.mature))
+
+
+def is_mature_source(source_id: str | None) -> bool:
+    """Whether rows naming ``source_id`` are 18+ by virtue of the source alone.
+
+    The installed descriptor answers when there is one. When there is not, the
+    id may still be a *removed* adult source
+    (:data:`connectors.excluded.RETIRED_MATURE_SOURCES`), and rows naming it --
+    follows, progress, bookmarks -- outlive the connector. Answering "not
+    mature" for those would turn every deregistration of an 18+ source into a
+    disclosure: a follow with no stored rating of its own drops from mature to
+    unknown, and unknown is shown to a profile with 18+ off.
+
+    A novel source hidden by ``MM_NOVELS_ENABLED`` is also descriptor-less
+    here, and is not in the retired set, so it keeps the answer it had.
+    """
+    descriptor = descriptor_for_source(source_id) if source_id else None
+    if descriptor is not None:
+        return bool(descriptor.mature)
+    return source_id in RETIRED_MATURE_SOURCES
+
+
+def gated_source_ids() -> tuple[str, ...]:
+    """Sorted ids :func:`is_mature_source` answers yes for -- the SQL side.
+
+    :func:`mature_source_ids` stays the installed set on purpose: it is what the
+    listing surfaces count and show. This is what a *row* is judged by, so it
+    adds the retired adult ids, minus any that have been re-registered (an
+    installed descriptor wins, as in :func:`is_mature_source`). Sorted for the
+    same SQL-cache reason.
+    """
+    installed = descriptors_by_source()
+    return tuple(
+        sorted(
+            {d.source_type for d in installed.values() if d.mature}
+            | (RETIRED_MATURE_SOURCES - installed.keys())
+        )
+    )
 
 
 def reset_cache() -> None:

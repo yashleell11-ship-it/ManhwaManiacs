@@ -60,3 +60,86 @@ EXCLUDED_CONNECTORS: frozenset[str] = frozenset({
     # still pass.
     "weebcentral",
 })
+
+
+#: Adult source ids whose connector is no longer registered: removed from
+#: ``catalog.py``, deleted outright, or listed in :data:`EXCLUDED_CONNECTORS`.
+#:
+#: A source's maturity is a property of its id, and it outlives the connector.
+#: Follows, pins, progress and bookmarks on a removed source are not deleted
+#: with it, and a follow whose genres carried no Adult/Mature/Smut tag stores
+#: no ``content_rating`` of its own -- the ONLY thing keeping it off a profile
+#: with 18+ off was the installed descriptor's ``mature=True``. Deregistering
+#: the source took that away, the row resolved to "unknown", which is shown,
+#: and a series hidden the day before appeared by title and cover in that
+#: profile's library and Continue shelf. A removal must not be a disclosure,
+#: so through ``core.connector_directory.is_mature_source`` an id listed here
+#: stays 18+ for as long as rows naming it exist.
+#:
+#: Append the id whenever an adult source goes; nothing ever needs to come
+#: out. A source that returns to the catalogue is harmless here, because an
+#: installed descriptor always wins over this set.
+#:
+#: Every id git history shows registered with ``mature=True`` and no longer
+#: registered, by when it went. Rows naming the ones that went before the
+#: 2026-07-27 wipe cannot be in the live database, but listing them costs
+#: nothing and a restored backup is exactly where they would come back from.
+RETIRED_MATURE_SOURCES: frozenset[str] = frozenset({
+    # 2026-07-14 -- catalogue lines moved to hand-written connectors or dropped.
+    "bato",
+    "cmanhua",  # connector code kept and excluded above; still MATURE = True
+    "comix_to",
+    "gingertoon",
+    "hentai3z",
+    "hentaiyes",
+    # 2026-07-27 -- the catalogue prune.
+    "allhenscan",
+    "asiatoon",
+    "hentai2read",
+    "hentai4free",
+    "hentaicity",
+    "hentaihere",
+    "heytoon",
+    "hiperdex",
+    "hitomi",
+    "honeytoon",
+    "kingcomix",
+    "lezhin",
+    "lunatoons",
+    "luscious",
+    "lustoon",
+    "mangago",
+    "manhuaus",
+    "manhwa_raw",
+    "manhwahub",
+    "manhwazone",
+    "manytoon",
+    "multporn",
+    "myhentaicomics",
+    "myhentaigallery",
+    "nhentai_com",
+    "olympusbiblioteca",
+    "palcomix",
+    "pururin",
+    "shibamanga",
+    "simplyhentai",
+    "svscomics",
+    "toomics",
+    "toongod",
+    "topton",
+    "tsumino",
+    "wfwf",
+    "xyzcomics",
+    "yaoimangaonline",
+    # 2026-09-04 onwards -- end-to-end probes from the VPS.
+    "pawmanga",
+    "bbato",
+    "toonily",
+    "manhwa68",
+    "manhwatoon",
+    "rawdex",
+    "toonizy",
+    "hentaisco",
+    "lilymanga",
+    "linkmanga",
+})
