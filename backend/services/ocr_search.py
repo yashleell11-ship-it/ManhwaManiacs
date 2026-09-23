@@ -177,14 +177,20 @@ class OcrSearchService:
                 snippet = "..." + snippet
             if end < len(text_value):
                 snippet = snippet + "..."
-        for term in sorted(terms, key=len, reverse=True):
-            if term:
-                snippet = re.sub(
-                    rf"({re.escape(term)})",
-                    r"<mark>\1</mark>",
-                    snippet,
-                    flags=re.IGNORECASE,
-                )
+        # One pass over the untagged text. A pass per term re-scanned the tags
+        # earlier passes had added, so a later term that occurs inside
+        # "<mark>" ("a", "m", "mark", "/") split them: "i am a hunter" came
+        # back as ``<m<mark>a</mark>rk>I</m<mark>a</mark>rk> ...``, which both
+        # clients print as literal junk. Longest first, so the longest match
+        # at a position still wins.
+        alternatives = sorted({t for t in terms if t}, key=len, reverse=True)
+        if alternatives:
+            snippet = re.sub(
+                "|".join(re.escape(t) for t in alternatives),
+                lambda m: f"<mark>{m.group(0)}</mark>",
+                snippet,
+                flags=re.IGNORECASE,
+            )
         return snippet
 
 

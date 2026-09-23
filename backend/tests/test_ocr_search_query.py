@@ -66,6 +66,39 @@ def test_the_expression_is_accepted_by_sqlite(db_session, query):
     ).all()
 
 
+# --- snippet highlighting --------------------------------------------------
+
+
+def _snippet(text_value, raw_query):
+    from services.ocr_search import OcrSearchService
+
+    return OcrSearchService._snippet(
+        text_value, [t.lower() for t in terms_of(raw_query)]
+    )
+
+
+def test_a_short_term_never_splits_the_marks_a_longer_one_added():
+    """The regression. One ``re.sub`` per term ran over the output of the one
+    before, so "a" matched inside the ``<mark>`` tags already added and the
+    clients printed ``<m<mark>a</mark>rk>`` as literal text."""
+    assert _snippet("I am a hunter, and that is all.", "i am a hunter") == (
+        "<mark>I</mark> <mark>am</mark> <mark>a</mark> <mark>hunter</mark>, "
+        "<mark>a</mark>nd th<mark>a</mark>t <mark>i</mark>s <mark>a</mark>ll."
+    )
+
+
+@pytest.mark.parametrize("query", ["hunter mark", "hunter /", "hunter k", "hunter <"])
+def test_terms_found_in_the_tag_text_leave_the_tags_whole(query):
+    got = _snippet("the hunter left", query)
+    assert "<mark>hunter</mark>" in got
+    stripped = got.replace("<mark>", "").replace("</mark>", "")
+    assert stripped == "the hunter left"
+
+
+def test_the_longest_term_still_wins_at_a_position():
+    assert _snippet("the hunter", "hunt hunter") == "the <mark>hunter</mark>"
+
+
 # --- end to end -----------------------------------------------------------
 
 
