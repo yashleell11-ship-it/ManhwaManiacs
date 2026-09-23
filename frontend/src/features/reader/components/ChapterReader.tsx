@@ -1208,7 +1208,14 @@ export function ChapterReader({
           !chromeVisible && !cinemaCtl.enabled ? "opacity-100" : "opacity-0",
         )}
       >
-        <div className="glass-panel rounded-full px-4 py-1.5 font-mono text-xs tabular-nums text-primary">
+        {/* Flat glass: this pill stays up for the whole read with the page
+            strip moving under it, and a backdrop blur there is re-sampled on
+            every scroll frame. Without the blur the count needs a denser fill
+            to stay legible over a white page: the preset's own panel fill
+            mixed into the surface colour, about 90% opaque where the fill is
+            glass and unchanged where it is already solid. `!` because the
+            glass rule is unlayered and would otherwise win. */}
+        <div className="glass-panel glass-flat rounded-full bg-[color-mix(in_srgb,var(--shape-panel-fill)_35%,var(--color-surface))]! px-4 py-1.5 font-mono text-xs tabular-nums text-primary">
           {visiblePage} <span className="text-muted">/ {pages.length}</span>
         </div>
       </div>

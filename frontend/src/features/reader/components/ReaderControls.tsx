@@ -679,12 +679,21 @@ export function ReaderControls({
         </div>
       </div>
 
-      {/* Glass bottom bar — amber scrubber, chapter nav, and the settings gear. */}
+      {/*
+        Glass bottom bar — amber scrubber, chapter nav, and the settings gear.
+
+        Hidden, it also leaves `visibility`. Faded and slid away, its blurred
+        panel was still a live backdrop-filter layer over the moving strip, and
+        its controls were still in the Tab order. `transition-all` carries
+        `visibility` too, and a visibility transition holds `visible` until
+        the end, so the bar still slides and fades out before it goes; on the
+        way back it is visible from the first frame.
+      */}
       <div
         className={cn(
           "pointer-events-none fixed inset-x-0 bottom-0 z-30",
           reduceMotion ? "" : "transition-all duration-300",
-          visible ? "translate-y-0 opacity-100" : "translate-y-full opacity-0",
+          visible ? "translate-y-0 opacity-100" : "invisible translate-y-full opacity-0",
         )}
       >
         <div className="pointer-events-auto mx-auto max-w-3xl px-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
