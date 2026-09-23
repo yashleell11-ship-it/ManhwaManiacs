@@ -24,8 +24,13 @@ from utils.api_pagination import enrich_pagination_aliases
 
 def terms_of(raw: str) -> list[str]:
     """The query's terms, in order. Also drives snippet highlighting, so the
-    two can never disagree about what was searched for."""
-    return [t for t in re.split(r"\s+", raw.strip()) if t]
+    two can never disagree about what was searched for.
+
+    Control characters separate terms like whitespace does. FTS5 reads NUL as
+    the end of the query, so a quoted term containing one never closes and
+    SQLite raises ``unterminated string`` -- a 500 on ``?q=hey%00you``.
+    """
+    return [t for t in re.split(r"[\s\x00-\x1f\x7f]+", raw) if t]
 
 
 def match_expr(raw: str) -> str:
@@ -86,13 +91,16 @@ class OcrSearchService:
         self, query: str, *, limit: int = 20, offset: int = 0
     ) -> dict[str, Any]:
         raw = (query or "").strip()
+        # Emptiness is judged on the TERMS, not the raw string: a query of
+        # only control characters is non-blank but has none, and an empty
+        # MATCH expression is an FTS5 syntax error.
+        terms = terms_of(raw)
         allowed = self._allowed_series()
-        if not raw or not allowed:
+        if not terms or not allowed:
             return enrich_pagination_aliases(
                 {"items": [], "total": 0, "offset": offset, "limit": limit}
             )
 
-        terms = terms_of(raw)
         params: dict[str, Any] = {"q": match_expr(raw)}
         scope = self._scope_predicate(allowed, params)
 

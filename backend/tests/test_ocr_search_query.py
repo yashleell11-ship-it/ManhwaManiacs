@@ -54,7 +54,17 @@ def test_terms_and_expression_never_disagree_about_what_was_searched():
 # --- the same expression, through real SQLite FTS5 ------------------------
 
 
-@pytest.mark.parametrize("query", ['he"llo', '"', 'a "b" c', 'say "hi"'])
+def test_a_nul_byte_separates_terms_instead_of_ending_the_query():
+    """FTS5 treats NUL as the end of the query string, so a quoted term with
+    one inside never closes: ``unterminated string``, and a 500."""
+    assert terms_of("hey\x00you") == ["hey", "you"]
+    assert match_expr("hey\x00you") == '"hey" "you"'
+    assert terms_of("\x00\x01") == []
+
+
+@pytest.mark.parametrize(
+    "query", ['he"llo', '"', 'a "b" c', 'say "hi"', "hey\x00you", "x\x00"]
+)
 def test_the_expression_is_accepted_by_sqlite(db_session, query):
     """Straight at the engine: an unescaped quote raises OperationalError here,
     which is what surfaced as the route's 500."""
@@ -137,6 +147,18 @@ def seeded(client, h, acct, seed_follow):
 def test_a_query_with_a_quote_does_not_500(client, h, seeded, query):
     got = client.get("/ocr/search", params={"q": query}, headers=h)
     assert got.status_code == 200, got.text
+
+
+@pytest.mark.parametrize("query", ["he\x00llo", "\x00", "said\x00hello"])
+def test_a_query_with_a_nul_byte_does_not_500(client, h, seeded, query):
+    got = client.get("/ocr/search", params={"q": query}, headers=h)
+    assert got.status_code == 200, got.text
+
+
+def test_a_nul_byte_between_words_still_finds_the_line(client, h, seeded):
+    got = client.get("/ocr/search", params={"q": "said\x00left"}, headers=h)
+    assert got.status_code == 200, got.text
+    assert [hit["chapter_key"] for hit in got.json()["items"]] == ["c1"]
 
 
 def test_a_quoted_phrase_still_finds_the_line(client, h, seeded):
