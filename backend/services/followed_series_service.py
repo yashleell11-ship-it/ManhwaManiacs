@@ -11,7 +11,9 @@ Everything here is scoped to the request's ``(user_id, profile_id)``. Cross
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any
+from collections.abc import Callable
+from functools import partial
+from typing import Annotated, Any, NamedTuple
 from urllib.parse import quote
 
 from fastapi import Depends
@@ -45,9 +47,11 @@ from database.models import (
 from database.session import get_db
 from services.browse_service import (
     BrowseService,
+    chapter_identity,
     get_browse_service,
     series_identity,
 )
+from services.progress_service import respell_chapter_key
 from services.reading_stats_service import ReadingStatsService
 from services.source_cache_service import SourceCacheService
 
@@ -109,6 +113,7 @@ def _reading_state(
     chapters: list[dict[str, Any]],
     progress_keys: list[str],
     progress_number: float | None,
+    identify: Callable[[str], str] | None = None,
 ) -> dict[str, Any]:
     """Where a started series stands: the furthest chapter opened, of how many.
 
@@ -126,7 +131,14 @@ def _reading_state(
     the position cannot be known, so it and ``new_count`` are None rather
     than a guess; ``chapter_number`` then falls back to the highest number the
     progress rows themselves recorded.
+
+    ``identify`` is how a progress key is matched to a listed one: exactly by
+    default, and by the connector's ``chapter_identity`` for a follow whose
+    keys drift, where a chapter read under another suffix of the series is a
+    different string naming the same chapter. The chapter reported is always
+    the list's own entry, so it is spelled as the follow spells it.
     """
+    same = identify or (lambda key: key)
     indexed = [
         (c, i) for i, c in enumerate(chapters) if isinstance(c, dict) and c.get("key")
     ]
@@ -138,8 +150,8 @@ def _reading_state(
         return (1, 0.0, item[1])
 
     ordered = [c for c, _ in sorted(indexed, key=_order)]
-    position_of = {c["key"]: n for n, c in enumerate(ordered, start=1)}
-    positions = [position_of[k] for k in progress_keys if k in position_of]
+    position_of = {same(c["key"]): n for n, c in enumerate(ordered, start=1)}
+    positions = [position_of[k] for k in map(same, progress_keys) if k in position_of]
     total = len(ordered)
     latest = ordered[-1].get("number") if ordered else None
     state: dict[str, Any] = {
@@ -161,6 +173,85 @@ def _reading_state(
             new_count=total - max(positions),
         )
     return state
+
+
+#: Series per statement when progress stored under another key of a follow's
+#: series is looked up (``_alias_filter``): two bound parameters each, so a
+#: chunk stays inside even the old 999-variable ceiling.
+_ALIAS_CHUNK = 200
+
+
+def _chunks(items: list[Any], size: int) -> list[list[Any]]:
+    return [items[start : start + size] for start in range(0, len(items), size)]
+
+
+def _max_number(a: float | None, b: float | None) -> float | None:
+    """``max`` that skips a missing number, as SQL's ``max()`` does."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return max(a, b)
+
+
+class _Position(NamedTuple):
+    """One ``chapter_progress`` row as the Continue strip weighs it."""
+
+    id: int
+    source_id: str
+    series_key: str
+    chapter_key: str
+    chapter_number: float | None
+    last_page: int
+    page_count: int
+    last_read_at: Any
+    is_completed: bool
+
+    @classmethod
+    def of(cls, row: Any) -> "_Position":
+        return cls(
+            id=row.progress_id,
+            source_id=row.source_id,
+            series_key=row.series_key,
+            chapter_key=row.chapter_key,
+            chapter_number=row.chapter_number,
+            last_page=row.last_page,
+            page_count=row.page_count,
+            last_read_at=row.last_read_at,
+            is_completed=bool(row.is_completed),
+        )
+
+    def furthest_order(self) -> tuple[Any, ...]:
+        """``continue_reading``'s ``furthest_first`` as a sort key (max wins)."""
+        numbered = self.chapter_number is not None
+        return (
+            numbered,
+            self.chapter_number if numbered else 0.0,
+            self.last_read_at is not None,
+            self.last_read_at or 0,
+            self.id,
+        )
+
+    def newest_order(self) -> tuple[Any, ...]:
+        """``continue_reading``'s ``newest_first`` as a sort key (max wins)."""
+        return (self.last_read_at is not None, self.last_read_at or 0, self.id)
+
+    def spelled_under(
+        self, series_key: str, chapters: list[dict[str, Any]] | None
+    ) -> "_Position":
+        """This position as the follow keyed ``series_key`` spells it."""
+        if self.series_key == series_key:
+            return self
+        return self._replace(
+            series_key=series_key,
+            chapter_key=respell_chapter_key(
+                self.source_id,
+                self.chapter_key,
+                stored_under=self.series_key,
+                series_key=series_key,
+                chapters=chapters,
+            ),
+        )
 
 
 def _not_started(row: FollowedSeries) -> dict[str, Any]:
@@ -259,6 +350,84 @@ class FollowedSeriesService:
         if self._profile_id is None:
             return stmt.where(ChapterProgress.profile_id.is_(None))
         return stmt.where(ChapterProgress.profile_id == self._profile_id)
+
+    # --- progress stored under another key of a followed series ----------
+    #
+    # Asura rotates the suffix on its slugs every few days and the old one
+    # keeps resolving: a series followed under ``...-08677664`` is read from
+    # Browse as ``...-05c7df14``. ``ProgressService`` now stores such a push
+    # under the follow's key, but rows written before it did -- and rows for
+    # a series read first and followed after -- sit under the other key, and
+    # every library read joins progress to a follow on the follow's key. So
+    # each read also asks, for the follows whose keys drift, for the rows
+    # stored under another key of the same series.
+    #
+    # Which keys are the same series is the connector's call
+    # (``series_identity``); a follow whose key IS its identity -- every
+    # source but Asura -- is never asked about, and a library without one
+    # pays nothing.
+
+    def _drifting(self, follows: Any) -> dict[tuple[str, str], list[Any]]:
+        """``(source_id, identity) -> follows`` for those whose key is not
+        their series' identity, in the order given."""
+        out: dict[tuple[str, str], list[Any]] = {}
+        for follow in follows:
+            identity = series_identity(follow.source_id, follow.series_key)
+            if identity != follow.series_key:
+                out.setdefault((follow.source_id, identity), []).append(follow)
+        return out
+
+    def _alias_filter(self, stmt, series: list[tuple[str, str]]):
+        """``stmt`` (a select over ``chapter_progress``) narrowed to this
+        profile's rows under a key of one of ``series`` that no follow of the
+        profile has.
+
+        ``series`` are ``(source_id, identity)`` pairs. The ``LIKE`` prefix
+        only narrows; the caller keeps a row only when the connector's
+        ``series_identity`` of its key is one of them, so a different series
+        sharing the prefix never counts. A key that has its OWN follow belongs
+        to that follow -- the same rule ``ProgressService`` stores by -- which
+        also keeps the follow's own rows, already joined exactly, from being
+        counted twice.
+        """
+        own_follow = and_(
+            FollowedSeries.user_id == ChapterProgress.user_id,
+            FollowedSeries.profile_id == ChapterProgress.profile_id,
+            FollowedSeries.source_id == ChapterProgress.source_id,
+            FollowedSeries.series_key == ChapterProgress.series_key,
+        )
+        return self._progress_scope(
+            stmt.outerjoin(FollowedSeries, own_follow)
+            .where(FollowedSeries.id.is_(None))
+            .where(
+                or_(
+                    *(
+                        and_(
+                            ChapterProgress.source_id == source_id,
+                            ChapterProgress.series_key.startswith(
+                                identity, autoescape=True
+                            ),
+                        )
+                        for source_id, identity in series
+                    )
+                )
+            )
+        )
+
+    def _alias_rows(self, drifting: dict[tuple[str, str], list[Any]], *columns):
+        """``(follows, row)`` for each row ``_alias_filter`` finds for ``drifting``.
+
+        ``columns`` must include ``chapter_progress.source_id`` and
+        ``series_key``.
+        """
+        for chunk in _chunks(list(drifting), _ALIAS_CHUNK):
+            stmt = self._alias_filter(select(*columns), chunk)
+            for row in self._db.execute(stmt).all():
+                owners = drifting.get(
+                    (row.source_id, series_identity(row.source_id, row.series_key))
+                )
+                if owners:
+                    yield owners, row
 
     def _require_profile(self) -> int:
         """The active profile id, or a clean 400.
@@ -535,11 +704,19 @@ class FollowedSeriesService:
         scoped again with ``_progress_scope``: one profile's reading must never
         mark another profile's card as started. ``rows`` have already been
         through the 18+ gate, so a hidden series is never asked about.
+
+        A follow whose keys drift also counts the rows stored under another
+        key of its series (``_alias_rows``), matched to its chapter list by
+        ``chapter_identity``. That is one more statement, plus one for the
+        chapter lists of follows that had no row under their own key -- and
+        neither runs for a page without such a follow.
         """
         states = {row.id: _not_started(row) for row in rows}
         ids = list(states)
         if not ids:
             return states
+        # followed_id -> [known_chapters blob, progress keys, highest number]
+        found: dict[int, list[Any]] = {}
         for start in range(0, len(ids), _IN_CHUNK):
             stmt = self._progress_scope(
                 self._scope(
@@ -563,9 +740,46 @@ class FollowedSeriesService:
                 )
             )
             for followed_id, known, keys, number in self._db.execute(stmt).all():
-                states[followed_id] = _reading_state(
-                    _loads(known) or [], _loads(keys) or [], number
-                )
+                found[followed_id] = [known, _loads(keys) or [], number]
+
+        drifting = self._drifting(rows)
+        if drifting:
+            lists_missing: list[int] = []
+            for owners, progress in self._alias_rows(
+                drifting,
+                ChapterProgress.source_id,
+                ChapterProgress.series_key,
+                ChapterProgress.chapter_key,
+                ChapterProgress.chapter_number,
+            ):
+                for follow in owners:
+                    entry = found.get(follow.id)
+                    if entry is None:
+                        entry = found[follow.id] = [None, [], None]
+                        lists_missing.append(follow.id)
+                    entry[1].append(progress.chapter_key)
+                    entry[2] = _max_number(entry[2], progress.chapter_number)
+            if lists_missing:
+                for followed_id, known in self._db.execute(
+                    self._scope(
+                        select(FollowedSeries.id, FollowedSeries.known_chapters).where(
+                            FollowedSeries.id.in_(lists_missing)
+                        )
+                    )
+                ).all():
+                    found[followed_id][0] = known
+
+        drifting_ids = {f.id for owners in drifting.values() for f in owners}
+        by_id = {row.id: row for row in rows}
+        for followed_id, (known, keys, number) in found.items():
+            identify = (
+                partial(chapter_identity, by_id[followed_id].source_id)
+                if followed_id in drifting_ids
+                else None
+            )
+            states[followed_id] = _reading_state(
+                _loads(known) or [], keys, number, identify
+            )
         return states
 
     def list_series(
@@ -654,13 +868,44 @@ class FollowedSeriesService:
                 )
             )
         ).scalars().all()
-        payload["progress"] = {
+        overlay = {
             p.chapter_key: {
                 "last_page": p.last_page,
                 "is_completed": bool(p.is_completed),
             }
             for p in prog
         }
+        # Rows stored under another key of this series, keyed the way this
+        # follow spells its chapters so the chapter list above finds them. A
+        # chapter read under two spellings keeps the furthest page and stays
+        # completed once either says so -- the merge's own rule.
+        drifting = self._drifting([row])
+        if drifting:
+            chapters = _loads(row.known_chapters) or []
+            for _owners, p in self._alias_rows(
+                drifting,
+                ChapterProgress.source_id,
+                ChapterProgress.series_key,
+                ChapterProgress.chapter_key,
+                ChapterProgress.last_page,
+                ChapterProgress.is_completed,
+            ):
+                key = respell_chapter_key(
+                    row.source_id,
+                    p.chapter_key,
+                    stored_under=p.series_key,
+                    series_key=row.series_key,
+                    chapters=chapters,
+                )
+                seen = overlay.get(key)
+                overlay[key] = {
+                    "last_page": p.last_page
+                    if seen is None
+                    else max(seen["last_page"], p.last_page),
+                    "is_completed": bool(p.is_completed)
+                    or (seen is not None and seen["is_completed"]),
+                }
+        payload["progress"] = overlay
         return payload
 
     def continue_reading(self, limit: int = 10) -> list[dict[str, Any]]:
@@ -722,46 +967,32 @@ class FollowedSeriesService:
         The strip is still ORDERED by recency — the series read most recently
         comes first — but by the series' newest read, not the resume row's:
         re-reading chapter 1 is still reading that book today.
+
+        A follow whose keys drift (Asura rotates its slug suffixes) also weighs
+        the rows stored under another key of its series, which the exact join
+        cannot reach (``_merge_alias_positions``): the furthest and the newest
+        are chosen across every spelling, and the item is spelled as the
+        follow spells it, so it opens the follow's own chapter list.
+
+        Each item also names its series with the follow's ``title`` and
+        ``cover_url``, straight from the joined follow row, so a strip card
+        can say what it resumes without matching it against the followed
+        list. ``cover_url`` is null when the follow captured no cover; the
+        client falls back as it does for any other missing cover.
         """
         self._require_owner()
-        # Furthest first; within a chapter number (or among unnumbered rows)
-        # the newest, then the highest id, so the choice is always defined.
-        furthest_first = (
-            ChapterProgress.chapter_number.is_(None).asc(),
-            ChapterProgress.chapter_number.desc(),
-            ChapterProgress.last_read_at.desc(),
-            ChapterProgress.id.desc(),
-        )
-        newest_first = (ChapterProgress.last_read_at.desc(), ChapterProgress.id.desc())
-        series_partition = (ChapterProgress.source_id, ChapterProgress.series_key)
         ranked = (
             self._progress_scope(
                 self._scope(
                     select(
-                        ChapterProgress.source_id.label("source_id"),
-                        ChapterProgress.series_key.label("series_key"),
-                        ChapterProgress.chapter_key.label("chapter_key"),
-                        ChapterProgress.chapter_number.label("chapter_number"),
-                        ChapterProgress.last_page.label("last_page"),
-                        ChapterProgress.page_count.label("page_count"),
-                        ChapterProgress.last_read_at.label("last_read_at"),
-                        ChapterProgress.is_completed.label("is_completed"),
+                        *self._position_columns(),
                         # Carried so the 18+ gate can be resolved without a
                         # second lookup; the join itself is load-bearing (it is
                         # what restricts the strip to *followed* series).
                         FollowedSeries.mature_override.label("mature_override"),
                         FollowedSeries.content_rating.label("content_rating"),
-                        func.row_number()
-                        .over(partition_by=series_partition, order_by=furthest_first)
-                        .label("furthest_rank"),
-                        func.row_number()
-                        .over(partition_by=series_partition, order_by=newest_first)
-                        .label("newest_rank"),
-                        # When the SERIES was last read, whichever chapter it
-                        # was — what the strip is sorted by.
-                        func.max(ChapterProgress.last_read_at)
-                        .over(partition_by=series_partition)
-                        .label("series_read_at"),
+                        FollowedSeries.title.label("title"),
+                        FollowedSeries.cover_url.label("cover_url"),
                     ).join(
                         FollowedSeries,
                         and_(
@@ -792,15 +1023,40 @@ class FollowedSeriesService:
         for row in self._db.execute(stmt).all():
             if not gate_open and self._rating(row) == TRACKER_RATING_MATURE:
                 continue
-            pair = candidates.setdefault((row.source_id, row.series_key), {})
+            pair = candidates.setdefault(
+                (row.source_id, row.series_key),
+                {
+                    "read_at": row.series_read_at,
+                    "title": row.title,
+                    "cover_url": row.cover_url,
+                },
+            )
+            # One object for a row that is both, which _resume_row tests for.
+            position = _Position.of(row)
             if row.furthest_rank == 1:
-                pair["furthest"] = row
+                pair["furthest"] = position
             if row.newest_rank == 1:
-                pair["newest"] = row
+                pair["newest"] = position
+
+        aliased_keys = self._merge_alias_positions(candidates, gate_open)
+        if aliased_keys:
+            # A series read under another key can be the newest read of all.
+            # Stable, so series tied on the instant keep the database's order.
+            candidates = dict(
+                sorted(
+                    candidates.items(),
+                    key=lambda item: (
+                        item[1]["read_at"] is not None,
+                        item[1]["read_at"] or 0,
+                    ),
+                    reverse=True,
+                )
+            )
 
         # The chapter lists are fetched only for the series that need one — a
-        # finished candidate to move on from, or a numberless newest row to
-        # place. ``known_chapters`` is kilobytes per series and most of the
+        # finished candidate to move on from, a numberless newest row to
+        # place, or a row stored under another key to spell as the follow
+        # does. ``known_chapters`` is kilobytes per series and most of the
         # strip is mid-chapter, where the row itself is the answer.
         wanted = [
             key
@@ -808,6 +1064,7 @@ class FollowedSeriesService:
             if pair["furthest"].is_completed
             or pair["newest"].is_completed
             or pair["newest"].chapter_number is None
+            or key in aliased_keys
         ]
         known: dict[tuple[str, str], list[dict[str, Any]]] = {}
         if wanted:
@@ -824,46 +1081,161 @@ class FollowedSeriesService:
                     _loads(follow.known_chapters) or []
                 )
 
-        rows = [
-            _resume_row(pair["furthest"], pair["newest"], known.get(key, []))
-            for key, pair in candidates.items()
-        ]
-
         out: list[dict[str, Any]] = []
-        for row in rows:
-            last_read_at = row.series_read_at.isoformat() if row.series_read_at else None
+        for key, pair in candidates.items():
+            source_id, series_key = key
+            chapters = known.get(key, [])
+            furthest = pair["furthest"].spelled_under(series_key, chapters)
+            newest = (
+                furthest
+                if pair["newest"] is pair["furthest"]
+                else pair["newest"].spelled_under(series_key, chapters)
+            )
+            row = _resume_row(furthest, newest, chapters)
+            item: dict[str, Any] = {
+                "source_id": source_id,
+                "series_key": series_key,
+            }
             if not row.is_completed:
-                out.append(
-                    {
-                        "source_id": row.source_id,
-                        "series_key": row.series_key,
-                        "chapter_key": row.chapter_key,
-                        "chapter_number": row.chapter_number,
-                        "last_page": row.last_page,
-                        "page_count": row.page_count,
-                        "last_read_at": last_read_at,
-                    }
+                item.update(
+                    chapter_key=row.chapter_key,
+                    chapter_number=row.chapter_number,
+                    last_page=row.last_page,
+                    page_count=row.page_count,
                 )
             else:
-                nxt = _next_known_chapter(
-                    known.get((row.source_id, row.series_key), []), row.chapter_key
-                )
+                nxt = _next_known_chapter(chapters, row.chapter_key)
                 if nxt is None:
                     continue
-                out.append(
-                    {
-                        "source_id": row.source_id,
-                        "series_key": row.series_key,
-                        "chapter_key": nxt["key"],
-                        "chapter_number": nxt.get("number"),
-                        "last_page": 1,
-                        "page_count": 0,
-                        "last_read_at": last_read_at,
-                    }
+                item.update(
+                    chapter_key=nxt["key"],
+                    chapter_number=nxt.get("number"),
+                    last_page=1,
+                    page_count=0,
                 )
+            item.update(
+                last_read_at=pair["read_at"].isoformat() if pair["read_at"] else None,
+                title=pair["title"],
+                cover_url=pair["cover_url"],
+            )
+            out.append(item)
             if len(out) >= limit:
                 break
         return out
+
+    @staticmethod
+    def _position_columns() -> tuple[Any, ...]:
+        """A progress row plus its two ranks and its series' newest read.
+
+        Ranked per stored ``(source_id, series_key)``: furthest first -- within
+        a chapter number (or among unnumbered rows) the newest, then the
+        highest id, so the choice is always defined -- and newest first.
+        """
+        furthest_first = (
+            ChapterProgress.chapter_number.is_(None).asc(),
+            ChapterProgress.chapter_number.desc(),
+            ChapterProgress.last_read_at.desc(),
+            ChapterProgress.id.desc(),
+        )
+        newest_first = (ChapterProgress.last_read_at.desc(), ChapterProgress.id.desc())
+        series_partition = (ChapterProgress.source_id, ChapterProgress.series_key)
+        return (
+            ChapterProgress.id.label("progress_id"),
+            ChapterProgress.source_id.label("source_id"),
+            ChapterProgress.series_key.label("series_key"),
+            ChapterProgress.chapter_key.label("chapter_key"),
+            ChapterProgress.chapter_number.label("chapter_number"),
+            ChapterProgress.last_page.label("last_page"),
+            ChapterProgress.page_count.label("page_count"),
+            ChapterProgress.last_read_at.label("last_read_at"),
+            ChapterProgress.is_completed.label("is_completed"),
+            func.row_number()
+            .over(partition_by=series_partition, order_by=furthest_first)
+            .label("furthest_rank"),
+            func.row_number()
+            .over(partition_by=series_partition, order_by=newest_first)
+            .label("newest_rank"),
+            # When the SERIES was last read, whichever chapter it was — what
+            # the strip is sorted by.
+            func.max(ChapterProgress.last_read_at)
+            .over(partition_by=series_partition)
+            .label("series_read_at"),
+        )
+
+    def _merge_alias_positions(
+        self, candidates: dict[tuple[str, str], dict[str, Any]], gate_open: bool
+    ) -> set[tuple[str, str]]:
+        """Fold rows stored under another key of a followed series into
+        ``candidates``, keyed by the follow; returns the keys it touched.
+
+        The follows are read first -- the only way to know whether any of
+        them drifts -- as one small statement over this profile's follows
+        without their chapter lists. Rows under another key of the same
+        series are ranked per stored key exactly as the exact join's rows
+        are; each stored key's furthest and newest then compete with the
+        follow's own by the same order (``_Position.furthest_order`` /
+        ``newest_order``). Several follows of one series (made before
+        ``follow`` deduplicated them) all name it; the oldest takes the rows,
+        as it takes the pushes, so the series is never on the strip twice.
+
+        The 18+ gate is the follow's, as for every other row here.
+        """
+        follows = self._db.execute(
+            self._scope(
+                select(
+                    FollowedSeries.id,
+                    FollowedSeries.source_id,
+                    FollowedSeries.series_key,
+                    FollowedSeries.title,
+                    FollowedSeries.cover_url,
+                    FollowedSeries.mature_override,
+                    FollowedSeries.content_rating,
+                ).order_by(FollowedSeries.id)
+            )
+        ).all()
+        drifting = self._drifting(follows)
+        if not drifting:
+            return set()
+        touched: set[tuple[str, str]] = set()
+        for chunk in _chunks(list(drifting), _ALIAS_CHUNK):
+            ranked = self._alias_filter(
+                select(*self._position_columns()), chunk
+            ).subquery()
+            for row in self._db.execute(
+                select(ranked).where(
+                    or_(ranked.c.furthest_rank == 1, ranked.c.newest_rank == 1)
+                )
+            ).all():
+                owners = drifting.get(
+                    (row.source_id, series_identity(row.source_id, row.series_key))
+                )
+                if not owners:
+                    continue
+                follow = owners[0]
+                if not gate_open and self._rating(follow) == TRACKER_RATING_MATURE:
+                    continue
+                key = (follow.source_id, follow.series_key)
+                pair = candidates.setdefault(
+                    key,
+                    {"read_at": None, "title": follow.title, "cover_url": follow.cover_url},
+                )
+                position = _Position.of(row)
+                held = pair.get("furthest")
+                if row.furthest_rank == 1 and (
+                    held is None or position.furthest_order() > held.furthest_order()
+                ):
+                    pair["furthest"] = position
+                held = pair.get("newest")
+                if row.newest_rank == 1 and (
+                    held is None or position.newest_order() > held.newest_order()
+                ):
+                    pair["newest"] = position
+                if row.series_read_at is not None and (
+                    pair["read_at"] is None or row.series_read_at > pair["read_at"]
+                ):
+                    pair["read_at"] = row.series_read_at
+                touched.add(key)
+        return touched
 
     def recently_updated(self, limit: int = 10) -> list[dict[str, Any]]:
         self._require_owner()
