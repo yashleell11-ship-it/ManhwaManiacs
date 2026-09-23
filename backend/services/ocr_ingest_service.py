@@ -337,8 +337,13 @@ class OcrIngestService:
             source_id, series_key, chapter_key
         ):
             return
+        # Both clients show this message as-is, and the likeliest honest cause
+        # for a real reader is a list that has not caught up yet.
         raise AppError(
-            "Chapter not found.", code="chapter_not_found", status_code=404
+            "This chapter is not in the series' chapter list yet. "
+            "Try again in a few minutes.",
+            code="chapter_not_found",
+            status_code=404,
         )
 
     def _refresh_chapter_list(self, source_id: str, series_key: str) -> bool:
