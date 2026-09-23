@@ -3,9 +3,11 @@
  *
  * Cinema mode hides ALL reader chrome — top bar, scrub bar, page counter, side
  * controls — for an uninterrupted read. It engages two ways: an explicit toggle
- * (control or keyboard shortcut), and automatically after {@link CINEMA_IDLE_MS}
- * of no pointer / scroll activity. Any tap, pointer-move or scroll-pause reveals
- * the chrome again; it auto-hides once more after the same idle timeout.
+ * (control or keyboard shortcut), and on open when the per-profile preference
+ * is on. While engaged, a reveal (a tap, the pointer reaching the chrome's
+ * edge band, Tab, the end of the strip — see `chrome-autohide.ts`) brings the
+ * chrome back, reading on conceals it at once, and otherwise it auto-hides
+ * after {@link CINEMA_IDLE_MS}.
  *
  * This module is pure: it owns the transitions only. `use-cinema.ts` drives it
  * with real timers and DOM listeners, and `prefers-reduced-motion` only changes
@@ -32,17 +34,19 @@ export type CinemaEvent =
   | { type: "disable" }
   /** Toggle control / keyboard shortcut. */
   | { type: "toggle" }
-  /** A tap, pointer-move or scroll-pause. */
+  /** A reveal: a tap, the pointer at the chrome's edge, Tab, the strip's end. */
   | { type: "activity" }
   /** The idle timer elapsed. */
-  | { type: "idle" };
+  | { type: "idle" }
+  /** Reading moved on — a downward scroll or a page turn. Hides without waiting. */
+  | { type: "conceal" };
 
 export const INITIAL_CINEMA_STATE: CinemaState = { enabled: false, chrome: "shown" };
 
 /**
- * Advance the machine. While cinema mode is off, `activity` / `idle` are inert
- * (the normal tap-to-toggle chrome takes over). While it is on, `activity`
- * reveals the chrome and `idle` hides it again.
+ * Advance the machine. While cinema mode is off, `activity` / `idle` /
+ * `conceal` are inert (the reader store's chrome flag takes over). While it is
+ * on, `activity` reveals the chrome and `idle` or `conceal` hides it again.
  */
 export function cinemaReduce(state: CinemaState, event: CinemaEvent): CinemaState {
   switch (event.type) {
@@ -58,6 +62,7 @@ export function cinemaReduce(state: CinemaState, event: CinemaEvent): CinemaStat
       if (!state.enabled) return state;
       return state.chrome === "shown" ? state : { ...state, chrome: "shown" };
     case "idle":
+    case "conceal":
       if (!state.enabled) return state;
       return state.chrome === "hidden" ? state : { ...state, chrome: "hidden" };
     default:

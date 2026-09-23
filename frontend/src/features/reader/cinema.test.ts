@@ -67,6 +67,21 @@ describe("cinemaReduce", () => {
     );
     expect(cinemaReduce(engagedShown, { type: "activity" })).toBe(engagedShown);
   });
+
+  it("conceals at once when reading moves on, without waiting for idle", () => {
+    const revealed = cinemaReduce(
+      cinemaReduce(INITIAL_CINEMA_STATE, { type: "enable" }),
+      { type: "activity" },
+    );
+    const concealed = cinemaReduce(revealed, { type: "conceal" });
+    expect(concealed).toEqual({ enabled: true, chrome: "hidden" });
+    // Scrolling on keeps concealing a chrome that is already gone: same state.
+    expect(cinemaReduce(concealed, { type: "conceal" })).toBe(concealed);
+  });
+
+  it("leaves conceal to the reader store while cinema mode is off", () => {
+    expect(cinemaReduce(INITIAL_CINEMA_STATE, { type: "conceal" })).toBe(INITIAL_CINEMA_STATE);
+  });
 });
 
 describe("cinemaTransition", () => {
