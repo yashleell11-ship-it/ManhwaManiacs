@@ -1,4 +1,5 @@
 import 'package:manhwamaniacs/features/downloads/models/chapter_identity.dart';
+import 'package:manhwamaniacs/features/downloads/models/download_chapter_state.dart';
 import 'package:manhwamaniacs/features/downloads/services/blob_store.dart';
 import 'package:manhwamaniacs/features/downloads/store/downloads_db.dart';
 import 'package:manhwamaniacs/features/downloads/store/downloads_deletion.dart';
@@ -55,10 +56,12 @@ class RetentionMaintenance {
     // orphaned blob is not an expiry decision, it is bytes no profile can
     // reach, and this pass is the only one that ever visits the tree.
     await reclaimOrphanBlobs();
-    // Same for the pin repair, which has to land before any expiry decision
-    // is made: a pinned series' unpinned stragglers are exactly what the
-    // expiry below and the eviction that follows it in "Free up space" would
-    // take.
+    // Same for the other two: neither is an expiry decision, and both have
+    // to land before one is made. Rows naming files the user deleted by hand
+    // are bytes the cap would otherwise go on counting, and a pinned
+    // series' unpinned stragglers are exactly what the expiry below and the
+    // eviction that follows it in "Free up space" would take.
+    await releaseVanishedBlobs();
     await repairSeriesPins();
     if (interval == null) return 0;
     final db = await database;
@@ -190,6 +193,131 @@ class RetentionMaintenance {
       );
     }
     return repaired;
+  }
+
+  /// What a chapter emptied through the Files app says on the Downloads
+  /// screen when some of its pages are still on the phone.
+  static const String vanishedPagesError =
+      'Some pages were deleted outside the app';
+
+  /// Releases the index rows of blob files deleted outside the app, in
+  /// every scope, and returns how many chapters lost pages.
+  ///
+  /// The Storage card tells users they can delete downloads through the
+  /// Files app, and that is where someone short of space goes. The index
+  /// kept every row naming those files, so [totalDeviceBytes] — the storage
+  /// meter and the cap — went on counting bytes that were gone, and a queue
+  /// paused at the cap stayed paused. `ensureQueued` already prunes such rows,
+  /// but only for a chapter someone taps Download on again.
+  ///
+  /// A chapter that was `complete` cannot say so any longer. With none of
+  /// its pages left it is deleted outright, as "Remove download" would —
+  /// it is not on the phone, and the Downloads screen should not list it.
+  /// With some left it becomes `failed`, which is what the screen offers a
+  /// Retry for, and a retry fetches just the missing pages. A chapter still
+  /// queued or downloading only loses the rows, so the queue fetches those
+  /// pages again.
+  ///
+  /// Index first and disk second, and every candidate is checked again
+  /// inside the transaction that drops its rows (`pruneVanishedPages`), so a
+  /// page saved or deleted while this runs is never mistaken for one that
+  /// vanished.
+  Future<int> releaseVanishedBlobs() async {
+    final db = await database;
+    final blob = await blobStore;
+    final indexed = await db.query(
+      DownloadsSchema.blobs,
+      columns: [DownloadsSchema.colHash],
+    );
+    if (indexed.isEmpty) return 0;
+    final onDisk = (await blob.hashesOnDisk()).toSet();
+    final vanished = {
+      for (final row in indexed)
+        if (!onDisk.contains(row[DownloadsSchema.colHash]))
+          row[DownloadsSchema.colHash]! as String,
+    };
+    if (vanished.isEmpty) return 0;
+
+    // One pass over the pages rather than one query per hash: `blob_hash`
+    // has no index, and the usual reason for any of this is a whole folder
+    // of files deleted at once.
+    final pages = await db.query(
+      DownloadsSchema.savedPages,
+      columns: [
+        DownloadsSchema.colScopeId,
+        DownloadsSchema.colChapterRowId,
+        DownloadsSchema.colBlobHash,
+      ],
+    );
+    final chapters = {
+      for (final page in pages)
+        if (vanished.contains(page[DownloadsSchema.colBlobHash]))
+          (
+            scopeId: page[DownloadsSchema.colScopeId]! as String,
+            rowId: page[DownloadsSchema.colChapterRowId]! as int,
+          ),
+    };
+
+    var released = 0;
+    for (final chapter in chapters) {
+      final dropped = await pruneVanishedPages(
+        db: db,
+        blobStore: blob,
+        chapterRowId: chapter.rowId,
+        scopeId: chapter.scopeId,
+      );
+      if (dropped == 0) continue;
+      released++;
+      await _settleEmptiedChapter(db, blob, chapter.scopeId, chapter.rowId);
+    }
+    return released;
+  }
+
+  Future<void> _settleEmptiedChapter(
+    Database db,
+    BlobStore blob,
+    String scopeId,
+    int rowId,
+  ) async {
+    const chapterFilter =
+        '${DownloadsSchema.colId} = ? AND ${DownloadsSchema.colScopeId} = ? '
+        'AND ${DownloadsSchema.colState} = ?';
+    final remaining = Sqflite.firstIntValue(
+          await db.rawQuery(
+            'SELECT COUNT(*) FROM ${DownloadsSchema.savedPages} '
+            'WHERE ${DownloadsSchema.colScopeId} = ? AND ${DownloadsSchema.colChapterRowId} = ?',
+            [scopeId, rowId],
+          ),
+        ) ??
+        0;
+    if (remaining == 0) {
+      final complete = await db.query(
+        DownloadsSchema.savedChapters,
+        columns: [DownloadsSchema.colId],
+        where: chapterFilter,
+        whereArgs: [rowId, scopeId, DownloadChapterState.complete.wire],
+      );
+      if (complete.isEmpty) return;
+      await deleteChapterAndBlobs(
+        db: db,
+        blobStore: blob,
+        chapterRowId: rowId,
+        scopeId: scopeId,
+      );
+      return;
+    }
+    // Only while it still claims `complete`: a chapter the queue holds, or
+    // one a tap re-queued in the meantime, is already on its way to fetching
+    // those pages.
+    await db.update(
+      DownloadsSchema.savedChapters,
+      {
+        DownloadsSchema.colState: DownloadChapterState.failed.wire,
+        DownloadsSchema.colError: vanishedPagesError,
+      },
+      where: chapterFilter,
+      whereArgs: [rowId, scopeId, DownloadChapterState.complete.wire],
+    );
   }
 
   /// How long a file must have sat untouched before the reclaim will call it

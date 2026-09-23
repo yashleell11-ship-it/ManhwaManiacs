@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:manhwamaniacs/features/downloads/models/chapter_identity.dart';
 import 'package:manhwamaniacs/features/downloads/models/download_chapter_state.dart';
 import 'package:manhwamaniacs/features/downloads/services/retention_maintenance.dart';
 import 'package:manhwamaniacs/features/downloads/store/downloads_store.dart';
@@ -343,6 +344,84 @@ void main() {
 
       expect(await maintenance.repairSeriesPins(), 0);
       expect((await store.getChapter(first))!.pinned, isFalse);
+    });
+  });
+
+  group('pages whose files were deleted outside the app', () {
+    const gone = (sourceId: 'asura', seriesKey: 's', chapterKey: 'c1');
+    const intact = (sourceId: 'asura', seriesKey: 's', chapterKey: 'c2');
+
+    Future<void> deletePages(
+      DownloadsStore store,
+      ChapterIdentity id,
+      Set<int> pages,
+    ) async {
+      final paths = await store.localPagePaths(id);
+      for (final page in pages) {
+        await paths[page]!.delete();
+      }
+    }
+
+    test('stop counting at the next sweep, with the expiry timer off',
+        () async {
+      final store = harness.storeFor('u1p1');
+      await _download(store, chapterKey: 'c1', seriesKey: 's', pageCount: 3);
+      await _download(store, chapterKey: 'c2', seriesKey: 's', pageSize: 7);
+      final before = await maintenance.totalDeviceBytes();
+      await deletePages(store, gone, {1, 2, 3});
+
+      await maintenance.sweepExpired(interval: null);
+
+      expect(await maintenance.totalDeviceBytes(), before - 30);
+      // Nothing of it is on the phone, so the Downloads screen drops it.
+      expect(await store.getChapter(gone), isNull);
+      expect(
+        (await store.getChapter(intact))!.state,
+        DownloadChapterState.complete,
+      );
+    });
+
+    test('a chapter with some pages left becomes failed, keeping them',
+        () async {
+      final store = harness.storeFor('u1p1');
+      final rowId = await _download(
+        store,
+        chapterKey: 'c1',
+        seriesKey: 's',
+        pageCount: 3,
+      );
+      final before = await maintenance.totalDeviceBytes();
+      await deletePages(store, gone, {2});
+
+      await maintenance.sweepExpired(interval: null);
+
+      final chapter = (await store.getChapter(gone))!;
+      expect(chapter.state, DownloadChapterState.failed);
+      expect(chapter.error, RetentionMaintenance.vanishedPagesError);
+      expect(chapter.bytes, 20);
+      expect(await store.existingPageNumbers(rowId), {1, 3});
+      expect(await maintenance.totalDeviceBytes(), before - 10);
+    });
+
+    test('a chapter still downloading only loses the rows', () async {
+      final store = harness.storeFor('u1p1');
+      final rowId = await store.ensureQueued(id: gone);
+      await store.updateManifestInfo(rowId: rowId, pageCount: 3);
+      for (final page in [1, 2]) {
+        await store.savePage(
+          rowId: rowId,
+          pageNumber: page,
+          bytes: List.filled(10, page),
+        );
+      }
+      await deletePages(store, gone, {1});
+
+      await maintenance.sweepExpired(interval: null);
+
+      final chapter = (await store.getChapter(gone))!;
+      expect(chapter.state, DownloadChapterState.downloading);
+      // So the queue fetches page 1 again rather than skipping it.
+      expect(await store.existingPageNumbers(rowId), {2});
     });
   });
 }
