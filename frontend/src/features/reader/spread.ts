@@ -1,3 +1,4 @@
+import type { StripPosition } from "./strip";
 import type { ReadingDirection, ReadingMode } from "./types";
 
 /**
@@ -66,10 +67,36 @@ export function findViewIndex(views: readonly PageView[], page: number): number 
   return page < views[0][0] ? 0 : views.length - 1;
 }
 
-/** The page a view is "on" for progress purposes: the first one read. */
+/** The page a view is "on" for navigation: the first one read. */
 export function viewLeadPage(view: readonly number[]): number {
   if (view.length === 0) return 1;
   return Math.min(...view);
+}
+
+/**
+ * What a paged mode reports for progress while `view` is on screen, or `null`
+ * when there is nothing to report.
+ *
+ * The strip reports its own position every scroll frame; the paged modes have
+ * no strip, so this is their report — one per screen, fed to the same tracker
+ * so furthest-wins and completion apply unchanged. The page is the view's
+ * LAST, not its lead: both pages of a spread are on screen, and reporting the
+ * lead would leave a chapter that ends on a spread one page short of complete
+ * for ever. `continuous` gives `null` because the strip already reports.
+ */
+export function pagedProgressPosition(
+  mode: ReadingMode,
+  chapterKey: string | null | undefined,
+  view: readonly number[] | undefined,
+  pageCount: number,
+): StripPosition | null {
+  if (mode === "continuous" || !chapterKey || !view || view.length === 0) return null;
+  if (!Number.isFinite(pageCount) || pageCount < 1) return null;
+  return {
+    chapterKey,
+    pageNumber: Math.min(pageCount, Math.max(...view)),
+    pageCount,
+  };
 }
 
 /** Clamp a view index into range, so paging past either end is a no-op. */

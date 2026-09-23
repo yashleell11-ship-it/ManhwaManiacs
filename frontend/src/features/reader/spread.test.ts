@@ -1,12 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildPageViews,
   buildSpreads,
   clampViewIndex,
   findViewIndex,
+  pagedProgressPosition,
   spreadDisplayOrder,
   viewLeadPage,
 } from "./spread";
+import { createStripProgressTracker, PROGRESS_SAVE_MS } from "./strip-progress";
+import type { StripChapter } from "./strip";
 
 describe("buildSpreads", () => {
   it("stands the cover alone so the drawn spreads stay in phase", () => {
@@ -90,5 +93,87 @@ describe("clampViewIndex", () => {
     expect(clampViewIndex(views, -1)).toBe(0);
     expect(clampViewIndex(views, 99)).toBe(3);
     expect(clampViewIndex([], 5)).toBe(0);
+  });
+});
+
+describe("pagedProgressPosition", () => {
+  it("reports the single page on screen", () => {
+    expect(pagedProgressPosition("single", "ch-1", [4], 20)).toEqual({
+      chapterKey: "ch-1",
+      pageNumber: 4,
+      pageCount: 20,
+    });
+  });
+
+  it("reports a spread's LAST page, so a chapter ending on a spread completes", () => {
+    expect(pagedProgressPosition("double", "ch-1", [2, 3], 7)?.pageNumber).toBe(3);
+    // Display order is irrelevant: a right-to-left spread is still pages 6 and 7.
+    expect(pagedProgressPosition("double", "ch-1", [7, 6], 7)?.pageNumber).toBe(7);
+  });
+
+  it("leaves the strip to report for itself", () => {
+    expect(pagedProgressPosition("continuous", "ch-1", [4], 20)).toBeNull();
+  });
+
+  it("reports nothing before the chapter or its pages are known", () => {
+    expect(pagedProgressPosition("single", null, [1], 20)).toBeNull();
+    expect(pagedProgressPosition("single", "ch-1", undefined, 20)).toBeNull();
+    expect(pagedProgressPosition("single", "ch-1", [1], 0)).toBeNull();
+  });
+});
+
+describe("paged reading saves progress like the strip", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // Seven pages: in double mode the views are [1], [2,3], [4,5], [6,7], so the
+  // chapter ends on a spread.
+  const chapter: StripChapter = {
+    sourceId: "asurascans",
+    seriesKey: "series/one",
+    chapterKey: "ch-1",
+    chapterNumber: 1,
+    title: "Chapter 1",
+    pageCount: 7,
+    previousChapterKey: null,
+    nextChapterKey: "ch-2",
+    pages: Array.from({ length: 7 }, (_, index) => ({
+      id: `ch-1:${index + 1}`,
+      number: index + 1,
+      imageUrl: `/img/ch-1/${index + 1}`,
+      width: null,
+      height: null,
+    })),
+  };
+
+  function readThrough(mode: "single" | "double") {
+    const writes: Array<{ last_page: number; is_completed?: boolean }> = [];
+    const tracker = createStripProgressTracker({
+      chapters: () => [chapter],
+      takeElapsed: () => 0,
+      save: (_, body) => writes.push(body),
+    });
+    for (const view of buildPageViews(chapter.pages.length, mode)) {
+      const position = pagedProgressPosition(mode, chapter.chapterKey, view, chapter.pages.length);
+      if (position) tracker.report(position);
+      vi.advanceTimersByTime(PROGRESS_SAVE_MS);
+    }
+    return writes;
+  }
+
+  it("single mode: turning to the last page saves the chapter complete", () => {
+    const writes = readThrough("single");
+    expect(writes.map((write) => write.last_page)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(writes.at(-1)).toMatchObject({ last_page: 7, is_completed: true });
+  });
+
+  it("double mode: the final spread saves the chapter complete", () => {
+    const writes = readThrough("double");
+    expect(writes.map((write) => write.last_page)).toEqual([1, 3, 5, 7]);
+    expect(writes.at(-1)).toMatchObject({ last_page: 7, is_completed: true });
   });
 });

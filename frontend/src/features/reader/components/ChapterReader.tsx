@@ -44,7 +44,12 @@ import {
   type ReaderPosition,
 } from "../scroll-storage";
 import { scrubPercent } from "../scrub";
-import { buildPageViews, findViewIndex, viewLeadPage } from "../spread";
+import {
+  buildPageViews,
+  findViewIndex,
+  pagedProgressPosition,
+  viewLeadPage,
+} from "../spread";
 import { useReaderStore } from "../store";
 import {
   chapterIndexOf,
@@ -542,6 +547,33 @@ export function ChapterReader({
     },
     [onPosition],
   );
+
+  /**
+   * The paged modes' report: one per screen, through the same `onPosition`.
+   *
+   * They render no strip, so without this nothing reported a page at all and
+   * a series read in Single or Double mode was never saved. An effect rather
+   * than a call in `goToPage` so the opening screen and a switch in from the
+   * strip report too; the helper returns `null` in continuous mode, where the
+   * strip already reports every frame.
+   */
+  const pagedPosition = pagedProgressPosition(
+    readingMode,
+    chapter?.chapterKey,
+    currentView,
+    pages.length,
+  );
+  const pagedChapterKey = pagedPosition?.chapterKey;
+  const pagedPageNumber = pagedPosition?.pageNumber;
+  const pagedPageCount = pagedPosition?.pageCount;
+  useEffect(() => {
+    if (pagedChapterKey == null || pagedPageNumber == null || pagedPageCount == null) return;
+    onPosition?.({
+      chapterKey: pagedChapterKey,
+      pageNumber: pagedPageNumber,
+      pageCount: pagedPageCount,
+    });
+  }, [onPosition, pagedChapterKey, pagedPageCount, pagedPageNumber]);
 
   const registerStripHandle = useCallback(
     (handle: StripHandle | null) => {
