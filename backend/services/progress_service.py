@@ -439,6 +439,43 @@ def furthest_of(rows: Iterable[Any], preferred_key: str) -> Any:
     return best
 
 
+def _seed_from(
+    rows: list[ChapterProgress], preferred_key: str
+) -> tuple[MergedProgress, datetime | None]:
+    """ONE chapter's rows under other spellings, as the single row they
+    would have been, plus its earliest ``started_at``.
+
+    What :func:`merge_progress` would hold had every push for the chapter
+    landed on one key: the furthest position (:func:`furthest_of`),
+    completion sticky from its first stamp, the newest read, the widest page
+    count and every second credited. A new row under a follow's key starts
+    from this, so the push is merged, and its session counted, against what
+    the profile has already read of that chapter rather than against nothing.
+    """
+    best = furthest_of(rows, preferred_key)
+    finished = [r for r in rows if r.is_completed]
+    stamps = [r.last_read_at or r.started_at for r in rows if r.last_read_at or r.started_at]
+    starts = [r.started_at for r in rows if r.started_at]
+    number = _resolve_number(
+        best.chapter_number,
+        next((r.chapter_number for r in rows if r.chapter_number is not None), None),
+    )
+    seed = MergedProgress(
+        chapter_number=number,
+        last_page=best.last_page,
+        page_count=max(r.page_count for r in rows),
+        scroll_offset_px=best.scroll_offset_px,
+        is_completed=bool(finished),
+        last_read_at=max(stamps) if stamps else utcnow(),
+        completed_at=min(
+            (r.completed_at for r in finished if r.completed_at), default=None
+        ),
+        time_spent_seconds=sum(r.time_spent_seconds for r in rows),
+        advanced=False,
+    )
+    return seed, (min(starts) if starts else None)
+
+
 def _row_to_merged(row: ChapterProgress) -> MergedProgress:
     return MergedProgress(
         chapter_number=row.chapter_number,
@@ -488,10 +525,16 @@ class ProgressService:
         # profile) pair and cannot change mid-request.
         self._gate_cache: bool | None = None
         # ``(source_id, sent series_key) -> (follow's key, its chapter list)``,
-        # or None when the push stays where it was sent; see ``_storage_keys``.
-        # Plain values only, so a busy-retry's rollback cannot leave it
-        # holding detached rows, and emptied at the start of every write unit.
+        # or None when the push is stored where it was sent under no visible
+        # follow; see ``_storage``. Plain values only, so a busy-retry's
+        # rollback cannot leave it holding detached rows, and emptied at the
+        # start of every write unit.
         self._spellings: dict[tuple[str, str], tuple[str, list[Any]] | None] = {}
+        # ``(source_id, follow's key) -> chapter_identity -> rows`` under the
+        # series' OTHER keys; see ``_alias_seed``. Emptied at the start of
+        # every write unit with ``_spellings``, so the rows it holds are never
+        # ones a rollback expired.
+        self._aliases: dict[tuple[str, str], dict[str, list[ChapterProgress]]] = {}
 
     # --- progress ----------------------------------------------------------
 
@@ -673,7 +716,20 @@ class ProgressService:
     def _storage_keys(
         self, source_id: str, series_key: str, chapter_key: str
     ) -> tuple[str, str]:
-        """The ``(series_key, chapter_key)`` a push is stored under.
+        """The ``(series_key, chapter_key)`` a push is stored under; see
+        :meth:`_storage`."""
+        stored_series, stored_chapter, _followed = self._storage(
+            source_id, series_key, chapter_key
+        )
+        return stored_series, stored_chapter
+
+    def _storage(
+        self, source_id: str, series_key: str, chapter_key: str
+    ) -> tuple[str, str, bool]:
+        """The ``(series_key, chapter_key)`` a push is stored under, and
+        whether that is the key of a follow this profile can see -- the only
+        case in which a new row is seeded from the series' other keys
+        (:meth:`_alias_seed`).
 
         The keys it was sent with, except when this profile follows the same
         series under ANOTHER key. Asura rotates the suffix on its slugs every
@@ -702,27 +758,96 @@ class ProgressService:
         """
         identity = series_identity(source_id, series_key)
         if identity == series_key:
-            return series_key, chapter_key
+            return series_key, chapter_key, False
         memo = (source_id, series_key)
         if memo not in self._spellings:
             target = None
             follows = self._follows_of(source_id, series_key, identity)
-            if follows and not any(f.series_key == series_key for f in follows):
-                follow = follows[0]
+            if follows:
+                own = next((f for f in follows if f.series_key == series_key), None)
+                follow = own or follows[0]
                 if not self._follow_hidden(follow):
-                    target = (follow.series_key, _chapter_list(follow.known_chapters))
+                    # A push under the follow's own key needs no re-spelling,
+                    # so its chapter list is not parsed.
+                    chapters = [] if own else _chapter_list(follow.known_chapters)
+                    target = (follow.series_key, chapters)
             self._spellings[memo] = target
         target = self._spellings[memo]
         if target is None:
-            return series_key, chapter_key
+            return series_key, chapter_key, False
         follow_key, chapters = target
-        return follow_key, respell_chapter_key(
-            source_id,
-            chapter_key,
-            stored_under=series_key,
-            series_key=follow_key,
-            chapters=chapters,
+        return (
+            follow_key,
+            respell_chapter_key(
+                source_id,
+                chapter_key,
+                stored_under=series_key,
+                series_key=follow_key,
+                chapters=chapters,
+            ),
+            True,
         )
+
+    def _alias_seed(
+        self, source_id: str, series_key: str, chapter_key: str
+    ) -> tuple[MergedProgress, datetime | None] | None:
+        """What this profile has read of ``chapter_key`` under the series'
+        OTHER keys, as one row (:func:`_seed_from`), or None.
+
+        A follow's key gets its first row for a chapter while the same
+        chapter may already sit under another suffix: read from Browse before
+        pushes were re-keyed, or before the series was followed. Merged
+        against nothing, a re-read of it counted as a first read -- the push
+        "advanced" from page 0 and the session logged pages 1..N a second
+        time -- and a behind position became the follow's. Seeded from those
+        rows, the new row merges exactly as the chapter's one row would have
+        under a single key.
+
+        Rows are matched by the connector's ``series_identity`` and
+        ``chapter_identity`` (the ``LIKE`` prefix only narrows), per profile
+        and source through the progress index, and read once per series per
+        write unit; a row this unit creates under another key is added by
+        :meth:`_note_created`.
+        """
+        memo = (source_id, series_key)
+        by_chapter = self._aliases.get(memo)
+        if by_chapter is None:
+            identity = series_identity(source_id, series_key)
+            rows = self._db.execute(
+                self._scope(
+                    select(ChapterProgress).where(
+                        ChapterProgress.source_id == source_id,
+                        ChapterProgress.series_key != series_key,
+                        ChapterProgress.series_key.startswith(identity, autoescape=True),
+                    )
+                )
+            ).scalars().all()
+            by_chapter = {}
+            for row in rows:
+                if series_identity(source_id, row.series_key) == identity:
+                    by_chapter.setdefault(
+                        chapter_identity(source_id, row.chapter_key), []
+                    ).append(row)
+            self._aliases[memo] = by_chapter
+        same = by_chapter.get(chapter_identity(source_id, chapter_key))
+        return _seed_from(same, series_key) if same else None
+
+    def _note_created(self, row: ChapterProgress) -> None:
+        """Count a row this write unit created in every loaded
+        :meth:`_alias_seed` set it is an other-key row of."""
+        if not self._aliases:
+            return
+        identity = series_identity(row.source_id, row.series_key)
+        if identity == row.series_key:
+            return
+        chapter = chapter_identity(row.source_id, row.chapter_key)
+        for (source_id, key), by_chapter in self._aliases.items():
+            if (
+                source_id == row.source_id
+                and key != row.series_key
+                and series_identity(source_id, key) == identity
+            ):
+                by_chapter.setdefault(chapter, []).append(row)
 
     def _prefetch(
         self, payloads: list[ProgressInput]
@@ -784,13 +909,16 @@ class ProgressService:
         the same object rather than inserting a duplicate — exactly what the
         per-item SELECT + flush used to guarantee.
 
-        The row is the one ``_storage_keys`` names: the sent keys, or this
-        profile's follow of the same series under another key.
+        The row is the one ``_storage`` names: the sent keys, or this
+        profile's follow of the same series under another key. A follow's key
+        getting its first row for a chapter already read under another key of
+        the series starts from that reading (``_alias_seed``), not from
+        nothing.
         """
         user_id, profile_id = self._require_profile()
         source_id = payload.source_id
         sent_chapter_key = fully_unquote(payload.chapter_key)
-        series_key, chapter_key = self._storage_keys(
+        series_key, chapter_key, followed = self._storage(
             source_id, fully_unquote(payload.series_key), sent_chapter_key
         )
 
@@ -807,22 +935,36 @@ class ProgressService:
                 )
             ).scalar_one_or_none()
 
+        seed: MergedProgress | None = None
         if row is None:
-            merged = merge_progress(None, payload)
+            seeded = (
+                self._alias_seed(source_id, series_key, chapter_key) if followed else None
+            )
+            seed, started_at = seeded if seeded else (None, None)
+            merged = merge_progress(seed, payload)
             row, created = self._claim_row(
-                user_id, profile_id, source_id, series_key, chapter_key, merged
+                user_id,
+                profile_id,
+                source_id,
+                series_key,
+                chapter_key,
+                merged,
+                started_at=started_at,
             )
             if prefetched is not None:
                 prefetched[(source_id, series_key, chapter_key)] = row
+            if created:
+                self._note_created(row)
         else:
             created = False
 
         # Captured BEFORE the row is mutated below: a session records only the
         # stretch this push covered, not the chapter's whole history. A row
-        # this call created has no history at all, and already holds `merged`.
+        # this call created already holds `merged`; its history is the seed
+        # it started from, or nothing at all.
         if created:
-            previous_last_page = 0
-            previous_time_spent = 0
+            previous_last_page = seed.last_page if seed else 0
+            previous_time_spent = seed.time_spent_seconds if seed else 0
         else:
             merged = merge_progress(_row_to_merged(row), payload)
             previous_last_page = row.last_page
@@ -1017,12 +1159,17 @@ class ProgressService:
         series_key: str,
         chapter_key: str,
         merged: MergedProgress,
+        *,
+        started_at: datetime | None = None,
     ) -> tuple[ChapterProgress, bool]:
         """Insert this chapter's first row, or hand back whoever beat us to it.
 
         Returns ``(row, created)``; ``created`` False means another connection
         inserted the same chapter between our SELECT and ours, so the caller
         must redo its merge against THAT row.
+
+        ``started_at`` is when the chapter was first opened, for a row seeded
+        from reading under another key of its series; otherwise this push.
 
         The lookup ran outside SQLite's write lock — pysqlite runs a SELECT in
         autocommit and the INSERT only takes the lock at flush — so two first
@@ -1058,7 +1205,7 @@ class ProgressService:
                 page_count=merged.page_count,
                 scroll_offset_px=merged.scroll_offset_px,
                 is_completed=merged.is_completed,
-                started_at=merged.last_read_at,
+                started_at=started_at or merged.last_read_at,
                 last_read_at=merged.last_read_at,
                 completed_at=merged.completed_at,
                 time_spent_seconds=merged.time_spent_seconds,
@@ -1124,6 +1271,7 @@ class ProgressService:
     def save_one(self, payload: ProgressInput) -> dict[str, Any]:
         def apply() -> dict[str, Any]:
             self._spellings = {}
+            self._aliases = {}
             row, merged = self._apply_one(payload)
             self._db.commit()
             return {**self._serialize(row), "advanced": merged.advanced}
@@ -1142,8 +1290,10 @@ class ProgressService:
             # Prefetched inside, so a retry after a busy writer re-reads rather
             # than merging onto rows a rollback has already detached. The
             # follow each push is re-keyed onto is looked up once per series
-            # for the whole batch, by the prefetch, and re-read on a retry.
+            # for the whole batch, by the prefetch, and re-read on a retry;
+            # so are the other keys' rows a new row is seeded from.
             self._spellings = {}
+            self._aliases = {}
             prefetched = self._prefetch(payloads)
             applied = [self._apply_one(p, prefetched=prefetched) for p in payloads]
             self._db.commit()

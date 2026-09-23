@@ -23,7 +23,9 @@ was and costs no extra query.
 
 Both halves must land where the single-key path lands: a chapter read under
 two spellings is one chapter, so the furthest of them speaks for it and its
-completion is sticky (the strip, the series page and ``read_state`` agree).
+completion is sticky (the strip, the series page and ``read_state`` agree),
+and a follow's first row for a chapter already read under another suffix
+starts from that reading, so a re-read is not logged as new pages.
 
 Continue-reading items also carry the follow's ``title`` and ``cover_url``, so
 a strip card can name its series without a second request.
@@ -836,6 +838,146 @@ def test_a_further_page_under_another_suffix_outranks_a_newer_earlier_page(
     got = _views(db_session, *rotated, rotated_follow.id)
     assert got["strip"] == [(OLD, f"{OLD}:3", 3.0, 15, 20)]
     assert got == _views(db_session, *single, single_follow.id)
+
+
+# --- a follow's first row for a chapter starts from its other spellings ----------
+
+
+def _sessions(db, uid, pid) -> list[tuple]:
+    db.expire_all()
+    return [
+        tuple(s)
+        for s in db.execute(
+            select(
+                ReadingSession.series_key,
+                ReadingSession.chapter_key,
+                ReadingSession.start_page,
+                ReadingSession.end_page,
+                ReadingSession.pages_read,
+            )
+            .where(ReadingSession.user_id == uid, ReadingSession.profile_id == pid)
+            .order_by(ReadingSession.id)
+        ).all()
+    ]
+
+
+def _save(db, uid, pid, push: ProgressInput, via: str) -> dict:
+    """``push`` through ``save_one`` or ``save_batch``; the row it is stored in."""
+    svc = _progress(db, uid, pid)
+    if via == "one":
+        return svc.save_one(push)
+    [item] = svc.save_batch([push])["items"]
+    return item
+
+
+@pytest.mark.parametrize("via", ["one", "batch"])
+@pytest.mark.parametrize(
+    "stored, push, logged",
+    [
+        # A finished chapter re-read: page 2 is not new ground, with or
+        # without reading time.
+        (dict(last_page=20, is_completed=True), dict(page=2), []),
+        (dict(last_page=20, is_completed=True),
+         dict(page=2, time_spent_seconds=30), [(OLD, f"{OLD}:3", 2, 2, 1)]),
+        # A chapter carried on: only the pages past the old position are new.
+        (dict(last_page=5), dict(page=9, time_spent_seconds=30),
+         [(OLD, f"{OLD}:3", 6, 9, 4)]),
+    ],
+    ids=["reread", "reread-with-time", "carried-on"],
+)
+def test_a_follows_first_row_for_a_chapter_logs_what_the_single_key_path_logs(
+    db_session, make_user, make_profile, seed_follow, seed_progress,
+    stored, push, logged, via,
+):
+    """The first re-keyed push for chapter 3 created a fresh row under the
+    follow's key, merged against nothing: it "advanced" from page 0 and the
+    session logged pages 1..N that had already been read under Browse's key.
+    Seeded from that reading, the reading statistics are the single key's."""
+    yesterday = utcnow() - timedelta(days=1)
+    seeded = dict(chapter_number=3.0, page_count=20, time_spent_seconds=100,
+                  last_read_at=yesterday, **stored)
+    if seeded.get("is_completed"):
+        seeded["completed_at"] = yesterday
+    push = dict(push)
+    page = push.pop("page")
+
+    rotated = _account(make_user, make_profile, f"seed-rotated-{via}")
+    seed_follow(*rotated, source_id=SRC, series_key=OLD, known_chapters=_known(OLD))
+    seed_progress(*rotated, source_id=SRC, series_key=NEW, chapter_key=f"{NEW}:3",
+                  **seeded)
+    got = _save(db_session, *rotated, _push(NEW, 3, page, **push), via)
+
+    single = _account(make_user, make_profile, f"seed-single-{via}")
+    seed_follow(*single, source_id=SRC, series_key=OLD, known_chapters=_known(OLD))
+    seed_progress(*single, source_id=SRC, series_key=OLD, chapter_key=f"{OLD}:3",
+                  **seeded)
+    want = _save(db_session, *single, _push(OLD, 3, page, **push), via)
+
+    assert _sessions(db_session, *rotated) == logged
+    assert _sessions(db_session, *single) == logged
+    fields = ("series_key", "chapter_key", "chapter_number", "last_page",
+              "page_count", "is_completed", "time_spent_seconds", "advanced")
+    assert {f: got[f] for f in fields} == {f: want[f] for f in fields}
+
+
+def test_a_push_under_the_follows_own_key_is_seeded_too(
+    db_session, acct, seed_follow, seed_progress
+):
+    """The same fresh row is made when the library's reader opens a chapter
+    first read from Browse, under the follow's own key."""
+    uid, pid = acct
+    yesterday = utcnow() - timedelta(days=1)
+    seed_follow(uid, pid, source_id=SRC, series_key=OLD, known_chapters=_known(OLD))
+    seed_progress(uid, pid, source_id=SRC, series_key=NEW, chapter_key=f"{NEW}:3",
+                  chapter_number=3.0, last_page=20, page_count=20, is_completed=True,
+                  completed_at=yesterday, last_read_at=yesterday)
+
+    result = _progress(db_session, uid, pid).save_one(_push(OLD, 3, 2))
+
+    assert (result["last_page"], result["is_completed"], result["advanced"]) == (
+        20, True, False
+    )
+    assert _sessions(db_session, uid, pid) == []
+
+
+def test_a_new_row_is_seeded_only_from_the_same_chapter_of_the_same_series(
+    db_session, acct, seed_follow, seed_progress
+):
+    uid, pid = acct
+    seed_follow(uid, pid, source_id=SRC, series_key=OLD, known_chapters=_known(OLD))
+    # Another chapter of this series, and chapter 3 of a series whose slug
+    # merely begins with this one's identity.
+    seed_progress(uid, pid, source_id=SRC, series_key=NEW, chapter_key=f"{NEW}:2",
+                  chapter_number=2.0, last_page=20, is_completed=True)
+    seed_progress(uid, pid, source_id=SRC, series_key=PREFIX_LOOKALIKE,
+                  chapter_key=f"{PREFIX_LOOKALIKE}:3", chapter_number=3.0,
+                  last_page=20, is_completed=True)
+
+    result = _progress(db_session, uid, pid).save_one(_push(NEW, 3, 4))
+
+    assert (result["chapter_key"], result["last_page"], result["is_completed"],
+            result["advanced"]) == (f"{OLD}:3", 4, False, True)
+    assert _sessions(db_session, uid, pid) == [(OLD, f"{OLD}:3", 1, 4, 4)]
+
+
+def test_a_push_the_gate_keeps_off_a_hidden_follow_is_not_seeded_from_it(
+    db_session, make_user, make_profile, seed_follow, seed_progress
+):
+    """The push stays under the key it was sent with, and its response must
+    not carry the reading of a follow this profile cannot see."""
+    user = make_user("identity-gated-seed")
+    shut = make_profile(user.id, "Kid", mature_content_enabled=False)
+    seed_follow(user.id, shut.id, source_id=SRC, series_key=OLD,
+                known_chapters=_known(OLD), mature_override=True)
+    seed_progress(user.id, shut.id, source_id=SRC, series_key=OLD,
+                  chapter_key=f"{OLD}:3", chapter_number=3.0, last_page=20,
+                  is_completed=True)
+
+    result = _progress(db_session, user.id, shut.id).save_one(_push(NEW, 3, 2))
+
+    assert (result["series_key"], result["last_page"], result["is_completed"]) == (
+        NEW, 2, False
+    )
 
 
 # --- a lookalike the LIKE prefix DOES match ----------------------------------------
