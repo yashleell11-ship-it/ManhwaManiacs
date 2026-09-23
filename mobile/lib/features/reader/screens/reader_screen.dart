@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -9,6 +11,7 @@ import 'package:manhwamaniacs/features/downloads/providers/bookmark_outbox_provi
 import 'package:manhwamaniacs/features/downloads/providers/downloads_scope.dart';
 import 'package:manhwamaniacs/features/downloads/providers/progress_outbox_provider.dart';
 import 'package:manhwamaniacs/features/downloads/widgets/open_chapter_scope.dart';
+import 'package:manhwamaniacs/features/library/providers/library_read_state.dart';
 import 'package:manhwamaniacs/features/reader/models/bookmark.dart';
 import 'package:manhwamaniacs/features/reader/models/reader_chapter.dart';
 import 'package:manhwamaniacs/features/reader/models/reading_progress.dart';
@@ -189,6 +192,11 @@ class _ManifestReaderBody extends ConsumerStatefulWidget {
 class _ManifestReaderBodyState extends ConsumerState<_ManifestReaderBody> {
   late ReaderFeedController _controller;
 
+  /// The most recent progress save, and what refreshes the library's shelves
+  /// once it lands — both for [dispose], which cannot read a provider.
+  Future<void>? _lastSave;
+  LibraryReadState? _readState;
+
   @override
   void initState() {
     super.initState();
@@ -263,8 +271,19 @@ class _ManifestReaderBodyState extends ConsumerState<_ManifestReaderBody> {
   @override
   void dispose() {
     _controller.dispose();
+    // By now [ReaderContent] has flushed its pending save — children are torn
+    // down first — so [_lastSave] is the read's final position. Nothing saved
+    // means nothing on the shelves has moved.
+    final lastSave = _lastSave;
+    if (lastSave != null) unawaited(_readState?.afterReading(lastSave));
     super.dispose();
   }
+
+  /// [save], remembering each call's future as [_lastSave].
+  Future<void> Function(ReaderChapter, int) _trackSaves(
+    Future<void> Function(ReaderChapter chapter, int page) save,
+  ) =>
+      (chapter, page) => _lastSave = save(chapter, page);
 
   ReaderFeedController _buildController() => ReaderFeedController(
         anchor: widget.resolved.chapter,
@@ -354,6 +373,7 @@ class _ManifestReaderBodyState extends ConsumerState<_ManifestReaderBody> {
     final progressOutbox = ref.read(progressOutboxControllerProvider);
     final bookmarkOutbox = ref.read(bookmarkOutboxControllerProvider);
     final downloadsStore = ref.read(downloadsStoreProvider);
+    _readState = ref.read(libraryReadStateProvider);
     final sourceId = widget.sourceId;
     final seriesKey = widget.seriesKey;
     // Taken from the chapters at the FEED's edges rather than from the one the
@@ -403,7 +423,7 @@ class _ManifestReaderBodyState extends ConsumerState<_ManifestReaderBody> {
             : null,
         onReachedFeedEnd: _controller.extendForward,
         onReachedFeedStart: _controller.extendBackward,
-        onSaveProgress: (chapter, page) async {
+        onSaveProgress: _trackSaves((chapter, page) async {
           final isCompleted = page >= chapter.pageCount;
           // Local-first (spec §3): every save writes to the on-device outbox
           // and is flushed best-effort — the reader never blocks on, or loses
@@ -435,7 +455,7 @@ class _ManifestReaderBodyState extends ConsumerState<_ManifestReaderBody> {
               ),
             );
           }
-        },
+        }),
         // Local-first, exactly like progress: the row lands on the phone and
         // the push is best-effort, so bookmarking with no signal is an ordinary
         // success rather than a silent loss. `true` means "stored", not "sent".

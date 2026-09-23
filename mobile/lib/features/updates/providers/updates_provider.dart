@@ -91,6 +91,25 @@ class UpdatesNotifier extends AutoDisposeAsyncNotifier<UpdatesState> {
     state = await AsyncValue.guard(_fetch);
   }
 
+  /// Re-reads only the followed list, in place, for a reader that has just
+  /// closed (see `libraryReadStateProvider`).
+  ///
+  /// How far the profile has read travels on the followed rows (`read_state`),
+  /// and reading moves nothing else this cache holds — so one request instead
+  /// of [refresh]'s three. And quiet on failure: the shelf keeps what it shows
+  /// rather than turning into an error screen, because coming back from
+  /// reading downloaded chapters with no signal is an ordinary case, not a
+  /// fault to report.
+  Future<void> refreshFollowed() async {
+    final result = await ref
+        .read(libraryRepositoryProvider)
+        .listSeries(perPage: _followedIndexPageSize);
+    if (result.isErr) return;
+    final current = state.valueOrNull;
+    if (current == null) return;
+    state = AsyncData(current.copyWith(followed: result.value.items));
+  }
+
   Future<UpdatesState> _fetch() async {
     final updatesRepo = ref.read(updatesRepositoryProvider);
     final libraryRepo = ref.read(libraryRepositoryProvider);

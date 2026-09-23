@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:manhwamaniacs/core/utils/result.dart';
+import 'package:manhwamaniacs/features/library/providers/library_read_state.dart';
 import 'package:manhwamaniacs/features/reader/models/bookmark.dart';
 import 'package:manhwamaniacs/features/reader/models/chapter_manifest.dart';
 import 'package:manhwamaniacs/features/reader/models/chapter_manifest_window.dart';
@@ -96,6 +97,19 @@ class _FakeReaderRepository implements ReaderRepository {
       throw UnimplementedError();
 }
 
+/// Records the reader handing its last save over, instead of refreshing.
+class _RecordingReadState extends LibraryReadState {
+  _RecordingReadState(super.ref);
+
+  int calls = 0;
+
+  @override
+  Future<void> afterReading(Future<void> lastSave) async {
+    calls++;
+    await lastSave;
+  }
+}
+
 ChapterManifest _sampleManifest() {
   return const ChapterManifest(
     sourceId: _sourceId,
@@ -184,6 +198,45 @@ void main() {
 
       expect(find.text('Retry'), findsOneWidget);
       expect(find.text('Go back'), findsOneWidget);
+    });
+
+    testWidgets('closing the reader refreshes the library shelves',
+        (tester) async {
+      // The Library tab and the resume strip stay mounted under the reader,
+      // so without this they kept saying "Not started" after a read.
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      await tester.binding.setSurfaceSize(const Size(430, 932));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      late _RecordingReadState readState;
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            sharedPrefsProvider.overrideWithValue(prefs),
+            readerRepositoryProvider.overrideWithValue(_FakeReaderRepository()),
+            apiBaseUrlOverride('http://127.0.0.1:8000'),
+            libraryReadStateProvider.overrideWith(
+              (ref) => readState = _RecordingReadState(ref),
+            ),
+          ],
+          child: const MaterialApp(
+            home: ReaderScreen(
+              sourceId: _sourceId,
+              seriesKey: _seriesKey,
+              chapterKey: _chapterKey,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(readState.calls, 0);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+
+      expect(readState.calls, 1);
     });
   });
 }

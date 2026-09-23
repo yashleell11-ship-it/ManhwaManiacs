@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:manhwamaniacs/features/downloads/providers/progress_outbox_provider.dart';
+import 'package:manhwamaniacs/features/library/providers/library_read_state.dart';
 import 'package:manhwamaniacs/features/reader/models/reader_chapter.dart';
 import 'package:manhwamaniacs/features/reader/models/reader_page.dart';
 import 'package:manhwamaniacs/features/reader/models/reading_progress.dart';
@@ -56,6 +57,19 @@ class _RecordingOutbox extends ProgressOutboxController {
 
   @override
   Future<void> save(ProgressPush push) async => pushes.add(push);
+}
+
+/// Records the reader handing its last save over, instead of refreshing.
+class _RecordingReadState extends LibraryReadState {
+  _RecordingReadState(super.ref);
+
+  int calls = 0;
+
+  @override
+  Future<void> afterReading(Future<void> lastSave) async {
+    calls++;
+    await lastSave;
+  }
 }
 
 GoRouter _router(Widget child) => GoRouter(
@@ -278,6 +292,8 @@ void main() {
     );
     const series = (sourceId: 'mangadex', seriesId: 'manga-1');
 
+    late _RecordingReadState readState;
+
     Future<_RecordingOutbox> pumpReader(WidgetTester tester) async {
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
@@ -291,6 +307,9 @@ void main() {
             sharedPrefsProvider.overrideWithValue(prefs),
             progressOutboxControllerProvider.overrideWith(
               (ref) => outbox = _RecordingOutbox(ref),
+            ),
+            libraryReadStateProvider.overrideWith(
+              (ref) => readState = _RecordingReadState(ref),
             ),
             sourceReaderPayloadProvider(chapterKey)
                 .overrideWith((ref) async => _onlineChapter()),
@@ -389,6 +408,19 @@ void main() {
       expect(push.chapterKey, 'manga-1:1');
       expect(push.lastPage, 2);
       expect(push.isCompleted, isTrue);
+    });
+
+    testWidgets('closing the reader refreshes the library shelves',
+        (tester) async {
+      // The Library tab and the resume strip stay mounted under the reader,
+      // so without this they kept saying "Not started" after a read.
+      await pumpReader(tester);
+      expect(readState.calls, 0);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+
+      expect(readState.calls, 1);
     });
   });
 }

@@ -12,6 +12,7 @@ import 'package:manhwamaniacs/features/downloads/providers/progress_outbox_provi
 import 'package:manhwamaniacs/features/downloads/queue/download_queue_controller.dart';
 import 'package:manhwamaniacs/features/downloads/store/downloads_store.dart';
 import 'package:manhwamaniacs/features/downloads/widgets/open_chapter_scope.dart';
+import 'package:manhwamaniacs/features/library/providers/library_read_state.dart';
 import 'package:manhwamaniacs/features/reader/models/bookmark.dart';
 import 'package:manhwamaniacs/features/reader/models/reader_chapter.dart';
 import 'package:manhwamaniacs/features/reader/models/reading_progress.dart';
@@ -78,6 +79,11 @@ class _SourceReaderScreenState extends ConsumerState<SourceReaderScreen> {
   /// across a seam is continuous.
   final ReadingClock _clock = ReadingClock(DateTime.now());
 
+  /// The most recent progress save, and what refreshes the library's shelves
+  /// once it lands — both for [dispose], which cannot read a provider.
+  Future<void>? _lastSave;
+  LibraryReadState? _readState;
+
   @override
   void didUpdateWidget(covariant SourceReaderScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -93,6 +99,11 @@ class _SourceReaderScreenState extends ConsumerState<SourceReaderScreen> {
   @override
   void dispose() {
     _feedController?.dispose();
+    // By now [ReaderContent] has flushed its pending save — children are torn
+    // down first — so [_lastSave] is the read's final position. Nothing saved
+    // means nothing on the shelves has moved.
+    final lastSave = _lastSave;
+    if (lastSave != null) unawaited(_readState?.afterReading(lastSave));
     super.dispose();
   }
 
@@ -302,6 +313,7 @@ class _SourceReaderScreenState extends ConsumerState<SourceReaderScreen> {
     final localProgress = ref.read(sourceProgressProvider.notifier);
     final downloadsStore = ref.read(downloadsStoreProvider);
     final container = ProviderScope.containerOf(context, listen: false);
+    _readState = ref.read(libraryReadStateProvider);
     final chapterAsync = ref.watch(sourceReaderChapterProvider(key));
     // Watched, never awaited (spec R3): a chapter served from disk knows its
     // pages but not its neighbours, and waiting on the network to learn them
@@ -459,7 +471,7 @@ class _SourceReaderScreenState extends ConsumerState<SourceReaderScreen> {
                 .then((bookmark) => bookmark != null),
             onReachedFeedEnd: feedController.extendForward,
             onReachedFeedStart: feedController.extendBackward,
-            onSaveProgress: (chapter, page) => _saveProgress(
+            onSaveProgress: (chapter, page) => _lastSave = _saveProgress(
               chapter,
               page,
               outbox: progressOutbox,
