@@ -21,6 +21,10 @@ Which keys name one series is the connector's call (``series_identity`` /
 ``chapter_identity``); a source whose keys do not drift is left exactly as it
 was and costs no extra query.
 
+Both halves must land where the single-key path lands: a chapter read under
+two spellings is one chapter, so the furthest of them speaks for it and its
+completion is sticky (the strip, the series page and ``read_state`` agree).
+
 Continue-reading items also carry the follow's ``title`` and ``cover_url``, so
 a strip card can name its series without a second request.
 """
@@ -706,3 +710,124 @@ def test_continue_reading_items_carry_the_follows_title_and_cover(
         "source_id", "series_key", "chapter_key", "chapter_number", "last_page",
         "page_count", "last_read_at", "title", "cover_url",
     }
+
+
+# --- one chapter under two spellings: the single-key path's answer ---------------
+
+
+def _account(make_user, make_profile, name: str) -> tuple[int, int]:
+    user = make_user(name)
+    return user.id, make_profile(user.id, "Main").id
+
+
+def _views(db, uid, pid, followed_id: int) -> dict:
+    """Everything that says where a follow of OLD stands, minus the instants."""
+    library = _library(db, uid, pid)
+    state = _state(db, uid, pid)
+    return {
+        "strip": [
+            (i["series_key"], i["chapter_key"], i["chapter_number"], i["last_page"],
+             i["page_count"])
+            for i in library.continue_reading()
+        ],
+        "series": [
+            (r["chapter_key"], r["last_page"], r["is_completed"])
+            for r in _progress(db, uid, pid).get_series_progress(SRC, OLD)
+        ],
+        "state": (state["chapter_key"], state["position"], state["new_count"]),
+        "overlay": library.get_detail(followed_id)["progress"],
+    }
+
+
+def test_the_rekeyed_reread_resumes_where_the_single_key_path_does(
+    db_session, make_user, make_profile, seed_follow, seed_progress
+):
+    """The review's repro: chapter 3 finished under this week's key before
+    the push was re-keyed, then page 2 of it pushed under the same key. The
+    strip sent the reader back to page 2 of a finished chapter while the
+    series page said finished; one key sends them on to chapter 4."""
+    yesterday = utcnow() - timedelta(days=1)
+    finished = dict(chapter_number=3.0, last_page=20, page_count=20,
+                    is_completed=True, completed_at=yesterday, last_read_at=yesterday)
+
+    rotated = _account(make_user, make_profile, "furthest-rotated")
+    rotated_follow = seed_follow(*rotated, source_id=SRC, series_key=OLD,
+                                 known_chapters=_known(OLD))
+    seed_progress(*rotated, source_id=SRC, series_key=NEW, chapter_key=f"{NEW}:3",
+                  **finished)
+    _progress(db_session, *rotated).save_one(_push(NEW, 3, 2))
+
+    single = _account(make_user, make_profile, "furthest-single")
+    single_follow = seed_follow(*single, source_id=SRC, series_key=OLD,
+                                known_chapters=_known(OLD))
+    seed_progress(*single, source_id=SRC, series_key=OLD, chapter_key=f"{OLD}:3",
+                  **finished)
+    _progress(db_session, *single).save_one(_push(OLD, 3, 2))
+
+    got = _views(db_session, *rotated, rotated_follow.id)
+    assert got["strip"] == [(OLD, f"{OLD}:4", 4.0, 1, 0)]
+    assert got["series"] == [(f"{OLD}:3", 20, True)]
+    assert got == _views(db_session, *single, single_follow.id)
+
+
+@pytest.mark.parametrize(
+    "finished_under, reopened_under", [(NEW, OLD), (OLD, NEW)],
+    ids=["finished-under-browse-key", "finished-under-follow-key"],
+)
+def test_a_finished_chapter_reopened_under_another_suffix_still_moves_on(
+    db_session, make_user, make_profile, seed_follow, seed_progress,
+    finished_under, reopened_under,
+):
+    """Two rows for chapter 3 already stored (both written before pushes were
+    re-keyed): finished yesterday under one key, page 2 reopened today under
+    the other. The newer read is not the further one, and completion sticks,
+    exactly as in the one row the two pushes would have merged into."""
+    now = utcnow()
+    yesterday = now - timedelta(days=1)
+
+    rotated = _account(make_user, make_profile, "sticky-rotated")
+    rotated_follow = seed_follow(*rotated, source_id=SRC, series_key=OLD,
+                                 known_chapters=_known(OLD))
+    seed_progress(*rotated, source_id=SRC, series_key=finished_under,
+                  chapter_key=f"{finished_under}:3", chapter_number=3.0,
+                  last_page=20, page_count=20, is_completed=True,
+                  completed_at=yesterday, last_read_at=yesterday)
+    seed_progress(*rotated, source_id=SRC, series_key=reopened_under,
+                  chapter_key=f"{reopened_under}:3", chapter_number=3.0,
+                  last_page=2, page_count=20, last_read_at=now)
+
+    single = _account(make_user, make_profile, "sticky-single")
+    single_follow = seed_follow(*single, source_id=SRC, series_key=OLD,
+                                known_chapters=_known(OLD))
+    seed_progress(*single, source_id=SRC, series_key=OLD, chapter_key=f"{OLD}:3",
+                  chapter_number=3.0, last_page=20, page_count=20,
+                  is_completed=True, completed_at=yesterday, last_read_at=now)
+
+    got = _views(db_session, *rotated, rotated_follow.id)
+    assert got["strip"] == [(OLD, f"{OLD}:4", 4.0, 1, 0)]
+    assert got == _views(db_session, *single, single_follow.id)
+
+
+def test_a_further_page_under_another_suffix_outranks_a_newer_earlier_page(
+    db_session, make_user, make_profile, seed_follow, seed_progress
+):
+    now = utcnow()
+
+    rotated = _account(make_user, make_profile, "page-rotated")
+    rotated_follow = seed_follow(*rotated, source_id=SRC, series_key=OLD,
+                                 known_chapters=_known(OLD))
+    seed_progress(*rotated, source_id=SRC, series_key=NEW, chapter_key=f"{NEW}:3",
+                  chapter_number=3.0, last_page=15, page_count=20,
+                  last_read_at=now - timedelta(days=1))
+    seed_progress(*rotated, source_id=SRC, series_key=OLD, chapter_key=f"{OLD}:3",
+                  chapter_number=3.0, last_page=2, page_count=20, last_read_at=now)
+
+    single = _account(make_user, make_profile, "page-single")
+    single_follow = seed_follow(*single, source_id=SRC, series_key=OLD,
+                                known_chapters=_known(OLD))
+    seed_progress(*single, source_id=SRC, series_key=OLD, chapter_key=f"{OLD}:3",
+                  chapter_number=3.0, last_page=15, page_count=20, last_read_at=now)
+
+    got = _views(db_session, *rotated, rotated_follow.id)
+    assert got["strip"] == [(OLD, f"{OLD}:3", 3.0, 15, 20)]
+    assert got == _views(db_session, *single, single_follow.id)

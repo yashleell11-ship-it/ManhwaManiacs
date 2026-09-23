@@ -401,13 +401,17 @@ def _chapter_list(value: str | None) -> list[Any]:
     return parsed if isinstance(parsed, list) else []
 
 
-def _outranks(row: ChapterProgress, held: ChapterProgress, preferred_key: str) -> bool:
+def _outranks(row: Any, held: Any, preferred_key: str) -> bool:
     """Whether ``row`` is further into ONE chapter than ``held`` is.
 
     Two rows for one chapter exist only when it was read under two spellings
     of its series. The furthest-wins rule decides between them exactly as
     :func:`merge_progress` would have had they been one row: the position
     first, the newer read on a tie, and the spelling asked for on a full tie.
+
+    Both are anything with a ``chapter_progress`` row's ``chapter_number``,
+    ``last_page``, ``last_read_at`` and ``series_key``: the ORM row here, the
+    Continue strip's projection of one in the library.
     """
     mine = _position(_resolve_number(row.chapter_number, held.chapter_number), row.last_page)
     theirs = _position(_resolve_number(held.chapter_number, row.chapter_number), held.last_page)
@@ -416,6 +420,23 @@ def _outranks(row: ChapterProgress, held: ChapterProgress, preferred_key: str) -
     if row.last_read_at and held.last_read_at and row.last_read_at != held.last_read_at:
         return row.last_read_at > held.last_read_at
     return row.series_key == preferred_key and held.series_key != preferred_key
+
+
+def furthest_of(rows: Iterable[Any], preferred_key: str) -> Any:
+    """The one of ``rows`` -- ONE chapter, read under several spellings of its
+    series -- whose position speaks for it (:func:`_outranks`), or None.
+
+    Only the position: completion is sticky across the rows, which the
+    caller folds in, as :func:`merge_progress` would have kept it had they
+    been one row. The library's Continue strip decides by this too, so the
+    strip, the series page and the write path cannot disagree about which
+    spelling of a chapter is the furthest.
+    """
+    best = None
+    for row in rows:
+        if best is None or _outranks(row, best, preferred_key):
+            best = row
+    return best
 
 
 def _row_to_merged(row: ChapterProgress) -> MergedProgress:

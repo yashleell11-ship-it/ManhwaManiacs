@@ -51,7 +51,7 @@ from services.browse_service import (
     get_browse_service,
     series_identity,
 )
-from services.progress_service import respell_chapter_key
+from services.progress_service import furthest_of, respell_chapter_key
 from services.reading_stats_service import ReadingStatsService
 from services.source_cache_service import SourceCacheService
 
@@ -222,7 +222,11 @@ class _Position(NamedTuple):
         )
 
     def furthest_order(self) -> tuple[Any, ...]:
-        """``continue_reading``'s ``furthest_first`` as a sort key (max wins)."""
+        """``continue_reading``'s ``furthest_first`` as a sort key (max wins).
+
+        Between DIFFERENT chapters only. Two spellings of one chapter are
+        folded first (``_fold_spellings``), because a newer read of the same
+        chapter is not further into it."""
         numbered = self.chapter_number is not None
         return (
             numbered,
@@ -252,6 +256,36 @@ class _Position(NamedTuple):
                 chapters=chapters,
             ),
         )
+
+
+def _fold_spellings(positions: list[_Position], follow_key: str) -> _Position:
+    """ONE chapter read under several spellings of its series, as one position.
+
+    Decided exactly as ``ProgressService`` merges two pushes onto one row, so
+    the strip resumes where the single-key path would: the position speaks
+    (``progress_service.furthest_of`` -- the chapter's position, then its
+    page, then the newer read, then the follow's own spelling), completion is
+    sticky, and the read, page count and number are the newest, widest and
+    first known. A chapter finished under one suffix and reopened under
+    another is still finished, so the strip moves on to the next one.
+    """
+    best = furthest_of(positions, follow_key)
+    if len(positions) == 1:
+        return best
+    stamps = [p.last_read_at for p in positions if p.last_read_at is not None]
+    return best._replace(
+        chapter_number=(
+            best.chapter_number
+            if best.chapter_number is not None
+            else next(
+                (p.chapter_number for p in positions if p.chapter_number is not None),
+                None,
+            )
+        ),
+        page_count=max(p.page_count for p in positions),
+        last_read_at=max(stamps) if stamps else None,
+        is_completed=any(p.is_completed for p in positions),
+    )
 
 
 def _not_started(row: FollowedSeries) -> dict[str, Any]:
@@ -970,9 +1004,10 @@ class FollowedSeriesService:
 
         A follow whose keys drift (Asura rotates its slug suffixes) also weighs
         the rows stored under another key of its series, which the exact join
-        cannot reach (``_merge_alias_positions``): the furthest and the newest
-        are chosen across every spelling, and the item is spelled as the
-        follow spells it, so it opens the follow's own chapter list.
+        cannot reach (``_merge_alias_positions``): one chapter's spellings are
+        folded by the write path's furthest-wins merge, the furthest and the
+        newest are then chosen across every spelling, and the item is spelled
+        as the follow spells it, so it opens the follow's own chapter list.
 
         Each item also names its series with the follow's ``title`` and
         ``cover_url``, straight from the joined follow row, so a strip card
@@ -1172,11 +1207,16 @@ class FollowedSeriesService:
         them drifts -- as one small statement over this profile's follows
         without their chapter lists. Rows under another key of the same
         series are ranked per stored key exactly as the exact join's rows
-        are; each stored key's furthest and newest then compete with the
-        follow's own by the same order (``_Position.furthest_order`` /
-        ``newest_order``). Several follows of one series (made before
-        ``follow`` deduplicated them) all name it; the oldest takes the rows,
-        as it takes the pushes, so the series is never on the strip twice.
+        are. Each stored key's furthest and newest then join the follow's
+        own; the ones that are ONE chapter (``chapter_identity``) are folded
+        into one position by the write path's own rule (``_fold_spellings``),
+        and only then do chapters compete, by ``_Position.furthest_order`` /
+        ``newest_order``, as rows under a single key do. Comparing two
+        spellings of one chapter by recency instead resumed a reopened page 2
+        over the page 20 that finished it. Several follows of one series
+        (made before ``follow`` deduplicated them) all name it; the oldest
+        takes the rows, as it takes the pushes, so the series is never on the
+        strip twice.
 
         The 18+ gate is the follow's, as for every other row here.
         """
@@ -1196,7 +1236,8 @@ class FollowedSeriesService:
         drifting = self._drifting(follows)
         if not drifting:
             return set()
-        touched: set[tuple[str, str]] = set()
+        # follow key -> the other keys' furthest and newest positions
+        extra: dict[tuple[str, str], list[_Position]] = {}
         for chunk in _chunks(list(drifting), _ALIAS_CHUNK):
             ranked = self._alias_filter(
                 select(*self._position_columns()), chunk
@@ -1219,23 +1260,29 @@ class FollowedSeriesService:
                     key,
                     {"read_at": None, "title": follow.title, "cover_url": follow.cover_url},
                 )
-                position = _Position.of(row)
-                held = pair.get("furthest")
-                if row.furthest_rank == 1 and (
-                    held is None or position.furthest_order() > held.furthest_order()
-                ):
-                    pair["furthest"] = position
-                held = pair.get("newest")
-                if row.newest_rank == 1 and (
-                    held is None or position.newest_order() > held.newest_order()
-                ):
-                    pair["newest"] = position
+                extra.setdefault(key, []).append(_Position.of(row))
                 if row.series_read_at is not None and (
                     pair["read_at"] is None or row.series_read_at > pair["read_at"]
                 ):
                     pair["read_at"] = row.series_read_at
-                touched.add(key)
-        return touched
+
+        for key, positions in extra.items():
+            pair = candidates[key]
+            # By row id: the exact join's furthest and newest are often one row.
+            pool: dict[int, _Position] = {}
+            for position in (pair.get("furthest"), pair.get("newest"), *positions):
+                if position is not None:
+                    pool.setdefault(position.id, position)
+            chapters: dict[str, list[_Position]] = {}
+            for position in pool.values():
+                chapters.setdefault(
+                    chapter_identity(position.source_id, position.chapter_key), []
+                ).append(position)
+            folded = [_fold_spellings(group, key[1]) for group in chapters.values()]
+            # One object when one chapter is both, which _resume_row tests for.
+            pair["furthest"] = max(folded, key=_Position.furthest_order)
+            pair["newest"] = max(folded, key=_Position.newest_order)
+        return set(extra)
 
     def recently_updated(self, limit: int = 10) -> list[dict[str, Any]]:
         self._require_owner()
