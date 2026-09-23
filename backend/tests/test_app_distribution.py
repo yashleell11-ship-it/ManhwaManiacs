@@ -18,6 +18,23 @@ from main import create_app
 from routes import app_distribution
 
 
+@pytest.fixture(autouse=True)
+def _no_real_apk(tmp_path, monkeypatch):
+    """No test reads the developer's own build output.
+
+    APK_PATH defaults to Flutter's release output inside the repo, and
+    /app/version now advertises the version read out of whatever APK is
+    there. On a laptop that has just built a release, that is a real file
+    with a real build number — which the pubspec moves past at the next bump,
+    so tests comparing the two passed in CI (no APK) and failed locally, in
+    exactly the place ops/vps/push.sh runs them as the deploy gate. Tests that
+    need an APK point APK_PATH at their own.
+    """
+    monkeypatch.setattr(
+        "routes.app_distribution.APK_PATH", tmp_path / "no-apk-here.apk"
+    )
+
+
 @pytest.fixture
 def client(db_engine):
     session_factory = sessionmaker(bind=db_engine, autoflush=False, autocommit=False)
