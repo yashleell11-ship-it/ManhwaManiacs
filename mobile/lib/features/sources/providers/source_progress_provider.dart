@@ -6,6 +6,7 @@ import 'package:manhwamaniacs/features/reader/models/reading_progress.dart';
 import 'package:manhwamaniacs/features/sources/models/source_chapter_progress.dart';
 import 'package:manhwamaniacs/shared/providers/core_providers.dart';
 import 'package:manhwamaniacs/shared/providers/repository_providers.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// SharedPreferences key prefix holding the full source-progress map as a JSON
 /// object mapping `"sourceId:seriesId:chapterId"` → the progress record. The
@@ -15,6 +16,10 @@ import 'package:manhwamaniacs/shared/providers/repository_providers.dart';
 /// Sources-tab reader pushes those too (see `SourceReaderScreen`).
 const String sourceProgressPrefsKey = 'mm.source_progress';
 
+/// The SharedPreferences key holding [profileId]'s source-progress map.
+String sourceProgressStorageKey(int profileId) =>
+    '$sourceProgressPrefsKey:$profileId';
+
 /// Composite storage key for a single online chapter's progress record.
 String sourceProgressKey({
   required String sourceId,
@@ -22,6 +27,93 @@ String sourceProgressKey({
   required String chapterId,
 }) =>
     '$sourceId:$seriesId:$chapterId';
+
+/// The three parts of a [sourceProgressKey], as far as they can be told apart.
+typedef SourceProgressKeyParts = ({
+  String sourceId,
+  String seriesId,
+  String chapterId,
+});
+
+/// Splits a [sourceProgressKey] back into its parts, or `null` when the split
+/// is not certain.
+///
+/// The key is a plain join on ':', and the parts may hold ':' themselves:
+/// Asura and DemonicScans chapter ids are `<series key>:<number>`, so an Asura
+/// record is keyed `asurascans:<slug>:<slug>:94`. Splitting on every ':' files
+/// that under series `<slug>:<slug>` or chapter `94`, neither of which the
+/// server has ever heard of. Source ids never hold one, so the source is the
+/// text before the first ':'; the series/chapter boundary is then settled, in
+/// order, by
+///
+///  1. there being only one ':' left, when no other split exists;
+///  2. [knownSeries] — `(sourceId, seriesKey)` pairs this profile is known to
+///     read, such as its follows — naming exactly one candidate series;
+///  3. exactly one candidate whose chapter id starts with its own series key
+///     and a ':', the shape of the sources above.
+///
+/// Anything still ambiguous is `null`: a record left out costs one chapter's
+/// position, where a wrong split pushes it under a series that does not exist.
+SourceProgressKeyParts? parseSourceProgressKey(
+  String key, {
+  Set<(String, String)> knownSeries = const {},
+}) {
+  final sourceEnd = key.indexOf(':');
+  if (sourceEnd <= 0) return null;
+  final sourceId = key.substring(0, sourceEnd);
+  final rest = key.substring(sourceEnd + 1);
+
+  final candidates = <SourceProgressKeyParts>[];
+  for (var cut = rest.indexOf(':');
+      cut != -1;
+      cut = rest.indexOf(':', cut + 1)) {
+    if (cut == 0 || cut == rest.length - 1) continue;
+    candidates.add(
+      (
+        sourceId: sourceId,
+        seriesId: rest.substring(0, cut),
+        chapterId: rest.substring(cut + 1),
+      ),
+    );
+  }
+  if (candidates.length <= 1) {
+    return candidates.isEmpty ? null : candidates.single;
+  }
+
+  final known = [
+    for (final candidate in candidates)
+      if (knownSeries.contains((sourceId, candidate.seriesId))) candidate,
+  ];
+  if (known.length == 1) return known.single;
+
+  final selfPrefixed = [
+    for (final candidate in known.isEmpty ? candidates : known)
+      if (candidate.chapterId.startsWith('${candidate.seriesId}:')) candidate,
+  ];
+  return selfPrefixed.length == 1 ? selfPrefixed.single : null;
+}
+
+/// [profileId]'s stored source-progress records, keyed by [sourceProgressKey];
+/// empty when there are none or the stored payload cannot be decoded.
+Map<String, SourceChapterProgress> readSourceProgressRecords(
+  SharedPreferences prefs,
+  int profileId,
+) {
+  final raw = prefs.getString(sourceProgressStorageKey(profileId));
+  if (raw == null || raw.isEmpty) return const {};
+  try {
+    final decoded = jsonDecode(raw) as Map<String, dynamic>;
+    return {
+      for (final entry in decoded.entries)
+        entry.key: SourceChapterProgress.fromJson(
+          entry.value as Map<String, dynamic>,
+        ),
+    };
+  } catch (_) {
+    // Corrupt payload — start clean rather than crashing the screen.
+    return const {};
+  }
+}
 
 /// Holds the decoded source-progress map, hydrated from SharedPreferences.
 ///
@@ -48,22 +140,8 @@ class SourceProgressNotifier
       _key = null;
       return const {};
     }
-    final key = '$sourceProgressPrefsKey:$profileId';
-    _key = key;
-    final raw = prefs.getString(key);
-    if (raw == null || raw.isEmpty) return const {};
-    try {
-      final decoded = jsonDecode(raw) as Map<String, dynamic>;
-      return {
-        for (final entry in decoded.entries)
-          entry.key: SourceChapterProgress.fromJson(
-            entry.value as Map<String, dynamic>,
-          ),
-      };
-    } catch (_) {
-      // Corrupt payload — start clean rather than crashing the screen.
-      return const {};
-    }
+    _key = sourceProgressStorageKey(profileId);
+    return readSourceProgressRecords(prefs, profileId);
   }
 
   /// Persist the current page for a chapter. Marks the record completed when
