@@ -66,6 +66,8 @@ export interface SourcePin {
 export interface SourceSeriesSummary {
   id: string;
   source_id: string;
+  /** Which series `id` names, as the library's follows carry it too. */
+  series_identity?: string;
   title: string;
   chapter_count: number;
   description: string | null;

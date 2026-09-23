@@ -18,10 +18,10 @@ import {
 } from "@/features/library/collections";
 import {
   useAddSeriesToCollection,
+  useAllFollowedSeries,
   useCollection,
   useDeleteCollection,
   useRemoveSeriesFromCollection,
-  useSeriesList,
   useUpdateCollection,
 } from "@/features/library/hooks";
 import { apiErrorMessage } from "@/lib/view-state";
@@ -59,7 +59,10 @@ function DetailSkeleton() {
 
 export function CollectionDetailView({ collectionId }: CollectionDetailViewProps) {
   const collectionQuery = useCollection(collectionId);
-  const allSeriesQuery = useSeriesList({ page: 1, per_page: 200, sort: "title" });
+  // Every follow, not the first page: members, the add picker and the remove
+  // list are all joined against this, and a follow past the first 200 was
+  // missing from the grid, never offered, and called "No longer followed".
+  const allSeriesQuery = useAllFollowedSeries();
   // A collection is a shelf, not a medium: it can hold both, so the mode scopes
   // what is listed INSIDE it rather than which collections exist — the same
   // split `collection_detail_screen.dart` makes. A no-op when novels are off.
@@ -81,7 +84,7 @@ export function CollectionDetailView({ collectionId }: CollectionDetailViewProps
 
   const collection = collectionQuery.data;
   const allSeries = useMemo(
-    () => allSeriesQuery.data?.items ?? [],
+    () => allSeriesQuery.data ?? [],
     [allSeriesQuery.data],
   );
 

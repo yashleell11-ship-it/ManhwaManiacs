@@ -24,7 +24,6 @@ import {
 // the novels hooks, and the barrel is what the reader itself imports.
 import { useMangaChapterSaver } from "@/features/offline/chapter-savers";
 import {
-  followKey,
   useFollow,
   useFollowedIndex,
   useUnfollow,
@@ -103,9 +102,12 @@ function MangaSeriesDetailView({
   const seriesQuery = useSourceSeriesDetail(sourceId, seriesId);
   const chaptersQuery = useSourceChapters(sourceId, seriesId);
   const followedIndex = useFollowedIndex();
-  const followedId =
-    followedIndex.index.get(followKey({ sourceId, seriesKey: seriesId })) ??
-    null;
+  // With the payload's identity, so a series followed under an older Asura
+  // key still reads as followed on the page its new key opens.
+  const followedId = followedIndex.lookup(
+    { sourceId, seriesKey: seriesId },
+    seriesQuery.data?.series_identity,
+  );
   const followMutation = useFollow();
   const unfollowMutation = useUnfollow();
   const queryClient = useQueryClient();

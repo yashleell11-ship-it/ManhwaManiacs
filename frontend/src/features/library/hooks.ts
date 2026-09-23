@@ -8,7 +8,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import type { SeriesId } from "@/types/api";
 import { libraryApi } from "./api";
 import {
@@ -17,6 +17,12 @@ import {
   runBulk,
   summarizeBulkOutcome,
 } from "./bulk";
+import {
+  buildFollowedIndex,
+  fetchAllFollowed,
+  FOLLOWED_PAGE_SIZE,
+  followedIdFor,
+} from "./followed-index";
 import {
   clientTimezoneOffsetMinutes,
   DEFAULT_STATISTICS_RANGE,
@@ -76,23 +82,36 @@ export function useSearch(params: { q: string; page?: number; per_page?: number 
 // --- Follow / unfollow ---
 
 /**
+ * Every followed row, by title — all pages of it, not the first 200 (see
+ * `followed-index.ts`). The follow index and a collection's screens share
+ * this one cache entry.
+ */
+export function useAllFollowedSeries() {
+  return useQuery({
+    queryKey: [...LIBRARY_KEY, "followed-index"],
+    queryFn: () =>
+      fetchAllFollowed((page) =>
+        libraryApi.listSeries({ page, per_page: FOLLOWED_PAGE_SIZE, sort: "title" }),
+      ),
+  });
+}
+
+/**
  * Map of `"sourceId:seriesKey" -> followed_id` over the whole followed set, so
  * a `FollowButton` anywhere can tell whether its series is followed and get the
- * id it needs to unfollow. One request, shared cache.
+ * id it needs to unfollow. Shared cache. A series page asks through `lookup`
+ * with its payload's `series_identity`, which also finds a follow made under
+ * an older key of the same series.
  */
 export function useFollowedIndex() {
-  const query = useQuery({
-    queryKey: [...LIBRARY_KEY, "followed-index"],
-    queryFn: () => libraryApi.listSeries({ per_page: 200, sort: "title" }),
-  });
-  const index = new Map<string, number>();
-  const titles = new Map<string, string>();
-  for (const row of query.data?.items ?? []) {
-    const key = `${row.source_id}:${row.series_key}`;
-    index.set(key, row.id);
-    if (row.title) titles.set(key, row.title);
-  }
-  return { ...query, index, titles };
+  const query = useAllFollowedSeries();
+  const followed = useMemo(() => buildFollowedIndex(query.data ?? []), [query.data]);
+  const lookup = useCallback(
+    (ref: SeriesId, seriesIdentity?: string | null) =>
+      followedIdFor(followed, ref, seriesIdentity),
+    [followed],
+  );
+  return { ...query, ...followed, lookup };
 }
 
 export function followKey(ref: SeriesId): string {

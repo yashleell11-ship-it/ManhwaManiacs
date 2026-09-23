@@ -32,6 +32,13 @@ export interface FollowedSeries {
   id: number;
   source_id: string;
   series_key: string;
+  /**
+   * The connector's name for the series this key names — equal to
+   * `series_key` except on a source whose keys drift (Asura rotates its slug
+   * suffixes). Compared against a series page's own `series_identity` to find
+   * a follow made under an older key; never fetched with.
+   */
+  series_identity?: string;
   title: string;
   /**
    * Ready-to-use cover URL. The backend returns either the source's own
