@@ -8,6 +8,7 @@ import {
   mergeSearchTiers,
   resolveSearchTiers,
 } from "./hooks";
+import { globalSearchScopeLabel } from "./global-search";
 import type { GlobalSearchResponse } from "./types";
 
 /**
@@ -214,5 +215,46 @@ describe("resolveSearchTiers", () => {
 
     expect(shown.data).toBeUndefined();
     expect(shown.isLoadingRest).toBe(false);
+  });
+
+  it("counts a failed tier 2's sources as failed, not as never there", () => {
+    // Tier 2 shares the per-IP `sources` bucket with tier 1, so a 429 — or a
+    // backend restart mid-search — can kill it alone. The ~87 sources it was
+    // meant to ask must not vanish behind "Searched 4 sources".
+    const first = response({
+      groups: [group("reaperscans")],
+      sources_queried: 4,
+      sources_deferred: 87,
+      next_tier: 2,
+    });
+
+    const shown = resolveSearchTiers(first, {
+      data: undefined,
+      isPending: false,
+      isPlaceholderData: false,
+      isError: true,
+    });
+
+    expect(shown.isLoadingRest).toBe(false);
+    expect(shown.data?.groups.map((g) => g.source)).toEqual(["reaperscans"]);
+    expect(
+      globalSearchScopeLabel(shown.data!.sources_queried, shown.data!.sources_failed),
+    ).toBe("Searched 91 sources (87 failed)");
+  });
+
+  it("keeps a tier 2 answer it already has when only its refetch failed", () => {
+    const first = response({ sources_queried: 4, sources_deferred: 87, next_tier: 2 });
+    const second = response({ groups: [group("mangadex")], sources_queried: 87 });
+
+    const shown = resolveSearchTiers(first, {
+      data: second,
+      isPending: false,
+      isPlaceholderData: false,
+      isError: true,
+    });
+
+    expect(shown.data?.groups.map((g) => g.source)).toEqual(["mangadex"]);
+    expect(shown.data?.sources_queried).toBe(91);
+    expect(shown.data?.sources_failed).toBe(0);
   });
 });

@@ -213,6 +213,12 @@ export function federatedSearchRestOptions(
  * dedupe in `mergeSearchTiers` cannot catch it. A placeholder also counts as
  * still loading: it reports status 'success', so `isPending` alone read "done"
  * while the real answer was still seconds out.
+ *
+ * A tier 2 that FAILED, with nothing of its own to show, counts every source
+ * it was meant to ask as searched and failed. Otherwise the ~87 deferred
+ * sources dropped out without a word: not loading, no groups, and a scope
+ * line reading "Searched 4 sources" — which a reader takes to mean nothing
+ * else carries the title.
  */
 export function resolveSearchTiers(
   first: GlobalSearchResponse | undefined,
@@ -220,11 +226,23 @@ export function resolveSearchTiers(
     data: GlobalSearchResponse | undefined;
     isPending: boolean;
     isPlaceholderData: boolean;
+    isError?: boolean;
   },
 ): { data: GlobalSearchResponse | undefined; isLoadingRest: boolean } {
   const second = rest.isPlaceholderData ? undefined : rest.data;
+  const restFailed =
+    first?.next_tier === 2 && rest.isError === true && second === undefined;
+  const merged = first ? mergeSearchTiers(first, second) : undefined;
+  const missing = restFailed ? (merged?.sources_deferred ?? 0) : 0;
   return {
-    data: first ? mergeSearchTiers(first, second) : undefined,
+    data:
+      merged && missing > 0
+        ? {
+            ...merged,
+            sources_queried: merged.sources_queried + missing,
+            sources_failed: merged.sources_failed + missing,
+          }
+        : merged,
     // True while the rest is still arriving, so a caller can say "searching
     // 87 more sources" rather than pretending the answer is complete.
     isLoadingRest:
