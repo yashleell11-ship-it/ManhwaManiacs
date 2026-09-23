@@ -148,12 +148,37 @@ class UpdateSchedulerManager:
             db.close()
 
     def _scheduler_loop(self) -> None:
+        sleep_seconds = self._first_sleep_seconds()
         while not self._stop_event.is_set():
-            interval_minutes = self._current_interval_minutes()
-            sleep_seconds = max(interval_minutes * 60, 60)
             if self._stop_event.wait(timeout=sleep_seconds):
                 break
             self._tick()
+            sleep_seconds = max(self._current_interval_minutes() * 60, 60)
+
+    def _first_sleep_seconds(self) -> float:
+        """How long to wait before the first tick after boot.
+
+        A full interval from the boot is right when the boot swept, and wrong
+        when it did not: the startup check is skipped while the last sweep is
+        still inside the interval, so sleeping a whole interval from there put
+        the next sweep up to twice the interval after the last one — 113
+        minutes on a 60-minute cadence, after every deploy. So when the last
+        sweep is recent, wake when its interval runs out instead. When it is
+        not, the startup check is sweeping right now (or was turned off), and
+        a full interval from here is the next one.
+        """
+        full = max(self._current_interval_minutes() * 60, 60)
+        db = SessionLocal()
+        try:
+            remaining = UpdateService(db).seconds_until_sweep_due()
+        except Exception:
+            logger.exception("Could not time the first scheduled sweep")
+            return full
+        finally:
+            db.close()
+        if remaining <= 0:
+            return full
+        return max(min(remaining, full), 60)
 
     def _tick(self) -> None:
         """One scheduler cycle: trigger a sweep iff scheduled checks are on.

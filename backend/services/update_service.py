@@ -675,12 +675,20 @@ class UpdateService:
         sweep, so a day of deploys hit each upstream several times inside one
         check interval (42 ``startup`` runs in three days). The run log already
         records when the instance was last swept; a boot inside the interval
-        adds nothing, and the scheduler loop sweeps on schedule regardless.
+        adds nothing: the scheduler times its first tick from that same last
+        sweep (``seconds_until_sweep_due``), not from the boot, so skipping
+        here never pushes the next sweep past its interval.
 
         Only ``scheduled`` / ``startup`` passes count as evidence: a ``manual``
         run may be one member's per-series check, which says nothing about the
         rest of the instance, and a failed run says nothing at all.
         """
+        return self.seconds_until_sweep_due() <= 0
+
+    def seconds_until_sweep_due(self) -> float:
+        """Seconds until one check interval has passed since the last completed
+        instance-wide sweep; zero or less when one is already due (or none has
+        ever run). The same evidence ``startup_sweep_due`` weighs."""
         last = self._db.execute(
             select(func.max(UpdateRun.finished_at)).where(
                 UpdateRun.status == "completed",
@@ -688,9 +696,9 @@ class UpdateService:
             )
         ).scalar_one()
         if last is None:
-            return True
+            return 0.0
         interval = max(self.get_global_settings().check_interval_minutes, 5)
-        return utcnow() - last >= timedelta(minutes=interval)
+        return (last + timedelta(minutes=interval) - utcnow()).total_seconds()
 
     def _prune_history(self) -> None:
         """Bound the run log and the read-notification backlog after a sweep.

@@ -218,3 +218,45 @@ def test_a_scheduled_pass_is_never_skipped(db_session, follow, stub_connector):
 
     assert result["status"] == "completed"
     assert stub_connector["calls"] == 1
+
+
+# --- a skipped boot sweep must not delay the next one -----------------------
+
+
+@pytest.fixture
+def first_sleep(db_session, session_factory, monkeypatch):
+    """The scheduler's first wait after boot, read against the test DB."""
+    from services import update_scheduler
+
+    monkeypatch.setattr(update_scheduler, "SessionLocal", session_factory)
+    settings = UpdateService(db_session).get_global_settings()
+    settings.enabled = True
+    settings.check_interval_minutes = 60
+    db_session.commit()
+    return lambda: update_scheduler.UpdateSchedulerManager()._first_sleep_seconds()
+
+
+def test_a_skipped_boot_wakes_when_the_last_sweeps_interval_runs_out(
+    db_session, first_sleep
+):
+    """Production: a sweep at 21:29, a deploy at 22:22 skipped its startup
+    check, and the scheduler then slept a full hour from the boot — the next
+    sweep came at 23:22, 113 minutes after the last. It is due at 22:29."""
+    _run(db_session, trigger="startup", finished_ago=timedelta(minutes=53))
+
+    wait = first_sleep()
+
+    assert 6 * 60 <= wait <= 7 * 60 + 5, wait
+
+
+def test_a_boot_that_sweeps_waits_a_full_interval(db_session, first_sleep):
+    # No recent sweep, so the startup check is running one now.
+    _run(db_session, trigger="scheduled", finished_ago=timedelta(minutes=90))
+
+    assert first_sleep() == 60 * 60
+
+
+def test_the_first_wait_is_never_shorter_than_a_minute(db_session, first_sleep):
+    _run(db_session, trigger="scheduled", finished_ago=timedelta(minutes=59, seconds=50))
+
+    assert first_sleep() == 60
