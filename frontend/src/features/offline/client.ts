@@ -32,9 +32,93 @@ const UNSUPPORTED_STATE: OfflineState = { ...EMPTY_STATE, readiness: "unsupporte
 let snapshot: OfflineState = EMPTY_STATE;
 const listeners = new Set<() => void>();
 
+/**
+ * Structural equality for what the worker posts: plain JSON, arrays and
+ * objects of strings, numbers, booleans and null. Every message arrives as a
+ * fresh structured clone, so identity alone says nothing about change.
+ */
+function sameValue(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) {
+    return false;
+  }
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    for (let index = 0; index < a.length; index += 1) {
+      if (!sameValue(a[index], b[index])) return false;
+    }
+    return true;
+  }
+  const left = a as Record<string, unknown>;
+  const right = b as Record<string, unknown>;
+  const keys = Object.keys(left);
+  if (keys.length !== Object.keys(right).length) return false;
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(right, key)) return false;
+    if (!sameValue(left[key], right[key])) return false;
+  }
+  return true;
+}
+
+/**
+ * `next`, built out of `previous` wherever the two agree, and `previous`
+ * itself when they agree entirely.
+ *
+ * While any chapter is saving the worker broadcasts about every 300 ms, and it
+ * also answers every tab refocus and every restart with a full snapshot. Most
+ * of those say nothing new, and the ones that do usually change one entry. An
+ * unchanged entry keeps its old object and an unchanged list keeps its old
+ * array, so a consumer that derives from `entries` (a series page's chapter
+ * states) can tell by identity that nothing it shows moved.
+ */
+export function reconcileOfflineState(
+  previous: OfflineState,
+  next: OfflineState,
+): OfflineState {
+  const before = new Map(previous.entries.map((entry) => [entry.key, entry]));
+  let entriesChanged = next.entries.length !== previous.entries.length;
+  const entries = next.entries.map((entry, index) => {
+    const old = before.get(entry.key);
+    const kept = old !== undefined && sameValue(old, entry) ? old : entry;
+    if (kept !== previous.entries[index]) entriesChanged = true;
+    return kept;
+  });
+  const merged: OfflineState = {
+    ...next,
+    entries: entriesChanged ? entries : previous.entries,
+    estimate: sameValue(previous.estimate, next.estimate) ? previous.estimate : next.estimate,
+  };
+  return sameValue(previous, merged) ? previous : merged;
+}
+
+/**
+ * Replace the snapshot and tell every subscriber, but only when something
+ * actually changed: each subscriber is a React tree, and on a series page that
+ * tree is a chapter list with no windowing.
+ */
 function publish(next: OfflineState): void {
-  snapshot = next;
+  const merged = reconcileOfflineState(snapshot, next);
+  if (merged === snapshot) return;
+  snapshot = merged;
   for (const listener of listeners) listener();
+}
+
+/**
+ * Told about every state message the worker sends, changed or not.
+ *
+ * `subscribeOffline` stays quiet when a message repeats the last one, which is
+ * right for rendering and wrong for one reader: a download queue that gives up
+ * on a chapter after the worker has been SILENT for a while. A worker that is
+ * still sending the same "saving" state (a run of pages failing, say) is alive,
+ * and this is how the queue hears it.
+ */
+const heardListeners = new Set<() => void>();
+
+export function subscribeWorkerHeard(listener: () => void): () => void {
+  heardListeners.add(listener);
+  return () => {
+    heardListeners.delete(listener);
+  };
 }
 
 export function getOfflineSnapshot(): OfflineState {
@@ -166,6 +250,7 @@ function applyWorkerState(state: OfflineWorkerState): void {
     entries,
     readiness: state.scopeToken === null ? "unscoped" : "ready",
   });
+  for (const listener of heardListeners) listener();
   if (entries.length > 0) ensurePersistentStorage();
 }
 

@@ -1,12 +1,20 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import type { StorageScope } from "@/lib/scoped-storage";
 import {
   cancelChapterSave,
   getOfflineSnapshot,
   saveChapterOffline,
   subscribeOffline,
+  subscribeWorkerHeard,
 } from "./client";
 import {
   describeRun,
@@ -16,7 +24,7 @@ import {
   type RunSummary,
   type SaveOutcome,
 } from "./download-queue";
-import { useOfflineState, useStorageScope } from "./hooks";
+import { useStorageScope } from "./hooks";
 import type { SaveChapterRequest } from "./protocol";
 import {
   chapterDownloadState,
@@ -25,7 +33,7 @@ import {
   type ChapterDownloadState,
 } from "./series-downloads";
 import { summariseStorage } from "./format";
-import type { SavedChapterEntry } from "./types";
+import type { OfflineState, SavedChapterEntry } from "./types";
 
 /**
  * The page-side half of a multi-chapter download.
@@ -71,6 +79,7 @@ function watchSettle(key: string): { settled: Promise<SaveOutcome>; abandon: () 
   let seenSaving = false;
   let graceElapsed = false;
   let unsubscribe = () => {};
+  let unsubscribeHeard = () => {};
   let stallTimer = 0;
   let graceTimer = 0;
 
@@ -85,12 +94,14 @@ function watchSettle(key: string): { settled: Promise<SaveOutcome>; abandon: () 
     if (done) return;
     done = true;
     unsubscribe();
+    unsubscribeHeard();
     window.clearTimeout(stallTimer);
     window.clearTimeout(graceTimer);
     finish(outcome);
   };
 
   const armStall = () => {
+    if (done) return;
     window.clearTimeout(stallTimer);
     stallTimer = window.setTimeout(() => stop("failed"), SETTLE_STALL_MS);
   };
@@ -110,6 +121,10 @@ function watchSettle(key: string): { settled: Promise<SaveOutcome>; abandon: () 
   };
 
   unsubscribe = subscribeOffline(check);
+  // The state only publishes when it changes, but the stall clock is about the
+  // worker going quiet, so every message it sends is looked at, repeats
+  // included. `check` is idempotent, so a change seen twice costs nothing.
+  unsubscribeHeard = subscribeWorkerHeard(check);
   armStall();
   graceTimer = window.setTimeout(() => {
     graceElapsed = true;
@@ -119,11 +134,101 @@ function watchSettle(key: string): { settled: Promise<SaveOutcome>; abandon: () 
   return { settled, abandon: () => stop("failed") };
 }
 
+/**
+ * The part of the worker's state a series page's chapter list shows.
+ *
+ * The worker broadcasts about every 300 ms while any chapter is saving, and
+ * each broadcast is a new snapshot. A series page renders every chapter row
+ * with no windowing, so deriving from the whole snapshot re-rendered hundreds
+ * of rows three times a second, even for a chapter of a different series. The
+ * rows only ever show a chapter's `ChapterDownloadState`, and that changes a
+ * handful of times per chapter, not once per stored page.
+ */
+export interface SeriesOfflineView {
+  /**
+   * This series' saved chapters, by chapter key. Replaced when any chapter's
+   * download state changes, NOT on every page an in-flight save stores, so a
+   * `savedPages` or `bytes` read from here can lag the worker. Read per-page
+   * progress from `useSavedChapter`.
+   */
+  saved: ReadonlyMap<string, SavedChapterEntry>;
+  unavailable: boolean;
+}
+
+const EMPTY_VIEW: SeriesOfflineView = { saved: new Map(), unavailable: false };
+
+function sameChapterStates(
+  before: ReadonlyMap<string, SavedChapterEntry>,
+  after: ReadonlyMap<string, SavedChapterEntry>,
+): boolean {
+  if (before.size !== after.size) return false;
+  for (const [chapterKey, entry] of after) {
+    const old = before.get(chapterKey);
+    if (old === undefined) return false;
+    if (old !== entry && chapterDownloadState(old) !== chapterDownloadState(entry)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * `previous` again when nothing a chapter row shows has changed, otherwise a
+ * fresh view. Pure, so the hook can hand it to `useSyncExternalStore`, which
+ * re-renders only when the value it returns is a different object.
+ */
+export function selectSeriesOffline(
+  previous: SeriesOfflineView | null,
+  state: OfflineState,
+  ref: { sourceId: string; seriesKey: string },
+): SeriesOfflineView {
+  const saved = savedChaptersForSeries(state.entries, ref);
+  const unavailable = state.readiness === "unsupported";
+  if (
+    previous !== null &&
+    previous.unavailable === unavailable &&
+    sameChapterStates(previous.saved, saved)
+  ) {
+    return previous;
+  }
+  return { saved, unavailable };
+}
+
+/**
+ * A `getSnapshot` for one series: the same view object for as long as the
+ * chapter states it covers stay the same, and a cheap identity check when the
+ * store has not published at all (React asks more than once per render).
+ */
+export function seriesOfflineSnapshot(
+  read: () => OfflineState,
+  ref: { sourceId: string; seriesKey: string },
+): () => SeriesOfflineView {
+  let seen: OfflineState | null = null;
+  let view: SeriesOfflineView | null = null;
+  return () => {
+    const state = read();
+    if (view === null || state !== seen) {
+      view = selectSeriesOffline(view, state, ref);
+      seen = state;
+    }
+    return view;
+  };
+}
+
+function useSeriesOffline(sourceId: string, seriesKey: string): SeriesOfflineView {
+  const getSnapshot = useMemo(
+    () => seriesOfflineSnapshot(getOfflineSnapshot, { sourceId, seriesKey }),
+    [seriesKey, sourceId],
+  );
+  return useSyncExternalStore(subscribeOffline, getSnapshot, () => EMPTY_VIEW);
+}
+
 export interface SeriesDownloads {
   /** Null until a profile is known; nothing is savable without one. */
   scope: StorageScope | null;
   /** Downloads are impossible in this browser (no worker, or an insecure page). */
   unavailable: boolean;
+  /** See `SeriesOfflineView.saved`: follows each chapter's state, not each page. */
   saved: ReadonlyMap<string, SavedChapterEntry>;
   stateOf: (chapterKey: string) => ChapterDownloadState;
   running: boolean;
@@ -156,17 +261,12 @@ export function useSeriesDownloads({
   prepare,
 }: SeriesDownloadsInput): SeriesDownloads {
   const scope = useStorageScope();
-  const state = useOfflineState();
+  const { saved, unavailable } = useSeriesOffline(sourceId, seriesKey);
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
   const [summary, setSummary] = useState<RunSummary | null>(null);
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set<string>());
   const abortRef = useRef<AbortController | null>(null);
   const inFlightRef = useRef<string | null>(null);
-
-  const saved = useMemo(
-    () => savedChaptersForSeries(state.entries, { sourceId, seriesKey }),
-    [state.entries, seriesKey, sourceId],
-  );
 
   const stateOf = useCallback(
     (chapterKey: string): ChapterDownloadState => {
@@ -249,17 +349,35 @@ export function useSeriesDownloads({
     if (inFlightRef.current) void cancelChapterSave(inFlightRef.current);
   }, []);
 
-  return {
-    scope,
-    unavailable: state.readiness === "unsupported",
-    saved,
-    stateOf,
-    running: progress !== null,
-    progress,
-    summary,
-    pending,
-    download,
-    cancel,
-    dismissSummary: () => setSummary(null),
-  };
+  const dismissSummary = useCallback(() => setSummary(null), []);
+
+  // One object per actual change, so what the picker builds from it can
+  // memoise on it too.
+  return useMemo(
+    () => ({
+      scope,
+      unavailable,
+      saved,
+      stateOf,
+      running: progress !== null,
+      progress,
+      summary,
+      pending,
+      download,
+      cancel,
+      dismissSummary,
+    }),
+    [
+      cancel,
+      dismissSummary,
+      download,
+      pending,
+      progress,
+      saved,
+      scope,
+      stateOf,
+      summary,
+      unavailable,
+    ],
+  );
 }
