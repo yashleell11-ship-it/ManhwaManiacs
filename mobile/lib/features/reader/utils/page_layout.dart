@@ -56,6 +56,24 @@ bool isAtReadingEnd({
   };
 }
 
+/// Whether the list has been scrolled as far as it goes.
+///
+/// Stricter than [isAtReadingEnd], which is the edge prompt's test and is true
+/// a whole viewport before the end. This one answers "has the reader seen the
+/// last page": at the true end the last page is on screen in full, however
+/// short it is, because the trailing padding below it is wider than the edge
+/// allowed here. That is what the probe line cannot say for a short last page
+/// — its top never reaches the line before the scroll runs out.
+///
+/// Scroll offset grows in reading order for every direction (a right-to-left
+/// list is reversed rather than laid out backwards), so one comparison serves
+/// them all.
+bool isAtScrollEnd({
+  required double scrollOffset,
+  required double maxScroll,
+}) =>
+    scrollOffset >= maxScroll - _scrollEdgeThreshold;
+
 const double _scrollEdgeThreshold = 48.0;
 
 double resolveInitialScrollTop({

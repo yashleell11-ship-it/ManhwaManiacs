@@ -211,6 +211,16 @@ class _ReaderContentState extends ConsumerState<ReaderContent> {
   /// feed "page 3" means nothing without saying page 3 of what.
   (String chapterId, int page)? _lastSaved;
   (ReaderChapter chapter, int page)? _pending;
+
+  /// The chapter the reading line was in at the last scroll callback — by id,
+  /// because an index into the feed moves every time the window slides.
+  String? _readingChapterId;
+
+  /// Chapters whose completion has already been handed to
+  /// [ReaderContent.onSaveProgress]. Kept apart from [_lastSaved] on purpose:
+  /// that is only the most recent save, and a reader going back and forth
+  /// over a seam would otherwise resend the same completion every time.
+  final Set<String> _completedSent = {};
   var _initialScrollApplied = false;
 
   /// The chapter this reader was opened at. Scroll offsets are persisted
@@ -910,7 +920,7 @@ class _ReaderContentState extends ConsumerState<ReaderContent> {
 
     // Derived from the same extents the list is laid out with, so the counter,
     // the scrubber and the pages can never drift apart.
-    final flatPage = _metrics.pageAtOffset(scrollOffset);
+    final flatPage = _readingPageAt(scrollOffset, maxScroll);
     final feedPosition = _positionAt(flatPage - 1);
 
     // Update ValueNotifiers — no setState, no rebuild
@@ -920,11 +930,67 @@ class _ReaderContentState extends ConsumerState<ReaderContent> {
     if (_atStartNotifier.value != atStart) _atStartNotifier.value = atStart;
     if (_atEndNotifier.value != atEnd) _atEndNotifier.value = atEnd;
 
+    _finishChaptersPassed(feedPosition);
     _scheduleProgressSave(feedPosition);
     _scheduleScrollSave(scrollOffset, feedPosition);
     _maybeAutoNextChapter(atEnd);
     _maybeExtendFeed(feedPosition);
     _prefetchUpcoming(flatPage);
+  }
+
+  /// The 1-based flat page being read with the top of the viewport at
+  /// [scrollOffset].
+  ///
+  /// The reading line's answer everywhere but the true end of the list, where
+  /// it is the last page. A last page shorter than the viewport less the
+  /// trailing padding never gets its top up to the line before the scroll runs
+  /// out — the credits banner under the newest chapter, a standard manga page
+  /// on a tall phone — so at the very bottom the counter read one page short
+  /// and the chapter could never be finished.
+  ///
+  /// Not while a restore is still homing in: its interim jumps land on the end
+  /// of whatever has been laid out so far, which is not where the reader is.
+  int _readingPageAt(double scrollOffset, double maxScroll) {
+    final probed = _metrics.pageAtOffset(scrollOffset);
+    if (!_initialScrollApplied || widget.feed.isEmpty) return probed;
+    return isAtScrollEnd(scrollOffset: scrollOffset, maxScroll: maxScroll)
+        ? widget.feed.length
+        : probed;
+  }
+
+  /// Finish every chapter the reading line has just passed over going
+  /// forwards.
+  ///
+  /// The debounced save never gets to report a chapter's last page once the
+  /// line has moved on: crossing the seam inside the debounce re-arms it for
+  /// the next chapter and the last-page save is dropped, so a chapter read
+  /// straight through was left one page short of finished for good. The web
+  /// hit the same thing and answers it the same way (`use-strip-progress.ts`).
+  ///
+  /// Every chapter between the two positions, not only the one directly above:
+  /// one fling can clear a short chapter between two scroll callbacks.
+  /// Crossing backwards finishes nothing — scrolling up to re-read is not
+  /// reading on.
+  void _finishChaptersPassed(ReaderFeedPosition position) {
+    if (widget.onSaveProgress == null || widget.feed.isEmpty) return;
+    // A restore homing in passes through positions nobody read: it can start
+    // in a chapter prepended above the anchor and then land in the anchor,
+    // which would read as crossing forwards out of a chapter never opened.
+    if (!_initialScrollApplied) return;
+    final chapters = widget.feed.chapters;
+    final previous = _readingChapterId;
+    _readingChapterId = chapters[position.chapterIndex].id;
+    if (previous == null || previous == _readingChapterId) return;
+    // Looked up in the feed as it stands now. A chapter the window has already
+    // released answers -1 and is left alone.
+    final from = widget.feed.indexOfChapter(previous);
+    for (var i = from; i >= 0 && i < position.chapterIndex; i++) {
+      final chapter = chapters[i];
+      final lastPage = chapter.pages.length;
+      if (lastPage == 0 || !_completedSent.add(chapter.id)) continue;
+      // Straight through, not via the debounce — the debounce is what lost it.
+      unawaited(_persistProgress(chapter, lastPage));
+    }
   }
 
   /// Ask for the adjacent chapter while there is still reading left between
