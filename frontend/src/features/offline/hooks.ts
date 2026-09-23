@@ -48,6 +48,12 @@ export function useSavedChapter(key: string | null): SavedChapterEntry | null {
  *
  * Reported rather than acted on: the swap replaces the running bundle, so it
  * happens when the reader says so, not in the middle of a page turn.
+ *
+ * The prompt stays up when ANOTHER tab applies the update: this tab is still
+ * running the old bundle, and `applyWorkerUpdate` reloads it straight away in
+ * that case. It goes away only when a newer build replaces the reported
+ * worker, which then has nothing left to apply; the newer one is reported
+ * through its own install.
  */
 export function useWorkerUpdate(): { waiting: ServiceWorker | null } {
   const [waiting, setWaiting] = useState<ServiceWorker | null>(null);
@@ -55,11 +61,21 @@ export function useWorkerUpdate(): { waiting: ServiceWorker | null } {
   useEffect(() => {
     let cancelled = false;
 
+    const report = (worker: ServiceWorker) => {
+      setWaiting(worker);
+      worker.addEventListener("statechange", () => {
+        if (worker.state !== "redundant") return;
+        // Only if it is still the one shown: the worker that replaced it may
+        // already have been reported.
+        setWaiting((current) => (current === worker ? null : current));
+      });
+    };
+
     void registerOfflineWorker().then((registration) => {
       if (!registration || cancelled) return;
 
       if (registration.waiting && navigator.serviceWorker.controller) {
-        setWaiting(registration.waiting);
+        report(registration.waiting);
       }
 
       registration.addEventListener("updatefound", () => {
@@ -70,7 +86,7 @@ export function useWorkerUpdate(): { waiting: ServiceWorker | null } {
           // is an UPDATE. Without a controller it is the first install, which
           // has nothing to replace and needs no prompt.
           if (installing.state === "installed" && navigator.serviceWorker.controller) {
-            setWaiting(installing);
+            report(installing);
           }
         });
       });

@@ -7,6 +7,7 @@ import {
   type SaveChapterRequest,
 } from "./protocol";
 import type { OfflineState, OfflineWorkerState } from "./types";
+import { decideWorkerUpdate } from "./worker-update";
 
 /**
  * The page half of the offline feature: register the worker, tell it which
@@ -336,18 +337,33 @@ export async function resetServiceWorker(): Promise<void> {
   }
 }
 
-let updateRequested = false;
+/**
+ * The worker this tab already asked to take over, so a second tap does not
+ * arm a second reload. Per worker, not a flag: a flag set for a worker a newer
+ * build later replaced would turn every tap on the newer one into a no-op.
+ */
+let updateRequestedFor: ServiceWorker | null = null;
 
 /**
  * Activate a waiting worker, then reload once it takes over.
  *
  * The reload is armed only here: `controllerchange` also fires the first time a
  * worker claims a page, and reloading on that would bounce every visitor once
- * on their first visit for no reason.
+ * on their first visit for no reason. When another tab has already applied
+ * the update that event is gone, so the reload happens now instead
+ * (`decideWorkerUpdate`).
  */
 export async function applyWorkerUpdate(waiting: ServiceWorker): Promise<void> {
-  if (updateRequested) return;
-  updateRequested = true;
+  const action = decideWorkerUpdate(
+    waiting.state,
+    window.navigator.serviceWorker.controller === waiting,
+  );
+  if (action === "reload") {
+    window.location.reload();
+    return;
+  }
+  if (action === "stale" || updateRequestedFor === waiting) return;
+  updateRequestedFor = waiting;
   window.navigator.serviceWorker.addEventListener(
     "controllerchange",
     () => {
