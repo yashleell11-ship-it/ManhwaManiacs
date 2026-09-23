@@ -27,7 +27,7 @@ import json
 from typing import Annotated, Any
 
 from fastapi import Depends
-from sqlalchemy import func, select
+from sqlalchemy import LargeBinary, cast, func, select
 from sqlalchemy.orm import Session
 
 from connectors.ids import fully_unquote
@@ -41,7 +41,7 @@ from core.content_rating import (
 from core.errors import AppError
 from core.profile_context import ProfileContext, resolve_profile_context
 from core.time_utils import utcnow
-from database.models import ChapterOcr, FollowedSeries
+from database.models import ChapterOcr, FollowedSeries, User
 from database.session import get_db
 from services.browse_service import BrowseService, get_browse_service
 
@@ -155,7 +155,9 @@ class OcrIngestService:
         """Upsert one chapter's OCR text. Rebuilds ``full_text`` from pages.
 
         An upload for an existing key **replaces** (last engine wins) unless the
-        incoming ``word_count`` is 0 (spec §3.9).
+        incoming ``word_count`` is 0 (spec §3.9). An upload with no words never
+        creates a row either, and what is stored is bounded in bytes, per row
+        and per account (:meth:`_require_stored_bytes_room`).
 
         404 for a series this profile does not follow (or may not see), which
         is the same answer the reads give for it — off-limits stays
@@ -191,6 +193,21 @@ class OcrIngestService:
             # Never overwrite a good transcript with an empty one.
             return self._serialize(row)
 
+        if wc == 0:
+            # Nor create one. A row with no words is never a search hit and
+            # has no overlay to show, so all it could ever hold is box
+            # geometry -- which is exactly the payload that is free to inflate.
+            raise AppError(
+                "No text was found in this chapter.",
+                code="ocr_transcript_empty",
+                status_code=400,
+            )
+
+        page_texts = json.dumps(normalized_pages)
+        self._require_stored_bytes_room(
+            normalized_pages, page_texts, full_text, replacing=row
+        )
+
         if row is None:
             self._require_chapter_room(source_id, series_key)
             row = ChapterOcr(
@@ -201,7 +218,7 @@ class OcrIngestService:
             self._db.add(row)
 
         row.full_text = full_text or None
-        row.page_texts = json.dumps(normalized_pages)
+        row.page_texts = page_texts
         row.language = language or row.language
         row.engine = engine or "unknown"
         row.word_count = wc
@@ -210,6 +227,93 @@ class OcrIngestService:
         self._db.commit()
         self._db.refresh(row)
         return self._serialize(row)
+
+    def _is_admin(self) -> bool:
+        if self._user_id is None:
+            return False
+        return bool(
+            self._db.execute(
+                select(User.is_admin).where(User.id == self._user_id)
+            ).scalar_one_or_none()
+        )
+
+    @staticmethod
+    def _geometry_bytes(normalized_pages: list[dict[str, Any]]) -> int:
+        """Serialized size of every box MINUS its text: the geometry alone.
+
+        Text is already bounded by the route (2,000,000 characters across page
+        and box text), so this measures exactly the part nothing else does.
+        """
+        geometry = [
+            [
+                {k: v for k, v in box.items() if k != "text"}
+                if isinstance(box, dict)
+                else box
+                for box in (p["boxes"] or [])
+            ]
+            for p in normalized_pages
+        ]
+        return len(json.dumps(geometry))
+
+    def _require_stored_bytes_room(
+        self,
+        normalized_pages: list[dict[str, Any]],
+        page_texts: str,
+        full_text: str,
+        *,
+        replacing: ChapterOcr | None,
+    ) -> None:
+        """Bound the BYTES an upload stores, per row and per account.
+
+        The route's model caps text characters only, and box geometry is not
+        text: up to 9 floats per box, 300 boxes a page, 500 pages. With every
+        page's text empty an upload passed the character cap, and each one
+        wrote a ~36 MiB ``page_texts`` row -- at the rate limit's 200/hour,
+        about 7 GB an hour from one account against a 14 GB free disk. So the
+        geometry is measured here, after normalization, where it is exactly
+        what SQLite will be handed. Only the geometry: a transcript the text
+        cap admits must still be storable whatever its script.
+
+        The per-account sum is what stops a stream of individually-legal
+        uploads doing the same thing more slowly. A replacement is charged
+        only its growth: the row it overwrites leaves the sum. The owner is
+        exempt -- the ceiling is for accounts open registration hands out.
+        """
+        settings = get_settings()
+        geometry_limit = settings.max_ocr_geometry_bytes
+        if (
+            geometry_limit > 0
+            and self._geometry_bytes(normalized_pages) > geometry_limit
+        ):
+            raise AppError(
+                "OCR upload carries too much box geometry to store.",
+                code="ocr_payload_too_large",
+                status_code=413,
+                details={"max_geometry_bytes": geometry_limit},
+            )
+
+        account_limit = settings.max_ocr_bytes_per_account
+        if account_limit <= 0 or self._user_id is None or self._is_admin():
+            return
+        # Bytes, not characters: CAST AS BLOB makes length() count octets.
+        row_bytes = func.length(
+            cast(func.coalesce(ChapterOcr.page_texts, ""), LargeBinary)
+        ) + func.length(cast(func.coalesce(ChapterOcr.full_text, ""), LargeBinary))
+        stmt = select(func.coalesce(func.sum(row_bytes), 0)).where(
+            ChapterOcr.contributed_by_user_id == self._user_id
+        )
+        if replacing is not None:
+            stmt = stmt.where(ChapterOcr.id != replacing.id)
+        used = int(self._db.execute(stmt).scalar_one() or 0)
+        # ``page_texts`` is ``json.dumps`` output, so ASCII: len() is bytes.
+        incoming = len(page_texts) + len(full_text.encode("utf-8"))
+        if used + incoming > account_limit:
+            raise AppError(
+                "OCR storage limit reached for this account.",
+                code="ocr_storage_limit_reached",
+                status_code=400,
+                details={"max_bytes": account_limit},
+            )
 
     def _require_chapter_room(self, source_id: str, series_key: str) -> None:
         """Bound how many chapters of ONE series may carry a transcript.

@@ -188,6 +188,19 @@ class Settings(BaseModel):
     # a few thousand chapters. Zero disables the guard.
     # MM_MAX_OCR_CHAPTERS_PER_SERIES.
     max_ocr_chapters_per_series: int = 5000
+    # Byte ceilings on what POST /ocr/chapter STORES. The route's model caps
+    # text characters, but box geometry rides along uncounted: 500 pages x 300
+    # boxes x 9 floats is a ~32 MiB request that serializes to a ~36 MiB
+    # ``page_texts`` row, so the text cap alone let one account write ~7 GB an
+    # hour inside the rate limit. The geometry ceiling bounds one row's boxes
+    # with their text left out (the text has its own cap); a real chapter's
+    # boxes are a few hundred KB. The per-account ceiling bounds the sum of
+    # every row an account contributed, so a pile of individually-legal
+    # uploads cannot fill the disk either -- over a thousand real chapters'
+    # worth. The owner (admin) is exempt: the disk is his. Zero disables
+    # either guard. MM_MAX_OCR_GEOMETRY_BYTES / MM_MAX_OCR_BYTES_PER_ACCOUNT.
+    max_ocr_geometry_bytes: int = 2_000_000
+    max_ocr_bytes_per_account: int = 256_000_000
 
     # Authentication (P1). Runtime-only; overridable via env for deployment.
     # registration_enabled gates self-service signup *after* the bootstrap
@@ -318,6 +331,8 @@ def get_settings() -> Settings:
         ("MM_UPDATE_SWEEP_DEADLINE_MINUTES", "update_sweep_deadline_minutes"),
         ("MM_MAX_FOLLOWS_PER_PROFILE", "max_follows_per_profile"),
         ("MM_MAX_OCR_CHAPTERS_PER_SERIES", "max_ocr_chapters_per_series"),
+        ("MM_MAX_OCR_GEOMETRY_BYTES", "max_ocr_geometry_bytes"),
+        ("MM_MAX_OCR_BYTES_PER_ACCOUNT", "max_ocr_bytes_per_account"),
         ("MM_BOOTSTRAP_WINDOW_MINUTES", "bootstrap_window_minutes"),
         ("MM_BROWSE_CACHE_TTL_MINUTES", "browse_cache_ttl_minutes"),
         ("MM_BROWSE_CACHE_MAX_ROWS", "browse_cache_max_rows"),

@@ -191,3 +191,168 @@ def test_replacing_an_existing_transcript_still_works_at_the_cap(
     )
     assert again.status_code == 200, again.text
     assert again.json()["engine"] == "apple-vision"
+
+
+# --- what is STORED, in bytes, not just the text characters ---------------
+
+
+def _geometry_page(n, text=""):
+    """One page of the most geometry a box carries in the reported payload."""
+    tiny = -1.2345678901234567e-300
+    box = {
+        "text": "",
+        "x": tiny,
+        "y": tiny,
+        "width": tiny,
+        "height": tiny,
+        "left": tiny,
+        "top": tiny,
+        "confidence": tiny,
+    }
+    return {"page": n, "text": text, "boxes": [box] * OCR_MAX_BOXES_PER_PAGE}
+
+
+def _stored_rows(db_session, chapter_key):
+    from database.models import ChapterOcr
+
+    return (
+        db_session.query(ChapterOcr)
+        .filter_by(source_id=SRC, series_key=SERIES, chapter_key=chapter_key)
+        .count()
+    )
+
+
+def test_a_geometry_only_upload_never_creates_a_row(client, h, follows, db_session):
+    """The text cap counts characters of text; box geometry is not text. With
+    every page's text empty the upload passed the cap and still minted a row
+    holding nothing but floats -- the cheapest way to fill the disk."""
+    up = _upload(client, h, [_geometry_page(1), _geometry_page(2)])
+    assert up.status_code == 400, up.text
+    assert up.json()["code"] == "ocr_transcript_empty"
+    assert _stored_rows(db_session, "c1") == 0
+
+
+@pytest.fixture
+def small_geometry_cap(monkeypatch):
+    from core.config import get_settings
+
+    monkeypatch.setenv("MM_MAX_OCR_GEOMETRY_BYTES", "50000")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def test_geometry_has_a_stored_ceiling_of_its_own(
+    client, h, follows, db_session, small_geometry_cap
+):
+    """One word of text is enough to get past the empty-transcript refusal, so
+    the ceiling that matters is on the geometry the row would hold."""
+    up = _upload(client, h, [_geometry_page(1, text="hi"), _geometry_page(2)])
+    assert up.status_code == 413, up.text
+    assert up.json()["code"] == "ocr_payload_too_large"
+    assert up.json()["details"]["max_geometry_bytes"] == 50000
+    assert _stored_rows(db_session, "c1") == 0
+
+    # A real chapter under the same ceiling is still taken, however much text
+    # it carries: the text has its own cap and is not what is measured here.
+    ok = _upload(
+        client,
+        h,
+        [
+            {
+                "page": 1,
+                "text": "x" * OCR_MAX_PAGE_TEXT_CHARS,
+                "boxes": [{"text": "the hero spoke", "x": 0.1, "y": 0.2}],
+            }
+        ],
+    )
+    assert ok.status_code == 200, ok.text
+
+
+def test_the_default_geometry_ceiling_refuses_the_reported_payload():
+    """The reported request -- 500 pages of empty text, 300 seven-float boxes
+    each -- serializes to ~36 MiB. The default ceiling must sit far below it
+    and far above a real chapter's boxes (a few hundred KB)."""
+    from core.config import get_settings
+    from routes.ocr import OcrChapterUpload
+    from services.ocr_ingest_service import OcrIngestService
+
+    get_settings.cache_clear()
+    body = OcrChapterUpload(
+        source_id=SRC,
+        series_key=SERIES,
+        chapter_key="c1",
+        pages=[_geometry_page(n + 1) for n in range(OCR_MAX_PAGES)],
+    )
+    pages = [p.model_dump(exclude_none=True) for p in body.pages]
+    for p in pages:
+        p.setdefault("boxes", None)
+    geometry = OcrIngestService._geometry_bytes(pages)
+    ceiling = get_settings().max_ocr_geometry_bytes
+    assert geometry > 30_000_000
+    assert 0 < ceiling < geometry // 10
+    assert ceiling >= 1_000_000
+
+
+@pytest.fixture
+def small_account_cap(monkeypatch):
+    """Room for two ~9 KB chapters and not a third."""
+    from core.config import get_settings
+
+    monkeypatch.setenv("MM_MAX_OCR_BYTES_PER_ACCOUNT", "25000")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def _chapter_of_bytes(client, h, chapter_key, word="dialogue"):
+    # ~9 KB stored: 4.5 KB of page text, held twice (page_texts + full_text).
+    return client.post(
+        "/ocr/chapter",
+        json={
+            "source_id": SRC,
+            "series_key": SERIES,
+            "chapter_key": chapter_key,
+            "engine": "mlkit",
+            "pages": [{"page": 1, "text": " ".join([word] * 500)}],
+        },
+        headers=h,
+    )
+
+
+def test_one_account_cannot_store_past_its_ceiling(
+    client, h, follows, db_session, small_account_cap
+):
+    """Every upload here is individually legal; the sum is what fills a disk."""
+    assert _chapter_of_bytes(client, h, "c1").status_code == 200
+    assert _chapter_of_bytes(client, h, "c2").status_code == 200
+
+    over = _chapter_of_bytes(client, h, "c3")
+    assert over.status_code == 400, over.text
+    assert over.json()["code"] == "ocr_storage_limit_reached"
+    assert over.json()["details"]["max_bytes"] == 25000
+    assert _stored_rows(db_session, "c3") == 0
+
+
+def test_a_rescan_at_the_account_ceiling_is_charged_only_its_growth(
+    client, h, follows, small_account_cap
+):
+    """Replacing a row frees the old one, so a redo of a chapter must keep
+    working for an account that is at its ceiling."""
+    assert _chapter_of_bytes(client, h, "c1").status_code == 200
+    assert _chapter_of_bytes(client, h, "c2").status_code == 200
+
+    again = _chapter_of_bytes(client, h, "c1", word="dialogs!")
+    assert again.status_code == 200, again.text
+
+
+def test_the_owner_is_not_held_to_the_account_ceiling(
+    client, make_user, make_profile, as_user, seed_follow, small_account_cap
+):
+    owner = make_user("ocr-owner", is_admin=True)
+    profile = make_profile(owner.id, "Main")
+    seed_follow(owner.id, profile.id, source_id=SRC, series_key=SERIES)
+    owner_h = as_user(owner.id, profile.id)
+
+    for key in ("c1", "c2", "c3"):
+        assert _chapter_of_bytes(client, owner_h, key).status_code == 200
