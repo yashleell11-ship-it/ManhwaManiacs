@@ -62,11 +62,16 @@ def _seed_transcript(db, accounts, chapter_key="c1", text="the dragon king awake
 # --- the row stays global, the write is scoped ---------------------------
 
 
-def test_ingest_writes_one_global_row(db_session, accounts, seed_follow):
+def test_ingest_writes_one_global_row(
+    db_session, accounts, seed_follow, make_user, make_profile
+):
     """Two contributors, one row: the storage is still per-chapter, not
-    per-user. Both follow the series — that is now what buys the write."""
+    per-user. Both follow the series — that is now what buys the write — and
+    the second is the owner, who alone may replace another's transcript."""
+    owner = make_user("owner", is_admin=True)
+    owner_profile = make_profile(owner.id, "Owner")
     seed_follow(accounts["ua"], accounts["pa"], source_id=SRC, series_key=SERIES)
-    seed_follow(accounts["ub"], accounts["pb"], source_id=SRC, series_key=SERIES)
+    seed_follow(owner.id, owner_profile.id, source_id=SRC, series_key=SERIES)
     r1 = _ingest(db_session, accounts["ua"], accounts["pa"]).ingest_chapter(
         source_id=SRC,
         series_key=SERIES,
@@ -75,7 +80,7 @@ def test_ingest_writes_one_global_row(db_session, accounts, seed_follow):
         pages=[{"page": 1, "text": "the dragon king awakened"}],
     )
     # a second contributor for the same chapter replaces, not duplicates
-    r2 = _ingest(db_session, accounts["ub"], accounts["pb"]).ingest_chapter(
+    r2 = _ingest(db_session, owner.id, owner_profile.id).ingest_chapter(
         source_id=SRC,
         series_key=SERIES,
         chapter_key="c1",
@@ -110,6 +115,78 @@ def test_empty_upload_never_clobbers_a_good_transcript(
     row = db_session.query(ChapterOcr).filter_by(chapter_key="c2").one()
     assert row.word_count == 3
     assert "important" in row.full_text
+
+
+def test_a_follower_cannot_replace_another_accounts_transcript(
+    db_session, accounts, seed_follow
+):
+    """Following is self-service, so the follow gate alone let any account on
+    open registration follow the owner's series and overwrite the transcript
+    he reads as his overlay and his search results. The row is global and
+    keeps no history, so the overwrite destroyed the real scan."""
+    seed_follow(accounts["ua"], accounts["pa"], source_id=SRC, series_key=SERIES)
+    seed_follow(accounts["ub"], accounts["pb"], source_id=SRC, series_key=SERIES)
+    _seed_transcript(db_session, accounts, text="the dragon king awakened")
+
+    with pytest.raises(AppError) as err:
+        _ingest(db_session, accounts["ub"], accounts["pb"]).ingest_chapter(
+            source_id=SRC,
+            series_key=SERIES,
+            chapter_key="c1",
+            engine="mlkit",
+            pages=[{"page": 1, "text": "attacker supplied dialogue"}],
+        )
+    assert err.value.status_code == 409
+    assert err.value.code == "ocr_transcript_taken"
+
+    from database.models import ChapterOcr
+
+    row = db_session.query(ChapterOcr).filter_by(chapter_key="c1").one()
+    assert row.full_text == "the dragon king awakened"
+    assert row.contributed_by_user_id == accounts["ua"]
+
+
+def test_a_contributor_may_still_rescan_its_own_transcript(
+    db_session, accounts, seed_follow
+):
+    seed_follow(accounts["ua"], accounts["pa"], source_id=SRC, series_key=SERIES)
+    _seed_transcript(db_session, accounts, text="the dragon king awakened")
+    _seed_transcript(db_session, accounts, text="the dragon king awakened at dawn")
+
+    from database.models import ChapterOcr
+
+    row = db_session.query(ChapterOcr).filter_by(chapter_key="c1").one()
+    assert row.full_text == "the dragon king awakened at dawn"
+
+
+def test_a_transcript_with_no_recorded_contributor_is_the_owners_to_replace(
+    db_session, accounts, seed_follow, make_user, make_profile
+):
+    from database.models import ChapterOcr
+
+    seed_follow(accounts["ua"], accounts["pa"], source_id=SRC, series_key=SERIES)
+    _seed_transcript(db_session, accounts, text="an old scan")
+    row = db_session.query(ChapterOcr).filter_by(chapter_key="c1").one()
+    row.contributed_by_user_id = None
+    db_session.commit()
+
+    with pytest.raises(AppError) as err:
+        _seed_transcript(db_session, accounts, text="a newer scan")
+    assert err.value.status_code == 409
+
+    owner = make_user("owner", is_admin=True)
+    owner_profile = make_profile(owner.id, "Owner")
+    seed_follow(owner.id, owner_profile.id, source_id=SRC, series_key=SERIES)
+    _ingest(db_session, owner.id, owner_profile.id).ingest_chapter(
+        source_id=SRC,
+        series_key=SERIES,
+        chapter_key="c1",
+        engine="mlkit",
+        pages=[{"page": 1, "text": "the owner's scan"}],
+    )
+    db_session.refresh(row)
+    assert row.full_text == "the owner's scan"
+    assert row.contributed_by_user_id == owner.id
 
 
 # --- search ---------------------------------------------------------------

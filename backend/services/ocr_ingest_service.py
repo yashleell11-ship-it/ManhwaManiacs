@@ -141,6 +141,22 @@ class OcrIngestService:
         """
         return self._may_read(source_id, series_key)
 
+    def _may_replace(self, row: ChapterOcr) -> bool:
+        """Whether this caller may OVERWRITE a stored transcript.
+
+        :meth:`_may_write` says who may contribute to a series, and following
+        is self-service: any account on open registration can follow the
+        owner's series and pass it. The row is global and the upsert keeps no
+        history, so that alone let a stranger replace the transcript the owner
+        reads as his overlay and his search results. A stored transcript now
+        belongs to whoever contributed it; only they, or the owner (admin),
+        may replace it. A row with no recorded contributor predates the
+        column being read, so it falls to the owner alone.
+        """
+        if self._user_id is not None and row.contributed_by_user_id == self._user_id:
+            return True
+        return self._is_admin()
+
     def ingest_chapter(
         self,
         *,
@@ -161,7 +177,8 @@ class OcrIngestService:
 
         404 for a series this profile does not follow (or may not see), which
         is the same answer the reads give for it — off-limits stays
-        indistinguishable from absent on this route too.
+        indistinguishable from absent on this route too. 409 for a chapter
+        whose transcript another account contributed (:meth:`_may_replace`).
         """
         series_key = fully_unquote(series_key)
         chapter_key = fully_unquote(chapter_key)
@@ -188,6 +205,15 @@ class OcrIngestService:
                 ChapterOcr.chapter_key == chapter_key,
             )
         ).scalar_one_or_none()
+
+        if row is not None and not self._may_replace(row):
+            # A conflict, not a 404: the caller may already read this row, so
+            # pretending it is absent would only make the client retry.
+            raise AppError(
+                "Another reader's transcript is already stored for this chapter.",
+                code="ocr_transcript_taken",
+                status_code=409,
+            )
 
         if row is not None and wc == 0:
             # Never overwrite a good transcript with an empty one.
