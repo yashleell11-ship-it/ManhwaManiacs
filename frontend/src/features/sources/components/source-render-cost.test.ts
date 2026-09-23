@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -16,6 +19,13 @@ import { SourceSeriesGrid } from "./SourceSeriesGrid";
  */
 
 const REACT_MEMO = Symbol.for("react.memo");
+
+function readComponent(name: string): string {
+  return readFileSync(
+    join(process.cwd(), "src/features/sources/components", name),
+    "utf8",
+  );
+}
 
 /** Every class list in the markup that still asks for a backdrop blur. */
 function blurredClassLists(html: string): string[] {
@@ -91,5 +101,27 @@ describe("SourceSeriesCard", () => {
 describe("SourceSeriesGrid", () => {
   it("skips the render when the browse view re-renders around it", () => {
     expect((SourceSeriesGrid as unknown as { $$typeof: symbol }).$$typeof).toBe(REACT_MEMO);
+  });
+});
+
+describe("SourceBrowserView", () => {
+  const source = readComponent("SourceBrowserView.tsx");
+  const view = source.slice(
+    source.indexOf("export function SourceBrowserView"),
+    source.indexOf("\nfunction SourceSearchForm"),
+  );
+
+  it("finds the view and the search form", () => {
+    expect(view).toContain("<SourceSeriesGrid");
+    expect(source).toContain("function SourceSearchForm");
+  });
+
+  it("keeps each keystroke out of the view that renders the catalog", () => {
+    // The typed text is state on the form; the view holds only the settled
+    // query, so a keystroke does not re-render every loaded card.
+    expect(view).not.toContain("setSearch");
+    expect(view).not.toContain("useDebouncedValue(");
+    expect(view).not.toContain("<Input");
+    expect(view).toContain("<SourceSearchForm onQueryChange={setQuery}>");
   });
 });

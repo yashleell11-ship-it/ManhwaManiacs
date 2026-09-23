@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -56,15 +63,12 @@ export function SourceBrowserView({ sourceId }: SourceBrowserViewProps) {
     sourcesQuery.data?.find((source) => source.id === sourceId)?.icon_url ?? null;
 
   const initialGenre = searchParams.get("genre") ?? "";
-  const [search, setSearch] = useState("");
-  // Searches as it is typed, like every other box in the app. It used to run
-  // only on submit, so typing into it and waiting — which is what a search box
-  // teaches you to do — showed the unfiltered catalogue indefinitely.
-  const [query, searchNow] = useDebouncedValue(search.trim(), SEARCH_DEBOUNCE_MS);
+  // The settled search only. What is being typed lives in `SourceSearchForm`,
+  // so a keystroke re-renders the form and not this view and its catalog.
+  const [query, setQuery] = useState("");
   const [sort, setSort] = useState("default");
   const [genre, setGenre] = useState(initialGenre);
   const [prevInitialGenre, setPrevInitialGenre] = useState(initialGenre);
-  const searchRef = useRef<HTMLInputElement>(null);
 
   // Sync genre state when the URL-derived genre changes (e.g. back/forward
   // navigation). Adjusting state during render is React's recommended pattern
@@ -176,16 +180,6 @@ export function SourceBrowserView({ sourceId }: SourceBrowserViewProps) {
           : seriesQuery.refetch())
     : undefined;
 
-  useShortcut({
-    id: "sources.focus-search",
-    keys: "/",
-    description: "Focus source search",
-    group: "Sources",
-    handler: useCallback(() => {
-      searchRef.current?.focus();
-    }, []),
-  });
-
   return (
     <div className="p-6">
       <div className="mb-6 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -219,15 +213,7 @@ export function SourceBrowserView({ sourceId }: SourceBrowserViewProps) {
             </div>
           </div>
         </div>
-        <form
-          className="flex w-full max-w-2xl flex-col gap-2 sm:flex-row sm:items-center"
-          onSubmit={(event) => {
-            event.preventDefault();
-            // Enter and the button skip the wait: whoever pressed one has
-            // plainly finished typing.
-            searchNow();
-          }}
-        >
+        <SourceSearchForm onQueryChange={setQuery}>
           <label className="flex w-full min-w-0 flex-1 flex-col gap-1 sm:max-w-[11rem]">
             <span className="text-xs text-muted">Genre</span>
             <select
@@ -244,22 +230,7 @@ export function SourceBrowserView({ sourceId }: SourceBrowserViewProps) {
               ))}
             </select>
           </label>
-          <label className="flex min-w-0 flex-1 flex-col gap-1">
-            <span className="text-xs text-muted">Search</span>
-            <div className="flex gap-2">
-              <Input
-                ref={searchRef}
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search this source…"
-                aria-label="Search source"
-              />
-              <Button type="submit" className="shrink-0">
-                Search
-              </Button>
-            </div>
-          </label>
-        </form>
+        </SourceSearchForm>
       </div>
 
       {!query && browseModes.length > 1 ? (
@@ -354,5 +325,73 @@ export function SourceBrowserView({ sourceId }: SourceBrowserViewProps) {
         <p className="mt-4 text-center text-sm text-muted">End of results</p>
       ) : null}
     </div>
+  );
+}
+
+interface SourceSearchFormProps {
+  /** The genre picker, which shares the form's row. */
+  children: ReactNode;
+  /** Receives the trimmed search once typing settles, or at once on submit. */
+  onQueryChange: (query: string) => void;
+}
+
+/**
+ * The search box, and the keystrokes it holds.
+ *
+ * Its text used to be state on `SourceBrowserView`, which also renders the
+ * catalog, so every character typed re-rendered every series card loaded so
+ * far — hundreds, a few pages into a source. Held here, a keystroke renders
+ * this form alone, and the view hears about the search only when it settles,
+ * which is the only moment the catalog has anything new to show.
+ */
+function SourceSearchForm({ children, onQueryChange }: SourceSearchFormProps) {
+  const [search, setSearch] = useState("");
+  // Searches as it is typed, like every other box in the app. It used to run
+  // only on submit, so typing into it and waiting — which is what a search box
+  // teaches you to do — showed the unfiltered catalogue indefinitely.
+  const [query, searchNow] = useDebouncedValue(search.trim(), SEARCH_DEBOUNCE_MS);
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    onQueryChange(query);
+  }, [onQueryChange, query]);
+
+  useShortcut({
+    id: "sources.focus-search",
+    keys: "/",
+    description: "Focus source search",
+    group: "Sources",
+    handler: useCallback(() => {
+      searchRef.current?.focus();
+    }, []),
+  });
+
+  return (
+    <form
+      className="flex w-full max-w-2xl flex-col gap-2 sm:flex-row sm:items-center"
+      onSubmit={(event) => {
+        event.preventDefault();
+        // Enter and the button skip the wait: whoever pressed one has
+        // plainly finished typing.
+        searchNow();
+      }}
+    >
+      {children}
+      <label className="flex min-w-0 flex-1 flex-col gap-1">
+        <span className="text-xs text-muted">Search</span>
+        <div className="flex gap-2">
+          <Input
+            ref={searchRef}
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search this source…"
+            aria-label="Search source"
+          />
+          <Button type="submit" className="shrink-0">
+            Search
+          </Button>
+        </div>
+      </label>
+    </form>
   );
 }
