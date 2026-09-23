@@ -8,6 +8,7 @@ import {
   nextProgressPush,
   paragraphForBucket,
   progressForParagraph,
+  readingParagraphIndex,
   resumeScrollTop,
 } from "./progress";
 
@@ -107,6 +108,51 @@ describe("activeParagraphIndex", () => {
 
   it("survives an unmeasured chapter", () => {
     expect(activeParagraphIndex([], 400)).toBe(0);
+  });
+});
+
+describe("readingParagraphIndex", () => {
+  // A 45-paragraph chapter ending on a short line, then the end-of-chapter
+  // block (rule, "End of", length, Next card, links) and the article's bottom
+  // padding — about 400px of furniture under the last paragraph.
+  const offsets = Array.from({ length: 45 }, (_, index) => 300 + index * 110);
+  const lastTop = offsets[offsets.length - 1];
+  const scrollHeight = lastTop + 36 + 400;
+  const clientHeight = 900;
+  const options = { lineRatio: 0.35, endSlack: 48 };
+  const bottom = {
+    scrollTop: scrollHeight - clientHeight,
+    clientHeight,
+    scrollHeight,
+  };
+
+  it("finishes the chapter when it is scrolled to the end", () => {
+    const index = readingParagraphIndex(offsets, bottom, options);
+    expect(progressForParagraph(index, offsets.length).completed).toBe(true);
+  });
+
+  it("counts the end from within the edge slack", () => {
+    const nearly = { ...bottom, scrollTop: bottom.scrollTop - 40 };
+    expect(readingParagraphIndex(offsets, nearly, options)).toBe(44);
+  });
+
+  it("reads the paragraph under the line anywhere short of the end", () => {
+    const middle = { scrollTop: 2000, clientHeight, scrollHeight };
+    expect(readingParagraphIndex(offsets, middle, options)).toBe(
+      activeParagraphIndex(offsets, 2000 + clientHeight * 0.35),
+    );
+  });
+
+  it("does not finish a chapter a resume landed at the end of", () => {
+    const index = readingParagraphIndex(offsets, bottom, {
+      ...options,
+      placedByRestore: true,
+    });
+    expect(progressForParagraph(index, offsets.length).completed).toBe(false);
+  });
+
+  it("survives an unmeasured chapter", () => {
+    expect(readingParagraphIndex([], bottom, options)).toBe(0);
   });
 });
 

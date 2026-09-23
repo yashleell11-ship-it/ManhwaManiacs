@@ -92,6 +92,45 @@ export function activeParagraphIndex(
   return answer;
 }
 
+/** The scroll container's geometry at one moment, as the reader reads it. */
+export interface ReadingViewport {
+  scrollTop: number;
+  clientHeight: number;
+  scrollHeight: number;
+}
+
+/**
+ * The paragraph being read: the one under the reading line, `lineRatio` of the
+ * way down the viewport — except at the end of the scroll, where it is the
+ * last paragraph.
+ *
+ * The line alone can never reach the end of a chapter. At the bottom it still
+ * sits most of a screen above the end of the content, and below the last
+ * paragraph there is only the end-of-chapter block, so a last paragraph shorter
+ * than about six lines — which is how prose chapters end — never came under
+ * it. A chapter read to the bottom and left by "Back to the book", or the
+ * newest chapter with nothing after it, stayed a bucket or three short of
+ * complete and showed as unread.
+ *
+ * `placedByRestore` is true while the position is the one a resume or a
+ * bookmark jumped to: that landing is not reading, so a resume that runs out
+ * of scroll does not finish the chapter on the reader's behalf.
+ */
+export function readingParagraphIndex(
+  offsets: readonly number[],
+  view: ReadingViewport,
+  options: { lineRatio: number; endSlack: number; placedByRestore?: boolean },
+): number {
+  if (offsets.length === 0) return 0;
+  const atEnd =
+    view.scrollTop + view.clientHeight >= view.scrollHeight - options.endSlack;
+  if (atEnd && !options.placedByRestore) return offsets.length - 1;
+  return activeParagraphIndex(
+    offsets,
+    view.scrollTop + view.clientHeight * options.lineRatio,
+  );
+}
+
 /**
  * How far below a paragraph's top the reading line is put back when a chapter
  * resumes at it. A couple of pixels, so the scroll writer's rounding and a

@@ -51,9 +51,9 @@ import {
 } from "../paragraph-anchor";
 import { createParagraphRefs } from "../paragraph-refs";
 import {
-  activeParagraphIndex,
   paragraphForBucket,
   progressForParagraph,
+  readingParagraphIndex,
   resumeScrollTop,
 } from "../progress";
 import { createReadingPercent, type ReadingPercentStore } from "../reading-percent";
@@ -297,6 +297,11 @@ export function NovelChapterView({
   const offsetsRef = useRef<number[]>([]);
   const articleRef = useRef<HTMLElement>(null);
   const restoredRef = useRef(false);
+  /**
+   * Where the restore below left the scroll, until the reader moves off it.
+   * A landing at the end of the scroll is not the reader reaching the end.
+   */
+  const restoredTopRef = useRef<number | null>(null);
 
   // Kept in refs so the scroll listener is attached once per chapter rather
   // than re-attached on every render that changes a callback's identity.
@@ -388,6 +393,7 @@ export function NovelChapterView({
         scrollElement,
         target.point - scrollElement.clientHeight * READING_LINE_RATIO,
       );
+      restoredTopRef.current = scrollElement.scrollTop;
       return;
     }
 
@@ -401,6 +407,7 @@ export function NovelChapterView({
       scrollElement,
       resumeScrollTop(target, scrollElement.clientHeight, READING_LINE_RATIO),
     );
+    restoredTopRef.current = scrollElement.scrollTop;
   }, [hydrated, initialAnchor, initialBucket, paragraphCount, scrollElement]);
 
   const updateScrollState = useCallback(() => {
@@ -413,9 +420,19 @@ export function NovelChapterView({
 
     const offsets = offsetsRef.current;
     if (offsets.length === 0) return;
-    const index = activeParagraphIndex(
+    const restoredTop = restoredTopRef.current;
+    const placedByRestore = restoredTop !== null && Math.abs(scrollTop - restoredTop) < 1;
+    if (!placedByRestore) restoredTopRef.current = null;
+    // At the end of the scroll this is the last paragraph, so scrolling to the
+    // bottom finishes the chapter even with no next one to advance into.
+    const index = readingParagraphIndex(
       offsets,
-      scrollTop + clientHeight * READING_LINE_RATIO,
+      { scrollTop, clientHeight, scrollHeight },
+      {
+        lineRatio: READING_LINE_RATIO,
+        endSlack: SCROLL_EDGE_THRESHOLD,
+        placedByRestore,
+      },
     );
     onProgressRef.current(progressForParagraph(index, offsets.length));
   }, [readingPercent, scrollElement]);
