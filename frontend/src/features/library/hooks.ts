@@ -8,7 +8,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import type { SeriesId } from "@/types/api";
 import { libraryApi } from "./api";
 import {
@@ -21,6 +21,7 @@ import {
   buildFollowedIndex,
   fetchAllFollowed,
   FOLLOWED_PAGE_SIZE,
+  type FollowedIndex,
   followedIdFor,
 } from "./followed-index";
 import {
@@ -96,22 +97,49 @@ export function useAllFollowedSeries() {
   });
 }
 
+const NO_FOLLOWED: readonly FollowedSeries[] = [];
+const followedIndexes = new WeakMap<readonly FollowedSeries[], FollowedIndex>();
+
+/**
+ * The index over one fetched followed list, built once and shared by every
+ * caller holding that same list. It used to be built per consumer — three Maps
+ * over up to 1000 rows, once for each of up to 200 grid cards, at load and
+ * again after every library invalidation. Keyed weakly, so a replaced list
+ * takes its index with it.
+ */
+export function followedIndexFor(
+  rows: readonly FollowedSeries[] | undefined,
+): FollowedIndex {
+  const list = rows ?? NO_FOLLOWED;
+  let built = followedIndexes.get(list);
+  if (!built) {
+    built = buildFollowedIndex(list);
+    followedIndexes.set(list, built);
+  }
+  return built;
+}
+
 /**
  * Map of `"sourceId:seriesKey" -> followed_id` over the whole followed set, so
  * a `FollowButton` anywhere can tell whether its series is followed and get the
  * id it needs to unfollow. Shared cache. A series page asks through `lookup`
  * with its payload's `series_identity`, which also finds a follow made under
  * an older key of the same series.
+ *
+ * Returns named fields rather than spreading the query result. React Query
+ * re-renders a consumer only for the result fields it reads, and a spread reads
+ * every one of them — so each consumer also re-rendered when a fetch started,
+ * when it ended and when the data went stale, none of which it shows.
  */
 export function useFollowedIndex() {
-  const query = useAllFollowedSeries();
-  const followed = useMemo(() => buildFollowedIndex(query.data ?? []), [query.data]);
+  const { data, isLoading, isSuccess, isError } = useAllFollowedSeries();
+  const followed = followedIndexFor(data);
   const lookup = useCallback(
     (ref: SeriesId, seriesIdentity?: string | null) =>
       followedIdFor(followed, ref, seriesIdentity),
     [followed],
   );
-  return { ...query, ...followed, lookup };
+  return { data, isLoading, isSuccess, isError, ...followed, lookup };
 }
 
 export function followKey(ref: SeriesId): string {
