@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show File;
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
@@ -131,5 +132,49 @@ void main() {
 
       expect(adapter.requests.single.headers[appVersionHeader], '3.4.2+55');
     });
+  });
+
+  group('startAppVersionLookup', () {
+    test('a client built after the lookup has answered labels its very first '
+        'request', () async {
+      PackageInfo.setMockInitialValues(
+        appName: 'ManhwaManiacs',
+        packageName: 'xyz.manhwamaniacs.app',
+        version: '3.4.2',
+        buildNumber: '55',
+        buildSignature: '',
+      );
+      startAppVersionLookup();
+      await installedAppVersion();
+
+      // Straight into the interceptor, with no turn of the event loop in
+      // between for its own copy of the lookup to land.
+      final options = RequestOptions(path: '/auth/me');
+      AppVersionInterceptor().onRequest(options, RequestInterceptorHandler());
+
+      expect(options.headers[appVersionHeader], '3.4.2+55');
+    });
+
+    test('main starts it before it awaits anything or runs the app', () {
+      // Read relative to mobile/, where `flutter test` runs.
+      final source = File('lib/main.dart').readAsStringSync();
+      final body = source.substring(source.indexOf('Future<void> main()'));
+      final started = body.indexOf('startAppVersionLookup();');
+
+      expect(started, isNonNegative);
+      expect(started, lessThan(body.indexOf('await ')));
+      expect(started, lessThan(body.indexOf('runApp(')));
+    });
+  });
+
+  testWidgets('a lookup that never answers leaves no timer behind in a '
+      'fake-async test', (tester) async {
+    final options = RequestOptions(path: '/auth/me');
+    AppVersionInterceptor(lookUpVersion: () => Completer<String?>().future)
+        .onRequest(options, RequestInterceptorHandler());
+    await tester.pump();
+
+    expect(options.headers.containsKey(appVersionHeader), isFalse);
+    // testWidgets itself fails a test that ends with a timer still pending.
   });
 }
