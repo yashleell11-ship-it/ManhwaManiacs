@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useId, useRef } from "react";
+import { useEffect, useId, useLayoutEffect, useRef } from "react";
 import { cn } from "@/lib/cn";
 import { Button } from "@/components/ui/button";
+import { openDialogFocus } from "./dialog-focus";
 
 interface DialogProps {
   open: boolean;
@@ -17,46 +18,41 @@ const FOCUSABLE =
 
 export function Dialog({ open, onClose, title, children, className }: DialogProps) {
   const panelRef = useRef<HTMLDivElement>(null);
-  const previousFocusRef = useRef<HTMLElement | null>(null);
   // Per-instance: a fixed "dialog-title" id collides the moment two dialogs are
   // mounted at once (a confirm inside a sheet), and duplicate ids make
   // `aria-labelledby` point at whichever the browser found first.
   const titleId = useId();
 
+  // Callers pass `onClose` inline, so it is a new function on every render.
+  // Escape reads the latest one through this ref, which keeps it out of the
+  // effect below — see `dialog-focus.ts` for what keying on it cost.
+  const onCloseRef = useRef(onClose);
+  useLayoutEffect(() => {
+    onCloseRef.current = onClose;
+  });
+
+  // Once per open: take focus, trap Tab, and hand focus back on close or
+  // unmount (a dialog closed by unmounting it runs this cleanup too).
   useEffect(() => {
     if (!open) return;
 
-    previousFocusRef.current = document.activeElement as HTMLElement | null;
+    const focus = openDialogFocus({
+      previous: document.activeElement as HTMLElement | null,
+      focusables: () =>
+        Array.from(panelRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? []),
+      active: () => document.activeElement as HTMLElement | null,
+      onEscape: () => onCloseRef.current(),
+      schedule: (run) => requestAnimationFrame(run),
+      cancel: (handle) => cancelAnimationFrame(handle),
+    });
 
-    const panel = panelRef.current;
-    const focusable = panel?.querySelectorAll<HTMLElement>(FOCUSABLE);
-    const first = focusable?.[0];
-    requestAnimationFrame(() => first?.focus());
-
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        onClose();
-        return;
-      }
-      if (event.key !== "Tab" || !focusable?.length) return;
-
-      const firstEl = focusable[0];
-      const lastEl = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === firstEl) {
-        event.preventDefault();
-        lastEl.focus();
-      } else if (!event.shiftKey && document.activeElement === lastEl) {
-        event.preventDefault();
-        firstEl.focus();
-      }
-    };
-
+    const onKeyDown = (event: KeyboardEvent) => focus.onKeyDown(event);
     window.addEventListener("keydown", onKeyDown);
     return () => {
       window.removeEventListener("keydown", onKeyDown);
-      previousFocusRef.current?.focus();
+      focus.release();
     };
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
 
