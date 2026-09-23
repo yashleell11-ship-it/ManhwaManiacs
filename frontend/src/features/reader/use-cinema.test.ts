@@ -79,6 +79,20 @@ describe("createCinemaMachine", () => {
     machine.send({ type: "toggle" });
     expect(listener).toHaveBeenCalledTimes(2);
   });
+
+  it("wakes React once when a long scroll conceals, not once per stretch of it", () => {
+    const machine = createCinemaMachine();
+    machine.send({ type: "enable" });
+    machine.send({ type: "activity" });
+    const listener = vi.fn();
+    machine.subscribe(listener);
+
+    // Reading on through a chapter conceals every ~24px of scroll.
+    for (let stretch = 0; stretch < 100; stretch += 1) machine.send({ type: "conceal" });
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(machine.get()).toEqual({ enabled: true, chrome: "hidden" });
+  });
 });
 
 describe("useCinema", () => {
@@ -90,5 +104,11 @@ describe("useCinema", () => {
   it("renders from the machine rather than a reducer that re-renders on every event", () => {
     expect(source).not.toMatch(/\buseReducer\b/);
     expect(source).toMatch(/useSyncExternalStore\(\s*machine\.subscribe/);
+  });
+
+  it("hands pointer, key and scroll events to the autohide rules, not to a blanket reveal", () => {
+    // The bug: any pointermove, keydown or scroll here revealed the chrome.
+    expect(source).toMatch(/installChromeAutohide\(/);
+    expect(source).not.toMatch(/"pointermove"|"keydown"|"scroll"/);
   });
 });

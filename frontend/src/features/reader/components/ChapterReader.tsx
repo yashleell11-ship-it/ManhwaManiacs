@@ -210,7 +210,6 @@ export function ChapterReader({
 }: ChapterReaderProps) {
   const router = useRouter();
   const scrollElement = useScrollContainer();
-  const controlsVisible = useReaderStore((state) => state.controlsVisible);
   const toggleControls = useReaderStore((state) => state.toggleControls);
   const setControlsVisible = useReaderStore((state) => state.setControlsVisible);
   const {
@@ -339,11 +338,15 @@ export function ChapterReader({
     scrollElement,
     active: Boolean(chapter) && !isLoading && !error,
     onEnabledChange: setCinema,
+    // `atBottom` is only kept up to date by the strip's scroll.
+    atEnd: continuous && atBottom,
+    pagedPosition: continuous ? null : `${activeChapterKey}#${visiblePage}`,
   });
 
-  // The chrome follows cinema mode while it is engaged; otherwise the plain
-  // tap-to-toggle store value. Turning cinema off always leaves the chrome up.
-  const chromeVisible = cinemaCtl.enabled ? cinemaCtl.chromeVisible : controlsVisible;
+  // The chrome follows cinema mode while it is engaged; otherwise the store
+  // value that a tap toggles and reading hides (see `useCinema`). Turning
+  // cinema off always leaves the chrome up.
+  const chromeVisible = cinemaCtl.chromeVisible;
   const toggleCinema = useCallback(() => {
     cinemaCtl.toggle();
     if (cinemaCtl.enabled) setControlsVisible(true);
@@ -1191,7 +1194,10 @@ export function ChapterReader({
         above — the reader's own page loading is untouched, the service worker
         just answers those requests from the cache when the network is gone.
       */}
-      <div onClick={(event) => event.stopPropagation()} role="presentation">
+      {/* `data-reader-chrome` here and on the controls below: resting the
+          pointer or keyboard focus in either holds the chrome up, and focus
+          arriving in either brings it back (`chrome-autohide.ts`). */}
+      <div onClick={(event) => event.stopPropagation()} role="presentation" data-reader-chrome="">
         <DownloadChapterControl
           chapter={chapter}
           visiblePage={visiblePage}
@@ -1282,7 +1288,7 @@ export function ChapterReader({
         />
       )}
 
-      <div onClick={(event) => event.stopPropagation()} role="presentation">
+      <div onClick={(event) => event.stopPropagation()} role="presentation" data-reader-chrome="">
         <ReaderControls
           chapterTitle={chapterTitle}
           chapterPosition={chapterPosition}
