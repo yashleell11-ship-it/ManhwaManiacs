@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { ApiError } from "@/types/api";
 // Direct, not via the profiles barrel, which pulls in the picker components.
 import { useActiveProfileStore } from "@/features/profiles/store";
@@ -44,6 +44,35 @@ function forgetSignedInUser(): void {
 }
 
 /**
+ * Admit the account a login or registration just signed in.
+ *
+ * A session can end without sign-out running: it expires, or a password
+ * change or "sign out everywhere" on another device revokes it. Then only the
+ * 401 handler runs, which marks the user signed out and on purpose keeps the
+ * cache and the profile selection, so the same reader signing back in carries
+ * on where they were. A DIFFERENT account signing in on that tab inherited the
+ * cache, though: the previous account's profile list (fresh for 30s, kept for
+ * five minutes) filled the picker with its names and avatars, and the stale
+ * profile check reads that same list, so picking one was kept — and the new
+ * account browsed under someone else's profile id, seeing an empty library
+ * with 18+ closed. So a change of account is handled the way sign-out handles
+ * it: the selection is forgotten and every cached query dropped, before this
+ * account's user reaches the cache.
+ */
+export function adoptSignedInUser(queryClient: QueryClient, user: User): void {
+  const store = useActiveProfileStore.getState();
+  const previous = store.sessionUserId;
+  if (previous !== null && previous !== user.id) {
+    store.clearActiveProfile();
+    queryClient.removeQueries();
+  }
+  bindSignedInUser(user);
+  // Seed the current-user cache directly so the guard admits the app
+  // immediately, without a redundant /auth/me round-trip.
+  queryClient.setQueryData(CURRENT_USER_QUERY_KEY, user);
+}
+
+/**
  * The current signed-in user, or `null` when not authenticated. A 401 from
  * `/auth/me` is the normal "not signed in" outcome, so it resolves to `null`
  * rather than throwing; we never retry the probe.
@@ -81,10 +110,7 @@ export function useLogin() {
   return useMutation({
     mutationFn: (payload: LoginPayload) => authApi.login(payload),
     onSuccess: (data) => {
-      bindSignedInUser(data.user);
-      // Seed the current-user cache directly so the guard admits the app
-      // immediately, without a redundant /auth/me round-trip.
-      queryClient.setQueryData(CURRENT_USER_QUERY_KEY, data.user);
+      adoptSignedInUser(queryClient, data.user);
     },
   });
 }
@@ -94,8 +120,7 @@ export function useRegister() {
   return useMutation({
     mutationFn: (payload: RegisterPayload) => authApi.register(payload),
     onSuccess: (data) => {
-      bindSignedInUser(data.user);
-      queryClient.setQueryData(CURRENT_USER_QUERY_KEY, data.user);
+      adoptSignedInUser(queryClient, data.user);
       // Creating the first account flips `needs_bootstrap`; keep the gate fresh.
       void queryClient.invalidateQueries({ queryKey: BOOTSTRAP_QUERY_KEY });
     },
