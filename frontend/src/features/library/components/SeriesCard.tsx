@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { Check } from "lucide-react";
 import { libraryCoverUrl } from "@/features/library/api";
+import { cardActionVisibility } from "@/features/library/card-actions";
 import {
   DEFAULT_LIBRARY_DENSITY,
   type LibraryDensity,
@@ -213,12 +214,7 @@ function SeriesCardContent({
                   series={seriesRef}
                   followedId={series.id}
                   compact
-                  className={cn(
-                    "transition-opacity",
-                    isHovered
-                      ? "opacity-100"
-                      : "opacity-100 sm:opacity-0 sm:group-hover:opacity-100",
-                  )}
+                  className={cn("transition-opacity", cardActionVisibility(isHovered))}
                 />
                 <button
                   type="button"
@@ -232,9 +228,7 @@ function SeriesCardContent({
                   }}
                   className={cn(
                     "flex size-8 items-center justify-center rounded-full bg-black/50 backdrop-blur-sm transition-opacity",
-                    isHovered || series.is_favorite
-                      ? "opacity-100"
-                      : "opacity-100 sm:opacity-0 sm:group-hover:opacity-100",
+                    cardActionVisibility(isHovered || series.is_favorite),
                     series.is_favorite ? "text-primary" : "text-white/70 hover:text-white",
                   )}
                   aria-label={
