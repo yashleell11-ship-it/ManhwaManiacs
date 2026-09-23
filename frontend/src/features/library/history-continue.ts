@@ -2,7 +2,7 @@ import type { SourceChapterSummary } from "@/features/sources/types";
 import { readingOrder } from "@/features/reader/read-all";
 import { parseUtcTimestamp } from "@/lib/utc-time";
 import { libraryCoverUrl } from "./api";
-import type { ReadingHistoryItem } from "./types";
+import type { KnownChapter, ReadingHistoryItem, SeriesDetail } from "./types";
 
 /**
  * The history shelf — one tile per BOOK, and what its Continue opens.
@@ -118,6 +118,58 @@ export function seriesContinue(
     chapters,
   );
   return point ? { kind: "resume", point } : { kind: "caught-up" };
+}
+
+/** A library series page's payload, as far as Continue and its list read it. */
+export type LibrarySeriesChapters = Pick<
+  SeriesDetail,
+  "source_id" | "series_key" | "chapters" | "progress"
+>;
+
+/** The library payload's chapters in the shape the one rule reads. */
+function librarySourceChapters(detail: LibrarySeriesChapters): SourceChapterSummary[] {
+  return detail.chapters.map((chapter) => ({
+    id: chapter.key,
+    source_id: detail.source_id,
+    series_id: detail.series_key,
+    title: chapter.title ?? "",
+    number: chapter.number,
+    page_count: chapter.page_count ?? 0,
+    release_date: chapter.published_at,
+  }));
+}
+
+/**
+ * {@link seriesContinue} for the library's own series page.
+ *
+ * That page used to run a rule of its own that disagreed with this one at the
+ * edges: it put unnumbered chapters BEFORE numbered ones, and a caught-up
+ * reader was sent back into the last chapter at page 1. So the library page and
+ * the source or novel page for the same book could send the same reader to
+ * different places. It now asks this rule, through the payload it already has.
+ *
+ * The library overlay carries no read times, so between unnumbered chapters —
+ * the one place the rule looks at them — the first in reading order is taken.
+ */
+export function librarySeriesContinue(detail: LibrarySeriesChapters): SeriesContinue | null {
+  const progress: Record<string, SeriesChapterPosition> = {};
+  for (const [key, row] of Object.entries(detail.progress)) {
+    progress[key] = { page: row.last_page, completed: row.is_completed };
+  }
+  return seriesContinue(librarySourceChapters(detail), progress);
+}
+
+/**
+ * The library page's chapters, oldest first, in the order Continue walks them:
+ * by number, with unnumbered chapters after every numbered one in the order the
+ * source listed them. The list and the button then agree about what "next" is.
+ */
+export function libraryReadingOrder(detail: LibrarySeriesChapters): KnownChapter[] {
+  const byKey = new Map(detail.chapters.map((chapter) => [chapter.key, chapter]));
+  return readingOrder(librarySourceChapters(detail)).flatMap((entry) => {
+    const chapter = byKey.get(entry.chapterKey);
+    return chapter ? [chapter] : [];
+  });
 }
 
 /** Whether a chapter at (`number`, `readAt`) is further than the current pick. */

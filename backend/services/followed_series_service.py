@@ -679,8 +679,8 @@ class FollowedSeriesService:
         weeks before) after re-reading chapter 1, while chapter 5 sat half
         read. The row that speaks for a series is therefore the FURTHEST one
         in chapter order — the rule the library page, the series pages and the
-        history shelf all answer with (``resume-target.ts``,
-        ``history-continue.ts``, ``resume_location.dart``). For a novel
+        history shelf all answer with (``history-continue.ts``,
+        ``resume_location.dart``). For a novel
         ``chapter_number`` is the row ordinal, so this is reading order there
         too. A row with no number ranks below every numbered one, and a series
         that numbers nothing falls back to its newest row, which is the best

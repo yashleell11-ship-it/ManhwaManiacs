@@ -38,8 +38,8 @@ import {
   useNovelChapterSaver,
 } from "@/features/offline/chapter-savers";
 import { chapterLinksReady } from "../chapter-links";
+import { libraryReadingOrder, librarySeriesContinue } from "../history-continue";
 import { libraryReadAllHref } from "../read-all-link";
-import { compareChapters, hasStartedReading, resumeTarget } from "../resume-target";
 import { READING_STATUSES } from "../url-state";
 import type { SeriesDetail } from "../types";
 import { CoverImage } from "@/components/ui/cover-image";
@@ -94,13 +94,14 @@ export function SeriesDetailView({ seriesId }: SeriesDetailViewProps) {
 
   const orderedChapters = useMemo(() => {
     if (!series) return [];
-    const asc = [...series.chapters].sort(compareChapters);
+    const asc = libraryReadingOrder(series);
     return sort === "newest" ? asc.reverse() : asc;
   }, [series, sort]);
 
-  // Furthest-wins, from the module every client resolves "where was I" through.
-  const resume = useMemo(
-    () => (series ? resumeTarget(series.chapters, series.progress) : null),
+  // The one Continue rule — the source and novel pages ask it too — see
+  // `seriesContinue`.
+  const continueTo = useMemo(
+    () => (series ? librarySeriesContinue(series) : null),
     [series],
   );
 
@@ -209,20 +210,23 @@ export function SeriesDetailView({ seriesId }: SeriesDetailViewProps) {
   // poster's width, and a second `100vw` request for it would be the largest
   // cover download on the page.
   const cover = libraryCoverUrl(detail.cover_url, POSTER_SIZES);
-  const hasProgress = hasStartedReading(detail.progress);
   const linksReady = chapterLinksReady(isNovel);
   /**
    * Continue, in whichever reader this series calls for.
    *
-   * `resumeTarget.page` is the stored `last_page` either way: a novel has no
+   * The point's `page` is the stored `last_page` either way: a novel has no
    * pages, so its position rides in that same field as a progress bucket
    * (`features/novels/progress.ts`) and `useChapterHref` hands it to the novel
    * route's `?page=`. Neither medium's position is translated on the way out.
+   * Caught up, there is nothing to open, and the button says so instead.
    */
+  const continuePoint =
+    continueTo && continueTo.kind !== "caught-up" ? continueTo.point : null;
   const resumeHref =
-    linksReady && resume
-      ? chapterHref({ ...seriesRef, chapterKey: resume.chapter.key }, resume.page)
+    linksReady && continuePoint
+      ? chapterHref({ ...seriesRef, chapterKey: continuePoint.chapterKey }, continuePoint.page)
       : null;
+  const caughtUp = continueTo?.kind === "caught-up";
   /**
    * Read all, beside Continue and never instead of it. The source series page
    * has offered it since the run reader shipped, and this is the series page a
@@ -234,7 +238,7 @@ export function SeriesDetailView({ seriesId }: SeriesDetailViewProps) {
   const readAllTarget = libraryReadAllHref(
     seriesRef,
     detail.chapters.length,
-    hasProgress ? resume?.chapter.key ?? null : null,
+    continueTo?.kind === "resume" ? continueTo.point.chapterKey : null,
     isNovel,
   );
 
@@ -364,7 +368,7 @@ export function SeriesDetailView({ seriesId }: SeriesDetailViewProps) {
               ) : null}
             </div>
 
-            {resumeHref || readAllTarget ? (
+            {resumeHref || caughtUp || readAllTarget ? (
               <div className="mt-6 flex flex-wrap items-center gap-2">
                 {resumeHref ? (
                   <PrimaryPillButton
@@ -372,9 +376,10 @@ export function SeriesDetailView({ seriesId }: SeriesDetailViewProps) {
                     className="shadow-glow"
                     icon={<Play className="size-4 fill-current" />}
                   >
-                    {hasProgress ? "Continue" : "Read"}
+                    {continueTo?.kind === "start" ? "Read" : "Continue"}
                   </PrimaryPillButton>
                 ) : null}
+                {caughtUp ? <PrimaryPillButton disabled>All caught up</PrimaryPillButton> : null}
                 {readAllTarget ? (
                   <span
                     className="inline-flex"

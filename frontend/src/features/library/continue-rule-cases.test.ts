@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { resolveSeriesProgress } from "@/features/sources/series-progress";
-import { seriesContinue } from "./history-continue";
-import { caseBook, readingNavigationCases } from "./reading-navigation-cases.testkit";
+import {
+  libraryReadingOrder,
+  librarySeriesContinue,
+  seriesContinue,
+  type LibrarySeriesChapters,
+} from "./history-continue";
+import {
+  caseBook,
+  readingNavigationCases,
+  type CaseProgressRow,
+} from "./reading-navigation-cases.testkit";
 
 /**
  * The series pages' Continue, against the table the server's strip and the
@@ -68,5 +77,114 @@ describe("seriesContinue", () => {
       kind: "resume",
       point: { chapterKey: "b", page: 4 },
     });
+  });
+});
+
+/**
+ * The library's own series page, fed the way it is fed: its payload's chapter
+ * list and `progress` overlay, which carries no read times.
+ */
+function libraryPayload(book: string, rows: readonly CaseProgressRow[]): LibrarySeriesChapters {
+  return {
+    source_id: "fixture",
+    series_key: book,
+    chapters: readingNavigationCases.books[book].map((chapter) => ({
+      key: chapter.key,
+      number: chapter.number,
+      title: chapter.title,
+      published_at: null,
+    })),
+    progress: Object.fromEntries(
+      rows.map((row) => [
+        row.chapter_key,
+        { last_page: row.last_page, is_completed: row.is_completed },
+      ]),
+    ),
+  };
+}
+
+describe("the library series page answers the shared table too", () => {
+  for (const testCase of readingNavigationCases.continue) {
+    it(testCase.name, () => {
+      const answer = librarySeriesContinue(libraryPayload(testCase.book, testCase.progress));
+
+      if (testCase.expect === "caught_up") {
+        expect(answer).toEqual({ kind: "caught-up" });
+      } else if (testCase.expect === "start") {
+        expect(answer).toEqual({
+          kind: "start",
+          point: { chapterKey: readingNavigationCases.books[testCase.book][0].key, page: 1 },
+        });
+      } else {
+        expect(answer).toEqual({
+          kind: "resume",
+          point: { chapterKey: testCase.expect.chapter_key, page: testCase.expect.page },
+        });
+      }
+    });
+  }
+});
+
+describe("librarySeriesContinue", () => {
+  const chapters = [
+    { key: "extra", number: null, title: "Extra", published_at: null },
+    { key: "c1", number: 1, title: null, published_at: null },
+    { key: "c2", number: 2, title: null, published_at: null },
+  ];
+  const payload = (progress: LibrarySeriesChapters["progress"]): LibrarySeriesChapters => ({
+    source_id: "src",
+    series_key: "s",
+    chapters,
+    progress,
+  });
+
+  it("is null for a series with no chapters", () => {
+    expect(librarySeriesContinue({ ...payload({}), chapters: [] })).toBeNull();
+  });
+
+  it("starts at chapter 1, not at an unnumbered extra listed before it", () => {
+    expect(librarySeriesContinue(payload({}))).toEqual({
+      kind: "start",
+      point: { chapterKey: "c1", page: 1 },
+    });
+  });
+
+  it("a caught-up reader is told so, not sent back into the last chapter", () => {
+    const numbered = {
+      ...payload({
+        c1: { last_page: 20, is_completed: true },
+        c2: { last_page: 20, is_completed: true },
+      }),
+      chapters: chapters.filter((chapter) => chapter.number !== null),
+    };
+    expect(librarySeriesContinue(numbered)).toEqual({ kind: "caught-up" });
+  });
+
+  it("an unnumbered chapter never outranks a numbered one", () => {
+    expect(
+      librarySeriesContinue(
+        payload({
+          c1: { last_page: 7, is_completed: false },
+          extra: { last_page: 3, is_completed: false },
+        }),
+      ),
+    ).toEqual({ kind: "resume", point: { chapterKey: "c1", page: 7 } });
+  });
+});
+
+describe("libraryReadingOrder", () => {
+  it("lists numbered chapters by number, then unnumbered ones as the source listed them", () => {
+    const order = libraryReadingOrder({
+      source_id: "src",
+      series_key: "s",
+      progress: {},
+      chapters: [
+        { key: "side-a", number: null, title: null, published_at: null },
+        { key: "c2", number: 2, title: null, published_at: null },
+        { key: "side-b", number: null, title: null, published_at: null },
+        { key: "c1", number: 1, title: null, published_at: null },
+      ],
+    });
+    expect(order.map((chapter) => chapter.key)).toEqual(["c1", "c2", "side-a", "side-b"]);
   });
 });
