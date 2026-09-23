@@ -20,6 +20,7 @@ import {
 } from "../hooks";
 import { SHELF_PLATE_SIZES, coverPath } from "@/features/novels/shelf";
 import { sourceImageUrl } from "../api";
+import { browsePaging } from "../browse-paging";
 import { BrowseFreshness } from "./BrowseFreshness";
 import { SourceBrowseLoading } from "./SourceBrowseLoading";
 import { SourceLogo } from "./SourceLogo";
@@ -138,17 +139,42 @@ export function SourceBrowserView({ sourceId }: SourceBrowserViewProps) {
     [genreOptions, router, searchParams, sourceId],
   );
 
+  // A failed next page stops the scroll loader and keeps what is on screen;
+  // see `browse-paging.ts` for what it did before.
+  const paging = browsePaging({
+    itemCount: items.length,
+    hasNextPage: Boolean(seriesQuery.hasNextPage),
+    isFetchingNextPage: seriesQuery.isFetchingNextPage,
+    isFetchNextPageError: seriesQuery.isFetchNextPageError,
+    hasError: Boolean(seriesQuery.error),
+  });
+
   const loadMore = useCallback(() => {
-    if (seriesQuery.hasNextPage && !seriesQuery.isFetchingNextPage) {
+    if (
+      seriesQuery.hasNextPage &&
+      !seriesQuery.isFetchingNextPage &&
+      !seriesQuery.isFetchNextPageError
+    ) {
       void seriesQuery.fetchNextPage();
     }
   }, [seriesQuery]);
 
   const sentinelRef = useLoadMoreOnScroll(
-    Boolean(seriesQuery.hasNextPage),
+    paging.autoLoad,
     loadMore,
     seriesQuery.isFetchingNextPage || seriesQuery.isLoading,
   );
+
+  const errorMessage =
+    paging.showFullError && seriesQuery.error instanceof Error
+      ? seriesQuery.error.message
+      : undefined;
+  const retryFullError = paging.showFullError
+    ? () =>
+        void (paging.retry === "next-page"
+          ? seriesQuery.fetchNextPage()
+          : seriesQuery.refetch())
+    : undefined;
 
   useShortcut({
     id: "sources.focus-search",
@@ -278,10 +304,8 @@ export function SourceBrowserView({ sourceId }: SourceBrowserViewProps) {
                 ? `No results for “${query}” on this source.`
                 : "This source returned no books."
             }
-            errorMessage={
-              seriesQuery.error instanceof Error ? seriesQuery.error.message : undefined
-            }
-            onRetry={seriesQuery.error ? () => void seriesQuery.refetch() : undefined}
+            errorMessage={errorMessage}
+            onRetry={retryFullError}
           />
         ) : (
           <SourceSeriesGrid
@@ -289,10 +313,8 @@ export function SourceBrowserView({ sourceId }: SourceBrowserViewProps) {
             items={items}
             isLoading={seriesQuery.isLoading}
             query={query}
-            errorMessage={
-              seriesQuery.error instanceof Error ? seriesQuery.error.message : undefined
-            }
-            onRetry={seriesQuery.error ? () => void seriesQuery.refetch() : undefined}
+            errorMessage={errorMessage}
+            onRetry={retryFullError}
           />
         )}
         <SourceBrowseLoading
@@ -307,6 +329,25 @@ export function SourceBrowserView({ sourceId }: SourceBrowserViewProps) {
 
       {seriesQuery.isFetchingNextPage ? (
         <p className="mt-4 text-center text-sm text-muted">Loading more…</p>
+      ) : null}
+
+      {paging.showLoadMoreRetry ? (
+        <div
+          role="status"
+          className="mt-4 flex items-center justify-center gap-2 text-sm text-muted"
+        >
+          <span>Couldn’t load more.</span>
+          {/* The one page that failed — never `refetch`, which on an infinite
+              query reloads every page already shown. */}
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            onClick={() => void seriesQuery.fetchNextPage()}
+          >
+            Retry
+          </Button>
+        </div>
       ) : null}
 
       {!seriesQuery.hasNextPage && items.length > 0 && !seriesQuery.isLoading ? (
