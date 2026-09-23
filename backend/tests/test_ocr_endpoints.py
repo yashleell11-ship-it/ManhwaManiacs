@@ -12,6 +12,8 @@ that same profile 404s for everywhere else. The shape tests come after.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import connectors.registry as registry
@@ -26,6 +28,10 @@ SERIES = "the-max-level-hero"
 
 MATURE_SRC = "stub_mature_ocr"
 MATURE_SERIES = "gated-series"
+
+# The series' chapter list as the follow snapshot holds it. An upload is only
+# taken for a chapter the server has seen for the series.
+KNOWN = json.dumps([{"key": k} for k in ("c1", "c2", "c3")])
 
 
 @pytest.fixture
@@ -52,7 +58,7 @@ def follows(seed_follow, acct):
     """The caller's library. Reads are follow-scoped, so without this the
     endpoints correctly answer "nothing here"."""
     uid, pid = acct
-    seed_follow(uid, pid, source_id=SRC, series_key=SERIES)
+    seed_follow(uid, pid, source_id=SRC, series_key=SERIES, known_chapters=KNOWN)
 
 
 def _upload(api, h, chapter_key, text, engine="mlkit", source_id=SRC, series=SERIES):
@@ -165,7 +171,10 @@ def test_mature_source_transcript_is_gated_per_profile(
     adult = make_profile(user.id, "Adult", mature_content_enabled=True)
     kid = make_profile(user.id, "Kid", mature_content_enabled=False, sort_order=1)
     for pid in (adult.id, kid.id):
-        seed_follow(user.id, pid, source_id=MATURE_SRC, series_key=MATURE_SERIES)
+        seed_follow(
+            user.id, pid, source_id=MATURE_SRC, series_key=MATURE_SERIES,
+            known_chapters=KNOWN,
+        )
 
     adult_h = as_user(user.id, adult.id)
     assert _upload(
@@ -203,7 +212,8 @@ def test_mature_series_on_a_general_source_is_gated_per_profile(
     kid = make_profile(user.id, "Kid", mature_content_enabled=False, sort_order=1)
     for pid in (adult.id, kid.id):
         seed_follow(
-            user.id, pid, source_id=SRC, series_key=SERIES, mature_override=True
+            user.id, pid, source_id=SRC, series_key=SERIES, mature_override=True,
+            known_chapters=KNOWN,
         )
 
     adult_h = as_user(user.id, adult.id)
@@ -386,7 +396,7 @@ def test_search_is_scoped_to_followed_series(
     follow. Contributing now needs one too, so the non-follower here has to be
     a second account rather than the uploader before it followed."""
     uid, pid = acct
-    seed_follow(uid, pid, source_id=SRC, series_key=SERIES)
+    seed_follow(uid, pid, source_id=SRC, series_key=SERIES, known_chapters=KNOWN)
     _upload(api, h, "c1", "the crimson knight bellowed a challenge")
 
     other = make_user("ocr-searcher")
@@ -407,3 +417,64 @@ def test_search_is_scoped_to_followed_series(
 
 def test_search_blank_query_is_empty(api, h):
     assert api.get("/ocr/search", params={"q": "   "}, headers=h).json()["items"] == []
+
+
+# --- the chapter must be one the server has seen ----------------------------
+
+
+def test_an_invented_chapter_key_is_refused(api, h, follows, db_session):
+    """Following is self-service, so the follow gate alone let any account
+    follow the owner's series and POST ``<series>:99999`` -- a chapter that
+    does not exist -- stuffed with common words. Every follower, the owner
+    included, then got search hits and coverage for it. The key is now checked
+    against the chapters the server has seen for the series."""
+    from database.models import ChapterOcr
+
+    made = _upload(api, h, f"{SERIES}:99999", "the the the hero hero hero")
+    assert made.status_code == 404, made.text
+    assert made.json()["code"] == "chapter_not_found"
+    assert db_session.query(ChapterOcr).count() == 0
+
+    cov = api.get(
+        "/ocr/coverage", params={"source": SRC, "series": SERIES}, headers=h
+    ).json()
+    assert cov["chapters"] == []
+    hits = api.get("/ocr/search", params={"q": "hero"}, headers=h).json()
+    assert hits["items"] == []
+
+
+def test_a_chapter_only_the_series_cache_knows_is_accepted(
+    api, h, acct, seed_follow, db_session
+):
+    """The follow snapshot can lag the source (the sweep refreshes it); the
+    series' cached chapter list counts too, whatever its TTL."""
+    from database.models import SourceSeriesCache
+
+    uid, pid = acct
+    seed_follow(uid, pid, source_id=SRC, series_key=SERIES)  # empty snapshot
+    db_session.add(
+        SourceSeriesCache(
+            source_id=SRC, series_key=SERIES, chapters='[{"key": "fresh-ch"}]'
+        )
+    )
+    db_session.commit()
+
+    assert _upload(api, h, "fresh-ch", "a brand new chapter").status_code == 200
+    stale = _upload(api, h, "never-listed", "a chapter nobody listed")
+    assert stale.status_code == 404, stale.text
+    assert stale.json()["code"] == "chapter_not_found"
+
+
+def test_a_percent_encoded_key_matches_the_chapter_it_names(
+    api, h, acct, seed_follow
+):
+    """Keys are compared in the fully-unquoted form the row is stored under,
+    so a client that sends the key still encoded is not refused."""
+    uid, pid = acct
+    seed_follow(
+        uid, pid, source_id=SRC, series_key=SERIES,
+        known_chapters='[{"key": "chapter 1"}]',
+    )
+    up = _upload(api, h, "chapter%201", "the hero swung")
+    assert up.status_code == 200, up.text
+    assert up.json()["chapter_key"] == "chapter 1"

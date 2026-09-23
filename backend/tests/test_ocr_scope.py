@@ -16,6 +16,8 @@ would have caught both.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from core.errors import AppError
@@ -34,6 +36,27 @@ def accounts(make_user, make_profile):
     pa = make_profile(ua.id, "A")
     pb = make_profile(ub.id, "B")
     return {"ua": ua.id, "ub": ub.id, "pa": pa.id, "pb": pb.id}
+
+
+@pytest.fixture(autouse=True)
+def chapter_lists(db_session):
+    """The series' chapter lists as ``source_series_cache`` holds them.
+
+    An upload is only taken for a chapter the server has seen for the series;
+    the follows these tests seed carry an empty snapshot, so this cache row is
+    what makes ``c1``..``c3`` real chapters here.
+    """
+    from database.models import SourceSeriesCache
+
+    for series_key in (SERIES, "safe-one"):
+        db_session.add(
+            SourceSeriesCache(
+                source_id=SRC,
+                series_key=series_key,
+                chapters=json.dumps([{"key": k} for k in ("c1", "c2", "c3")]),
+            )
+        )
+    db_session.commit()
 
 
 def _search_svc(db, user_id, profile_id):

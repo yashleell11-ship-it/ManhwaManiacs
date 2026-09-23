@@ -18,7 +18,11 @@ to 2,000,000 characters of its own text, which the owner then reads as the
 in-reader dialogue overlay and as search results, believing it to be his own
 scan. The upsert destroys the real transcript rather than versioning it. The
 write now runs the SAME predicate the reads do (:meth:`_may_write`), so a
-contributor may only supply OCR for a series their own profile follows.
+contributor may only supply OCR for a series their own profile follows, and
+only for a chapter of it the server has actually seen
+(:meth:`OcrIngestService._require_known_chapter`) -- following is self-service,
+so without that a stranger could mint transcripts under invented chapter keys
+that every follower, the owner included, then got as search hits.
 """
 
 from __future__ import annotations
@@ -41,7 +45,7 @@ from core.content_rating import (
 from core.errors import AppError
 from core.profile_context import ProfileContext, resolve_profile_context
 from core.time_utils import utcnow
-from database.models import ChapterOcr, FollowedSeries, User
+from database.models import ChapterOcr, FollowedSeries, SourceSeriesCache, User
 from database.session import get_db
 from services.browse_service import BrowseService, get_browse_service
 
@@ -177,8 +181,10 @@ class OcrIngestService:
 
         404 for a series this profile does not follow (or may not see), which
         is the same answer the reads give for it — off-limits stays
-        indistinguishable from absent on this route too. 409 for a chapter
-        whose transcript another account contributed (:meth:`_may_replace`).
+        indistinguishable from absent on this route too. 404 as well for a
+        chapter key the server has never seen for that series
+        (:meth:`_require_known_chapter`). 409 for a chapter whose transcript
+        another account contributed (:meth:`_may_replace`).
         """
         series_key = fully_unquote(series_key)
         chapter_key = fully_unquote(chapter_key)
@@ -186,6 +192,7 @@ class OcrIngestService:
             raise AppError(
                 "Series not found.", code="series_not_found", status_code=404
             )
+        self._require_known_chapter(source_id, series_key, chapter_key)
 
         normalized_pages = [
             {
@@ -229,7 +236,10 @@ class OcrIngestService:
                 status_code=400,
             )
 
-        page_texts = json.dumps(normalized_pages)
+        # ensure_ascii=False: stored as UTF-8, so a CJK character costs its 3
+        # bytes and an emoji its 4, not the 6 and 12 of \u escapes. What is
+        # measured below is exactly this string, so either way the bound holds.
+        page_texts = json.dumps(normalized_pages, ensure_ascii=False)
         self._require_stored_bytes_room(
             normalized_pages, page_texts, full_text, replacing=row
         )
@@ -261,6 +271,74 @@ class OcrIngestService:
             self._db.execute(
                 select(User.is_admin).where(User.id == self._user_id)
             ).scalar_one_or_none()
+        )
+
+    @staticmethod
+    def _chapter_keys_of(blob: str | None) -> list[str]:
+        """The chapter keys in a stored chapter-list blob.
+
+        ``followed_series.known_chapters`` and ``source_series_cache.chapters``
+        both hold ``{"key": ...}`` entries; a connector's own list says
+        ``id``. A malformed blob is treated as an empty list, never an error.
+        """
+        if not blob:
+            return []
+        try:
+            entries = json.loads(blob)
+        except ValueError:
+            return []
+        if not isinstance(entries, list):
+            return []
+        keys: list[str] = []
+        for entry in entries:
+            if isinstance(entry, dict):
+                key = entry.get("key") or entry.get("id")
+                if key:
+                    keys.append(str(key))
+        return keys
+
+    def _require_known_chapter(
+        self, source_id: str, series_key: str, chapter_key: str
+    ) -> None:
+        """Refuse OCR for a chapter the server has never seen for this series.
+
+        Following is self-service, so the follow gate lets any account write
+        to the owner's series, and ``chapter_key`` came straight from the
+        body: a stranger could post ``<series>:99999`` stuffed with common
+        words, and every follower -- the owner included -- got search hits
+        and coverage for a chapter that does not exist.
+
+        A key is known when it is in the caller's own follow snapshot
+        (``known_chapters``, which the update sweep keeps current and which
+        the caller necessarily has -- :meth:`_may_write` just found the row)
+        or in the series' ``source_series_cache`` chapter list, read here
+        regardless of its TTL: an expired list still names chapters that
+        exist. Keys are compared fully unquoted, the form the row is stored
+        under. Nothing is fetched upstream: that would cost a live source
+        request per refused upload.
+        """
+        blobs = (
+            self._db.execute(
+                select(FollowedSeries.known_chapters).where(
+                    FollowedSeries.user_id == self._user_id,
+                    FollowedSeries.profile_id == self._profile_id,
+                    FollowedSeries.source_id == source_id,
+                    FollowedSeries.series_key == series_key,
+                )
+            ).scalar_one_or_none(),
+            self._db.execute(
+                select(SourceSeriesCache.chapters).where(
+                    SourceSeriesCache.source_id == source_id,
+                    SourceSeriesCache.series_key == series_key,
+                )
+            ).scalar_one_or_none(),
+        )
+        for blob in blobs:
+            for key in self._chapter_keys_of(blob):
+                if key == chapter_key or fully_unquote(key) == chapter_key:
+                    return
+        raise AppError(
+            "Chapter not found.", code="chapter_not_found", status_code=404
         )
 
     @staticmethod
@@ -297,8 +375,14 @@ class OcrIngestService:
         wrote a ~36 MiB ``page_texts`` row -- at the rate limit's 200/hour,
         about 7 GB an hour from one account against a 14 GB free disk. So the
         geometry is measured here, after normalization, where it is exactly
-        what SQLite will be handed. Only the geometry: a transcript the text
-        cap admits must still be storable whatever its script.
+        what SQLite will be handed.
+
+        Geometry alone was not enough: a character is not a byte. Two million
+        emoji were 24 MB of escaped ``page_texts`` plus 8 MB of ``full_text``
+        -- a 32 MB row inside the character cap -- and the per-account ceiling
+        below is dodged by registering more accounts. So the whole row is
+        measured too, as the UTF-8 bytes of both columns exactly as written,
+        and held to ``max_ocr_row_bytes`` whoever sends it.
 
         The per-account sum is what stops a stream of individually-legal
         uploads doing the same thing more slowly. A replacement is charged
@@ -306,6 +390,19 @@ class OcrIngestService:
         exempt -- the ceiling is for accounts open registration hands out.
         """
         settings = get_settings()
+        try:
+            incoming = len(page_texts.encode("utf-8")) + len(
+                full_text.encode("utf-8")
+            )
+        except UnicodeEncodeError:
+            # A lone surrogate (``"\ud800"`` is legal JSON) cannot be stored
+            # as UTF-8; refused here rather than as a 500 from the commit.
+            raise AppError(
+                "OCR text is not valid Unicode.",
+                code="ocr_text_invalid",
+                status_code=400,
+            ) from None
+
         geometry_limit = settings.max_ocr_geometry_bytes
         if (
             geometry_limit > 0
@@ -316,6 +413,15 @@ class OcrIngestService:
                 code="ocr_payload_too_large",
                 status_code=413,
                 details={"max_geometry_bytes": geometry_limit},
+            )
+
+        row_limit = settings.max_ocr_row_bytes
+        if row_limit > 0 and incoming > row_limit:
+            raise AppError(
+                "OCR upload is too large to store.",
+                code="ocr_payload_too_large",
+                status_code=413,
+                details={"max_row_bytes": row_limit},
             )
 
         account_limit = settings.max_ocr_bytes_per_account
@@ -331,8 +437,6 @@ class OcrIngestService:
         if replacing is not None:
             stmt = stmt.where(ChapterOcr.id != replacing.id)
         used = int(self._db.execute(stmt).scalar_one() or 0)
-        # ``page_texts`` is ``json.dumps`` output, so ASCII: len() is bytes.
-        incoming = len(page_texts) + len(full_text.encode("utf-8"))
         if used + incoming > account_limit:
             raise AppError(
                 "OCR storage limit reached for this account.",
@@ -344,12 +448,11 @@ class OcrIngestService:
     def _require_chapter_room(self, source_id: str, series_key: str) -> None:
         """Bound how many chapters of ONE series may carry a transcript.
 
-        ``chapter_key`` is an opaque connector string that nothing validates
-        against the source, so the follow gate alone still leaves one axis
-        unbounded: a contributor who follows a series may mint new rows under
-        invented chapter keys forever, and each row is worth up to the route's
-        whole-payload ceiling. Counting uses ``ix_chapter_ocr_series``, so this
-        is an index probe rather than a scan of the stored text.
+        Invented chapter keys are refused by :meth:`_require_known_chapter`;
+        this is the backstop behind it, for a series whose known chapter list
+        is itself implausibly long, since each row is worth up to the row
+        ceiling. Counting uses ``ix_chapter_ocr_series``, so this is an index
+        probe rather than a scan of the stored text.
 
         Only creates are charged — replacing an existing chapter's transcript
         adds no rows and must keep working at the cap.

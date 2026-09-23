@@ -180,12 +180,12 @@ class Settings(BaseModel):
     # Per-(user, profile) ceiling on followed series — bounds the sweep's row
     # count at its source. Overridable via MM_MAX_FOLLOWS_PER_PROFILE.
     max_follows_per_profile: int = 1000
-    # Per-series ceiling on chapters carrying an OCR transcript. ``chapter_key``
-    # is an opaque connector string that nothing validates against the source,
-    # so the follow gate on POST /ocr/chapter still leaves one axis unbounded:
-    # a contributor may mint rows under invented chapter keys forever, each
-    # worth up to the route's whole-payload ceiling. No real series runs past
-    # a few thousand chapters. Zero disables the guard.
+    # Per-series ceiling on chapters carrying an OCR transcript. An upload is
+    # only accepted for a chapter key the server has already seen for the
+    # series (``OcrIngestService._require_known_chapter``), so invented keys
+    # are refused outright; this is the backstop behind that check, for a
+    # chapter list that is itself implausibly long. No real series runs past a
+    # few thousand chapters. Zero disables the guard.
     # MM_MAX_OCR_CHAPTERS_PER_SERIES.
     max_ocr_chapters_per_series: int = 5000
     # Byte ceilings on what POST /ocr/chapter STORES. The route's model caps
@@ -201,6 +201,16 @@ class Settings(BaseModel):
     # either guard. MM_MAX_OCR_GEOMETRY_BYTES / MM_MAX_OCR_BYTES_PER_ACCOUNT.
     max_ocr_geometry_bytes: int = 2_000_000
     max_ocr_bytes_per_account: int = 256_000_000
+    # Ceiling on ONE row as stored: the UTF-8 bytes of ``page_texts`` plus
+    # ``full_text``, measured on exactly what SQLite is handed. The character
+    # cap alone is not a byte cap -- a character can cost 4 bytes (emoji), or 6
+    # once JSON escapes it (control characters) -- and the per-account ceiling
+    # is dodged by registering more accounts, so this is the bound that holds
+    # per upload whoever sends it: 200 uploads an hour per IP times this is the
+    # most one address can write. A real chapter stores tens of KB; 4 MB is
+    # the ~3.8 MB-per-upload budget ``rate_limit_ocr`` is sized around. The
+    # owner is held to it too. Zero disables the guard. MM_MAX_OCR_ROW_BYTES.
+    max_ocr_row_bytes: int = 4_000_000
 
     # Authentication (P1). Runtime-only; overridable via env for deployment.
     # registration_enabled gates self-service signup *after* the bootstrap
@@ -333,6 +343,7 @@ def get_settings() -> Settings:
         ("MM_MAX_OCR_CHAPTERS_PER_SERIES", "max_ocr_chapters_per_series"),
         ("MM_MAX_OCR_GEOMETRY_BYTES", "max_ocr_geometry_bytes"),
         ("MM_MAX_OCR_BYTES_PER_ACCOUNT", "max_ocr_bytes_per_account"),
+        ("MM_MAX_OCR_ROW_BYTES", "max_ocr_row_bytes"),
         ("MM_BOOTSTRAP_WINDOW_MINUTES", "bootstrap_window_minutes"),
         ("MM_BROWSE_CACHE_TTL_MINUTES", "browse_cache_ttl_minutes"),
         ("MM_BROWSE_CACHE_MAX_ROWS", "browse_cache_max_rows"),

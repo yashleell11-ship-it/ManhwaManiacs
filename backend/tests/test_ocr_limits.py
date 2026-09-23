@@ -8,6 +8,8 @@ and capped, with a whole-payload text ceiling.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from routes.ocr import (
@@ -19,6 +21,8 @@ from routes.ocr import (
 
 SRC = "mangadex"
 SERIES = "bounded-series"
+# Uploads are only taken for a chapter the server has seen for the series.
+KNOWN = json.dumps([{"key": k} for k in ("c1", "c2", "c3")])
 
 
 @pytest.fixture
@@ -40,7 +44,7 @@ def follows(seed_follow, acct):
     whose upload is meant to be ACCEPTED needs this; the rejection tests below
     are refused by the payload validator before the service is ever reached."""
     uid, pid = acct
-    seed_follow(uid, pid, source_id=SRC, series_key=SERIES)
+    seed_follow(uid, pid, source_id=SRC, series_key=SERIES, known_chapters=KNOWN)
 
 
 def _upload(client, h, pages):
@@ -351,8 +355,144 @@ def test_the_owner_is_not_held_to_the_account_ceiling(
 ):
     owner = make_user("ocr-owner", is_admin=True)
     profile = make_profile(owner.id, "Main")
-    seed_follow(owner.id, profile.id, source_id=SRC, series_key=SERIES)
+    seed_follow(
+        owner.id, profile.id, source_id=SRC, series_key=SERIES, known_chapters=KNOWN
+    )
     owner_h = as_user(owner.id, profile.id)
 
     for key in ("c1", "c2", "c3"):
         assert _chapter_of_bytes(client, owner_h, key).status_code == 200
+
+
+# --- the row as STORED, whatever script the text is in ---------------------
+
+
+def _row_bytes(db_session, chapter_key):
+    from database.models import ChapterOcr
+
+    db_session.expire_all()
+    row = (
+        db_session.query(ChapterOcr)
+        .filter_by(source_id=SRC, series_key=SERIES, chapter_key=chapter_key)
+        .one()
+    )
+    return len(row.page_texts.encode("utf-8")) + len(row.full_text.encode("utf-8"))
+
+
+def _pages_of(char, per_page, n_pages):
+    # Space-separated so the upload has words and is not refused as empty.
+    unit = (char + " ") * (per_page // 2)
+    return [{"page": n + 1, "text": unit} for n in range(n_pages)]
+
+
+def test_two_million_emoji_are_refused_by_what_they_would_store(
+    client, h, follows, db_session
+):
+    """The reported row: inside the 2M-character cap and with no geometry at
+    all, but ``page_texts`` was ``json.dumps`` with ASCII escapes, so each
+    emoji stored as a 12-byte surrogate pair -- ~32 MB a row. The per-account
+    ceiling admitted eight of them, and it is dodged by registering again."""
+    per_page = OCR_MAX_PAGE_TEXT_CHARS
+    n_pages = OCR_MAX_TOTAL_TEXT_CHARS // per_page
+    up = _upload(client, h, _pages_of("\U0001f600", per_page, n_pages))
+    assert up.status_code == 413, up.text
+    assert up.json()["code"] == "ocr_payload_too_large"
+    assert up.json()["details"]["max_row_bytes"] > 0
+    assert _stored_rows(db_session, "c1") == 0
+
+
+def test_control_characters_are_measured_as_their_escapes(
+    client, h, follows, db_session
+):
+    """JSON escapes a control character as six bytes whatever ``ensure_ascii``
+    says, so the bound is measured on the string actually written."""
+    per_page = OCR_MAX_PAGE_TEXT_CHARS
+    n_pages = OCR_MAX_TOTAL_TEXT_CHARS // per_page
+    up = _upload(client, h, _pages_of("\x01", per_page, n_pages))
+    assert up.status_code == 413, up.text
+    assert up.json()["code"] == "ocr_payload_too_large"
+    assert _stored_rows(db_session, "c1") == 0
+
+
+def test_a_real_chapter_in_any_script_is_stored_at_its_utf8_size(
+    client, h, follows, db_session
+):
+    """A long CJK chapter is stored, and costs its three bytes a character
+    (twice: ``page_texts`` and ``full_text``), not six escaped ones."""
+    pages = [{"page": n + 1, "text": "漢 " * 1_000} for n in range(60)]
+    up = _upload(client, h, pages)
+    assert up.status_code == 200, up.text
+    cjk_chars = 60 * 1_000
+    assert _row_bytes(db_session, "c1") < 2 * 4 * cjk_chars + 10_000
+    got = client.get(
+        "/ocr/chapter",
+        params={"source": SRC, "series": SERIES, "chapter": "c1"},
+        headers=h,
+    ).json()
+    assert got["page_texts"][0]["text"].startswith("漢 漢")
+
+
+@pytest.fixture
+def small_row_cap(monkeypatch):
+    from core.config import get_settings
+
+    monkeypatch.setenv("MM_MAX_OCR_ROW_BYTES", "10000")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def test_the_row_ceiling_binds_the_owner_too(
+    client, make_user, make_profile, as_user, seed_follow, small_row_cap
+):
+    """The per-account ceiling exempts the owner; the per-row one is what
+    bounds a single upload, so it holds for everyone."""
+    owner = make_user("ocr-row-owner", is_admin=True)
+    profile = make_profile(owner.id, "Main")
+    seed_follow(
+        owner.id, profile.id, source_id=SRC, series_key=SERIES, known_chapters=KNOWN
+    )
+    owner_h = as_user(owner.id, profile.id)
+
+    # 2,000 emoji: ~10 KB in each of page_texts and full_text as UTF-8.
+    over = _upload(client, owner_h, _pages_of("\U0001f600", 4_000, 1))
+    assert over.status_code == 413, over.text
+    assert over.json()["details"]["max_row_bytes"] == 10000
+
+    ok = _upload(client, owner_h, [{"page": 1, "text": "the hero spoke"}])
+    assert ok.status_code == 200, ok.text
+
+
+def test_a_lone_surrogate_is_refused_not_a_server_error(
+    db_session, acct, follows
+):
+    """Text UTF-8 cannot hold (``"\\ud800"`` is legal JSON) cannot be measured
+    as stored bytes either; the service refuses it as a client error rather
+    than letting the encode raise."""
+    from core.errors import AppError
+    from services.ocr_ingest_service import OcrIngestService
+    from tests._fakes import FakeBrowse
+
+    uid, pid = acct
+    svc = OcrIngestService(db_session, FakeBrowse(), user_id=uid, profile_id=pid)
+    with pytest.raises(AppError) as exc:
+        svc.ingest_chapter(
+            source_id=SRC,
+            series_key=SERIES,
+            chapter_key="c1",
+            pages=[{"page": 1, "text": "hi \ud800 there"}],
+        )
+    assert exc.value.status_code == 400
+    assert exc.value.code == "ocr_text_invalid"
+    assert _stored_rows(db_session, "c1") == 0
+
+
+def test_the_default_row_ceiling_keeps_the_per_upload_budget():
+    """``rate_limit_ocr`` is sized around ~3.8 MB stored per upload; the row
+    ceiling is what makes that true for any script, and sits far above a real
+    chapter (tens of KB)."""
+    from core.config import get_settings
+
+    get_settings.cache_clear()
+    ceiling = get_settings().max_ocr_row_bytes
+    assert 1_000_000 <= ceiling <= 4_000_000

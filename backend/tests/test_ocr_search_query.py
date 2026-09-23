@@ -128,7 +128,10 @@ def h(as_user, acct):
 @pytest.fixture
 def seeded(client, h, acct, seed_follow):
     uid, pid = acct
-    seed_follow(uid, pid, source_id=SRC, series_key=SERIES)
+    seed_follow(
+        uid, pid, source_id=SRC, series_key=SERIES,
+        known_chapters='[{"key": "c1"}]',
+    )
     up = client.post(
         "/ocr/chapter",
         json={

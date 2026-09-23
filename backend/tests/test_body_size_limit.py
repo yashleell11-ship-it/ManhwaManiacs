@@ -316,16 +316,28 @@ def test_the_restore_allowance_can_be_raised_without_a_code_change(monkeypatch):
 
 def _ocr_payload(pages: int, chars_per_page: int) -> dict:
     # Three-byte CJK, sent raw (as the app's jsonEncode does), so a payload
-    # inside the route's 2M-character bound is still well past 2 MiB.
+    # inside the route's 2M-character bound is still well past 2 MiB. The text
+    # rides in the recognized blocks (ten a page), the page text is short:
+    # that keeps the row as STORED under the service's per-row byte ceiling,
+    # which counts page text twice (``page_texts`` and ``full_text``).
+    per_box = chars_per_page // 10
     return {
         "source_id": SRC,
         "series_key": SERIES,
         "chapter_key": "ch-1",
         "chapter_number": 1.0,
-        "language": "en",
+        "language": "ja",
         "engine": "mlkit",
         "pages": [
-            {"page": p + 1, "text": "漢" * chars_per_page} for p in range(pages)
+            {
+                "page": p + 1,
+                "text": "漢字",
+                "boxes": [
+                    {"text": "漢" * per_box, "x": 0.1, "y": 0.1 * b}
+                    for b in range(10)
+                ],
+            }
+            for p in range(pages)
         ],
     }
 
@@ -334,7 +346,10 @@ def test_a_signed_in_ocr_upload_past_the_default_is_stored(
     app, client, h, seed_follow, acct, session_factory
 ):
     uid, pid = acct
-    seed_follow(uid, pid, source_id=SRC, series_key=SERIES)
+    seed_follow(
+        uid, pid, source_id=SRC, series_key=SERIES,
+        known_chapters='[{"key": "ch-1"}]',
+    )
     app.dependency_overrides[get_browse_service] = lambda: FakeBrowse()
     raw = json.dumps(
         _ocr_payload(pages=100, chars_per_page=10_000), ensure_ascii=False

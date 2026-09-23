@@ -247,7 +247,11 @@ def ocr_client(client, monkeypatch, make_user, make_profile, seed_follow, as_use
     get_settings.cache_clear()
     user = make_user("ocr-flood")
     profile = make_profile(user.id, "Main")
-    seed_follow(user.id, profile.id, source_id=OCR_SRC, series_key=OCR_SERIES)
+    # Uploads are only taken for chapters the server has seen for the series.
+    seed_follow(
+        user.id, profile.id, source_id=OCR_SRC, series_key=OCR_SERIES,
+        known_chapters='[{"key": "c0"}, {"key": "c1"}, {"key": "c2"}]',
+    )
     yield client, as_user(user.id, profile.id)
     get_settings.cache_clear()
 
