@@ -335,8 +335,12 @@ function MangaSeriesDetailView({
             page already does it (`SeriesDetailView`). Left uncapped, a 2:3
             cover at the full width of a 375px phone is ~490px tall — the entire
             first screen is the cover, and the title, the buttons and the
-            chapter list all start below the fold. */}
-        <Card className="mx-auto w-full max-w-[200px] overflow-hidden rounded-3xl lg:mx-0 lg:max-w-none lg:sticky lg:top-24 lg:self-start">
+            chapter list all start below the fold.
+
+            `glass-flat`: an opaque cover fills this card, so its backdrop blur
+            showed nowhere, yet as a sticky surface it was re-blurred on every
+            frame the page scrolled beside it. */}
+        <Card className="glass-flat mx-auto w-full max-w-[200px] overflow-hidden rounded-3xl lg:mx-0 lg:max-w-none lg:sticky lg:top-24 lg:self-start">
           <div className="relative aspect-[2/3] w-full bg-surface-2">
             <CoverImage
               src={sourceImageUrl(series.cover_url, POSTER_SIZES)}
@@ -424,7 +428,11 @@ function MangaSeriesDetailView({
         </div>
       </div>
 
-      <Card className="mt-8">
+      {/* `glass-flat`: this card holds every chapter the source lists and spans
+          the page, so its backdrop blur re-read most of the viewport on every
+          scroll frame — over the shell's flat or smoothly graded background,
+          where a blur shows nothing. Same fill and edge, no blur. */}
+      <Card className="glass-flat mt-8">
         <CardHeader className="flex-row flex-wrap items-center justify-between gap-3">
           <CardTitle>Chapters</CardTitle>
           {chapters.length > 0 && !picker.selecting && (
@@ -536,8 +544,11 @@ function MangaSeriesDetailView({
                   onMouseLeave={hoverIntent.leave}
                   onFocus={() => hoverIntent.enter(chapter.id)}
                   onBlur={hoverIntent.leave}
+                  // `cv-row`: the list is never windowed and a long series
+                  // has hundreds of rows, so rows well off screen skip
+                  // layout and paint until they scroll near.
                   className={cn(
-                    "group flex flex-wrap items-center justify-between gap-3 px-2 py-3 transition-colors first:pt-0 hover:bg-surface-2/60",
+                    "cv-row group flex flex-wrap items-center justify-between gap-3 px-2 py-3 transition-colors first:pt-0 hover:bg-surface-2/60",
                     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/60",
                     completed && "bg-void/40",
                     picker.selecting && picked && "bg-primary/10",

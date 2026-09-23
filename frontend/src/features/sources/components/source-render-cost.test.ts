@@ -125,3 +125,19 @@ describe("SourceBrowserView", () => {
     expect(view).toContain("<SourceSearchForm onQueryChange={setQuery}>");
   });
 });
+
+describe("SourceSeriesDetailView", () => {
+  const source = readComponent("SourceSeriesDetailView.tsx");
+
+  it("paints the poster and the chapter list without a backdrop blur", () => {
+    const cards = [...source.matchAll(/<Card\b[^>]*>/g)].map(([tag]) => tag);
+    expect(cards).toHaveLength(2);
+    for (const card of cards) {
+      expect(card).toMatch(/className="glass-flat\b/);
+    }
+  });
+
+  it("lets chapter rows far off screen skip layout and paint", () => {
+    expect(source).toMatch(/"cv-row group flex flex-wrap items-center justify-between/);
+  });
+});
