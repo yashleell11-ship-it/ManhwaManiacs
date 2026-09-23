@@ -42,6 +42,16 @@ ProgressPush sourceProgressBackfillPush(
       lastReadAt: record.updatedAt.toUtc(),
     );
 
+/// Whether [record] says when it was read.
+///
+/// [SourceChapterProgress.fromJson] reads a missing or unparseable
+/// `updatedAt` as the epoch, and no real read happened at or before it. Such
+/// a record is not worth sending: the server treats a 1970 stamp as no stamp
+/// at all and dates the row the moment it arrives, which puts a chapter read
+/// at some unknown time at the front of Continue Reading.
+bool hasSourceProgressReadTime(SourceChapterProgress record) =>
+    record.updatedAt.millisecondsSinceEpoch > 0;
+
 /// What to queue for [records], oldest read first.
 ///
 /// At most [budget] chapters, the outbox's room under
@@ -49,7 +59,8 @@ ProgressPush sourceProgressBackfillPush(
 /// that every series' furthest chapter goes in regardless, since that is the
 /// one position a later re-read cannot restore without reading to it again.
 /// Records whose key cannot be split with certainty
-/// ([parseSourceProgressKey]) are left out.
+/// ([parseSourceProgressKey]) are left out, and so are records with no read
+/// time ([hasSourceProgressReadTime]).
 List<ProgressPush> planSourceProgressBackfill(
   Map<String, SourceChapterProgress> records, {
   Set<(String, String)> knownSeries = const {},
@@ -57,10 +68,15 @@ List<ProgressPush> planSourceProgressBackfill(
 }) {
   final pushes = <ProgressPush>[];
   var unparsed = 0;
+  final undated = <String>[];
   for (final entry in records.entries) {
     final key = parseSourceProgressKey(entry.key, knownSeries: knownSeries);
     if (key == null) {
       unparsed++;
+      continue;
+    }
+    if (!hasSourceProgressReadTime(entry.value)) {
+      undated.add(entry.key);
       continue;
     }
     pushes.add(sourceProgressBackfillPush(key, entry.value));
@@ -69,6 +85,16 @@ List<ProgressPush> planSourceProgressBackfill(
     appLogger.w(
       'source progress backfill: left out $unparsed record(s) whose key '
       'could not be split into series and chapter',
+    );
+  }
+  if (undated.isNotEmpty) {
+    const shown = 10;
+    final listed = undated.take(shown).join(', ');
+    final more =
+        undated.length > shown ? ' and ${undated.length - shown} more' : '';
+    appLogger.w(
+      'source progress backfill: left out ${undated.length} record(s) with no '
+      'readable read time: $listed$more',
     );
   }
 

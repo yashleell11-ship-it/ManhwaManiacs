@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -227,6 +228,44 @@ void main() {
       });
       expect(plan.map((p) => p.chapterKey), ['$_surviving:94']);
     });
+
+    test('a record with no readable read time is left out and logged, not '
+        'sent dated 1970', () {
+      final garbled = _asuraKey(_surviving, '93');
+      final missing = _asuraKey(_zenith, '107');
+      final records = {
+        garbled: SourceChapterProgress.fromJson(const {
+          'page': 12,
+          'pageCount': 40,
+          'completed': false,
+          'updatedAt': 'last tuesday',
+        }),
+        missing: SourceChapterProgress.fromJson(const {
+          'page': 40,
+          'pageCount': 40,
+          'completed': true,
+        }),
+        _asuraKey(_surviving, '94'): _record(readAt),
+      };
+      // What the model makes of both: the epoch, which is what used to go out.
+      expect(records[garbled]!.updatedAt.millisecondsSinceEpoch, 0);
+      expect(records[missing]!.updatedAt.millisecondsSinceEpoch, 0);
+
+      final logged = StringBuffer();
+      final plan = runZoned(
+        () => planSourceProgressBackfill(records, budget: 0),
+        zoneSpecification: ZoneSpecification(
+          print: (self, parent, zone, line) => logged.writeln(line),
+        ),
+      );
+
+      // Even with no budget, where every series' furthest chapter is kept
+      // regardless: Zenith's only chapter had no time, so Zenith sends none.
+      expect(plan.map((p) => p.chapterKey), ['$_surviving:94']);
+      expect(plan.single.lastReadAt, readAt);
+      expect(logged.toString(), contains(garbled));
+      expect(logged.toString(), contains(missing));
+    });
   });
 
   group('SourceProgressBackfill.run', () {
@@ -296,6 +335,28 @@ void main() {
       final zenith = rows.singleWhere((p) => p.seriesKey == _zenith);
       expect(zenith.lastReadAt, readAt.subtract(const Duration(days: 1)));
       expect(zenith.timeSpentSeconds, 0);
+      expect(prefs.getBool(sourceProgressBackfilledKey(1)), isTrue);
+    });
+
+    test('a stored record whose read time cannot be parsed is not queued, '
+        'and the run still completes', () async {
+      final container = await containerWith({
+        sourceProgressStorageKey(1): jsonEncode({
+          _asuraKey(_surviving, '94'): _record(readAt).toJson(),
+          _asuraKey(_zenith, '107'): {
+            'page': 6,
+            'pageCount': 40,
+            'completed': false,
+            'updatedAt': '20/09/2026',
+          },
+        }),
+      });
+
+      await container.read(sourceProgressBackfillProvider).run();
+
+      final rows = await queued('u1p1');
+      expect(rows.map((p) => p.chapterKey), ['$_surviving:94']);
+      expect(rows.single.lastReadAt, readAt);
       expect(prefs.getBool(sourceProgressBackfilledKey(1)), isTrue);
     });
 
