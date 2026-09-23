@@ -17,6 +17,7 @@ import {
   Bookmark as BookmarkIcon,
   BookmarkCheck,
   ChevronRight,
+  ListOrdered,
   TriangleAlert,
   Type,
 } from "lucide-react";
@@ -70,6 +71,8 @@ interface NovelChapterViewProps {
   seriesTitle: string;
   /** The book's own page — where Escape and the back arrow go. */
   seriesHref: string;
+  /** The book's contents, opened at this chapter (`novelContentsHref`). */
+  contentsHref: string;
   /** 1-based progress bucket to resume at. */
   initialBucket: number;
   /**
@@ -128,6 +131,7 @@ export function NovelChapterView({
   preferencesKey,
   seriesTitle,
   seriesHref,
+  contentsHref,
   initialBucket,
   initialAnchor = null,
   onBookmark,
@@ -546,6 +550,7 @@ export function NovelChapterView({
         surface={surface}
         seriesTitle={seriesTitle}
         seriesHref={seriesHref}
+        contentsHref={contentsHref}
         chapterLabel={heading.eyebrow ?? heading.title}
         readingPercent={readingPercent}
         onBookmark={paragraphCount > 0 ? handleBookmark : undefined}
@@ -798,6 +803,7 @@ function RunningHead({
   surface,
   seriesTitle,
   seriesHref,
+  contentsHref,
   chapterLabel,
   readingPercent,
   onBookmark,
@@ -810,6 +816,7 @@ function RunningHead({
   surface: ReturnType<typeof paletteSurface>;
   seriesTitle: string;
   seriesHref: string;
+  contentsHref: string;
   chapterLabel: string;
   /**
    * Subscribed to by the read-out and the hairline INDIVIDUALLY rather than
@@ -854,6 +861,17 @@ function RunningHead({
           <span className="truncate">{chapterLabel}</span>
         </p>
         <PercentReadout store={readingPercent} color={surface.muted} />
+        {/* The contents, at this chapter. Previous and next were the only way
+            to move through a book, and Shadow Slave has 3,188 chapters. */}
+        <Link
+          href={contentsHref}
+          aria-label="Contents"
+          title="Contents"
+          className="flex size-8 shrink-0 items-center justify-center rounded-lg transition-opacity hover:opacity-70 [@media(pointer:coarse)]:size-11"
+          style={{ color: surface.muted }}
+        >
+          <ListOrdered className="size-4" aria-hidden />
+        </Link>
         {/* The pointer equivalent of `b`. Set in the muted ink like every
             other piece of furniture in the head, so it is findable without
             competing with the prose. */}

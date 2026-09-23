@@ -29,7 +29,7 @@ export function chapterLabel(chapter: {
  * the expression would take "12" and the "." as a separator and leave the row
  * reading "5 Special".
  */
-const BARE_ORDINAL_PREFIX = /^\s*(\d+(?:\.\d+)?)\s*[.):\-–—]\s*(?=\D|$)/;
+export const BARE_ORDINAL_PREFIX = /^\s*(\d+(?:\.\d+)?)\s*[.):\-–—]\s*(?=\D|$)/;
 
 /**
  * Sources often embed the chapter number in the title ("Chapter 134",

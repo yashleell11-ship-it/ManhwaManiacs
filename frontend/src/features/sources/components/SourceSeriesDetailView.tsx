@@ -71,6 +71,8 @@ type ChapterSortOrder = "newest" | "oldest";
 interface SourceSeriesDetailViewProps {
   sourceId: string;
   seriesId: string;
+  /** A chapter to open the contents at; only a book's page uses it. */
+  focusChapterKey?: string | null;
 }
 
 /**

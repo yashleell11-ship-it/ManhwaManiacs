@@ -1,4 +1,6 @@
-import { chapterLabel } from "@/features/sources/chapter-label";
+import { readingOrder, type OrderedChapter } from "@/features/reader/read-all";
+import { BARE_ORDINAL_PREFIX, chapterLabel } from "@/features/sources/chapter-label";
+import type { SourceChapterSummary } from "@/features/sources/types";
 import { WORDS_PER_MINUTE } from "./reading-time";
 
 /**
@@ -152,6 +154,114 @@ export function tocEntry(chapter: {
  */
 export function formatChapterNumber(value: number): string {
   return Number.isFinite(value) ? String(value) : "";
+}
+
+// --- Go to chapter ----------------------------------------------------------
+
+/**
+ * "Chapter 120", "Ch. 45", "c-1: Prologue" — the number a source writes at the
+ * front of a title, behind a word for "chapter". "Chapter 12.5" is read whole.
+ */
+const WORD_PREFIX = /^\s*(?:chapter|chap|ch|c)\s*\.?\s*[-#]?\s*(\d+(?:\.\d+)?)(?!\d)/i;
+
+/** A title that is nothing but a number. */
+const BARE_NUMBER = /^\s*(\d+(?:\.\d+)?)\s*$/;
+
+/** "Volume 2 Chapter 15: Return" — the word, anywhere in the title. */
+const WORD_ANYWHERE = /\b(?:chapter|ch\.?)\s*[-#:]?\s*(\d+(?:\.\d+)?)(?!\d)/i;
+
+/**
+ * The chapter number a reader would say — the one printed in the title.
+ *
+ * Novel chapter keys and `number` are ROW ORDINALS, not the book's own
+ * numbering: TBATE's prologue is row 1 and a side story takes another row, so
+ * "Chapter 120" is row 122 there. A reader asking for chapter 120 means the
+ * title, so this reads the title first — in the shapes the novel sources
+ * actually write (novelfull's "Chapter 3188 Lost Soul", Royal Road's
+ * "1. Good Morning Brother", freewebnovel's "c-1: …") — and falls back to the
+ * row ordinal only for a title that carries no number at all ("Side Story:
+ * Sylvie"). Nothing is ever parsed out of, or computed into, a chapter KEY.
+ *
+ * The phone's port is `printedChapterNumber` in `novel_book.dart`; both answer
+ * `backend/tests/fixtures/reading_navigation_cases.json`.
+ */
+export function printedChapterNumber(chapter: {
+  title: string | null;
+  number: number | null;
+}): number | null {
+  const title = chapter.title ?? "";
+  for (const pattern of [WORD_PREFIX, BARE_ORDINAL_PREFIX, BARE_NUMBER, WORD_ANYWHERE]) {
+    const match = pattern.exec(title);
+    if (match) return Number(match[1]);
+  }
+  return chapter.number;
+}
+
+/** The number in whatever was typed — "120", "ch 120", "Chapter 529" — or null. */
+export function goToChapterQuery(query: string): number | null {
+  const match = /(\d+(?:\.\d+)?)/.exec(query);
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * Every chapter whose printed number is what was typed, in reading order.
+ *
+ * A LIST, never a single answer: printed numbers are not unique. TBATE's keys
+ * 531 and 532 are both titled "Chapter 529", and "1" is both the prologue
+ * ("c-1: Prologue") and chapter one. The caller shows each with its row, and
+ * the reader picks.
+ *
+ * Works only from the chapter list the page already holds — no source traffic
+ * — and is one regex pass per chapter, which is nothing for Shadow Slave's
+ * 3,188.
+ */
+export function goToChapterMatches(
+  chapters: readonly SourceChapterSummary[],
+  query: string,
+): OrderedChapter[] {
+  const wanted = goToChapterQuery(query);
+  if (wanted === null) return [];
+  return readingOrder(chapters).filter(
+    (chapter) => printedChapterNumber(chapter) === wanted,
+  );
+}
+
+/** Which slice of a long contents list is rendered. `end` is exclusive. */
+export interface TocWindow {
+  start: number;
+  end: number;
+}
+
+/**
+ * The slice of the contents to render around one chapter.
+ *
+ * "Show all" on a 3,188-chapter book lays out every row, which is the cost
+ * the list's cap exists to avoid. Going to chapter 3,000 instead renders a
+ * window of `size` rows with that chapter near the top — a little context
+ * above it and the rest below, because below is where a reader goes next.
+ */
+export function tocWindowAround(total: number, index: number, size: number): TocWindow {
+  if (total <= size) return { start: 0, end: total };
+  const above = Math.floor(size / 8);
+  const start = Math.min(Math.max(0, index - above), total - size);
+  return { start, end: start + size };
+}
+
+/** `step` more rows of the contents, earlier or later. */
+export function extendTocWindow(
+  window: TocWindow,
+  total: number,
+  direction: "earlier" | "later",
+  step: number,
+): TocWindow {
+  return direction === "earlier"
+    ? { start: Math.max(0, window.start - step), end: window.end }
+    : { start: window.start, end: Math.min(total, window.end + step) };
+}
+
+/** The DOM id of a contents row — what "Go to chapter" scrolls to. */
+export function tocRowId(chapterKey: string): string {
+  return `toc-${encodeURIComponent(chapterKey)}`;
 }
 
 // --- Chapter opener ---------------------------------------------------------

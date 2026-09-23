@@ -15,7 +15,7 @@ import { useScrollContainer } from "@/lib/scroll-container";
 import type { ChapterId } from "@/types/api";
 import { toNovelChapter } from "../api";
 import { prefetchNovelChapter, useNovelChapter } from "../hooks";
-import { novelChapterHref } from "../novel-link";
+import { novelChapterHref, novelContentsHref } from "../novel-link";
 import { novelSeriesKey } from "../preferences";
 import type { ParagraphAnchor } from "../paragraph-anchor";
 import { nextProgressPush, type NovelProgressPosition } from "../progress";
@@ -277,6 +277,10 @@ export function NovelReader({
       preferencesKey={novelSeriesKey(sourceId, seriesKey)}
       seriesTitle={seriesQuery.data?.title ?? seriesKey}
       seriesHref={seriesPageHref({ sourceId, seriesKey })}
+      // `activeChapterKey`, not the routed key: a seamless advance moves the
+      // chapter with no navigation, and the contents should open at the one
+      // on screen.
+      contentsHref={novelContentsHref({ sourceId, seriesKey, chapterKey: activeChapterKey })}
       initialBucket={resumeBucket}
       initialAnchor={resumeAnchor}
       onBookmark={handleBookmark}

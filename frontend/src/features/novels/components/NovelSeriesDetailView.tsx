@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useQueryClient } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BookX, CloudDownload, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -38,10 +38,16 @@ import { useNovelChapterSaver } from "@/features/offline/chapter-savers";
 import {
   byline,
   estimateSeriesLength,
+  extendTocWindow,
   formatChapterCount,
   formatEstimatedTotal,
   formatEstimatedWords,
+  goToChapterMatches,
+  goToChapterQuery,
   tocEntry,
+  tocRowId,
+  tocWindowAround,
+  type TocWindow,
 } from "../book";
 import { prefetchNovelChapterWindow, useCachedNovelWordCounts } from "../hooks";
 import { novelChapterHref } from "../novel-link";
@@ -53,6 +59,8 @@ import { BookPlate } from "./BookPlate";
 interface NovelSeriesDetailViewProps {
   sourceId: string;
   seriesId: string;
+  /** Open the contents at this chapter KEY — the reader's Contents button. */
+  focusChapterKey?: string | null;
 }
 
 /**
@@ -66,13 +74,18 @@ interface NovelSeriesDetailViewProps {
 const PREFETCH_CHAPTERS = 3;
 
 /**
- * Chapters rendered before the list asks to be expanded.
+ * Chapters rendered at once, and how many more each "Show" adds.
  *
  * A novel aggregator will happily list two thousand chapters, and two thousand
  * table-of-contents rows is a second of layout the reader did not ask for. The
- * cap is explicit and says what it is hiding.
+ * cap is explicit and says what it is hiding. It used to be lifted all at once
+ * by "Show all" — every one of Shadow Slave's 3,188 rows — so it now grows a
+ * window at a time, and "Go to chapter" renders a window around its target.
  */
 const VISIBLE_CHAPTERS = 400;
+
+/** How many matches "Go to chapter" lists before it says how many more. */
+const MAX_GO_TO_MATCHES = 12;
 
 /**
  * The front-matter plate: `w-[9rem]` (144px), `w-[10.5rem]` (168px) from `sm`.
@@ -95,6 +108,7 @@ type ChapterSortOrder = "newest" | "oldest";
 export function NovelSeriesDetailView({
   sourceId,
   seriesId,
+  focusChapterKey = null,
 }: NovelSeriesDetailViewProps) {
   const seriesQuery = useSourceSeriesDetail(sourceId, seriesId);
   const chaptersQuery = useSourceChapters(sourceId, seriesId);
@@ -107,7 +121,20 @@ export function NovelSeriesDetailView({
   const unfollowMutation = useUnfollow();
   const [feedback, setFeedback] = useState<string | null>(null);
   const [sortOrder, setSortOrder] = useState<ChapterSortOrder>("oldest");
-  const [showAll, setShowAll] = useState(false);
+  /** A slice the reader widened by hand; null means "derive it". */
+  const [tocRange, setTocRange] = useState<TocWindow | null>(null);
+  /** The chapter the contents are opened at, from the URL or "Go to". */
+  const [focusKey, setFocusKey] = useState<string | null>(focusChapterKey);
+  const [goToText, setGoToText] = useState("");
+  // A new `?chapter=` (the reader's Contents button, pressed again from a
+  // later chapter) re-aims the contents. Adjusted during render — React's
+  // pattern for state that follows a prop.
+  const [focusFromUrl, setFocusFromUrl] = useState(focusChapterKey);
+  if (focusChapterKey !== focusFromUrl) {
+    setFocusFromUrl(focusChapterKey);
+    setFocusKey(focusChapterKey);
+    setTocRange(null);
+  }
 
   // Reading position is server-owned; the local store only still carries
   // positions adopted from a pre-scoping device. See `series-progress.ts`.
@@ -147,6 +174,40 @@ export function NovelSeriesDetailView({
     () => seriesContinue(chapters, progressMap),
     [chapters, progressMap],
   );
+
+  const goToMatches = useMemo(
+    () => goToChapterMatches(chapters, goToText),
+    [chapters, goToText],
+  );
+
+  const focusIndex = focusKey
+    ? orderedChapters.findIndex((chapter) => chapter.id === focusKey)
+    : -1;
+  const tocWindow: TocWindow =
+    tocRange ??
+    (focusIndex !== -1
+      ? tocWindowAround(orderedChapters.length, focusIndex, VISIBLE_CHAPTERS)
+      : { start: 0, end: Math.min(orderedChapters.length, VISIBLE_CHAPTERS) });
+
+  // Bring the focused row into view once it is actually on the page — the
+  // series and its contents load separately, so the first pass may have no
+  // row to scroll to. Once per request: re-running on every render would
+  // fight the reader's own scrolling.
+  const scrolledTo = useRef<string | null>(null);
+  useEffect(() => {
+    if (!focusKey || focusIndex === -1 || scrolledTo.current === focusKey) return;
+    const row = document.getElementById(tocRowId(focusKey));
+    if (!row) return;
+    scrolledTo.current = focusKey;
+    row.scrollIntoView({ block: "center" });
+  }, [focusKey, focusIndex, tocWindow.start, tocWindow.end, seriesQuery.data]);
+
+  const goToChapter = useCallback((chapterKey: string) => {
+    scrolledTo.current = null;
+    setFocusKey(chapterKey);
+    setTocRange(null);
+    setGoToText("");
+  }, []);
 
   // Warm the opening chapters: "Start reading" becomes instant, and the length
   // estimate below gets its sample.
@@ -314,10 +375,13 @@ export function NovelSeriesDetailView({
   const estimatedWords = formatEstimatedWords(lengthEstimate);
   const estimatedTime = formatEstimatedTotal(lengthEstimate);
 
-  const visibleChapters =
-    showAll || orderedChapters.length <= VISIBLE_CHAPTERS
-      ? orderedChapters
-      : orderedChapters.slice(0, VISIBLE_CHAPTERS);
+  const visibleChapters = orderedChapters.slice(tocWindow.start, tocWindow.end);
+  const hiddenBefore = tocWindow.start;
+  const hiddenAfter = orderedChapters.length - tocWindow.end;
+  const widen = (direction: "earlier" | "later") =>
+    setTocRange(
+      extendTocWindow(tocWindow, orderedChapters.length, direction, VISIBLE_CHAPTERS),
+    );
 
   return (
     <div className="p-6">
@@ -443,6 +507,15 @@ export function NovelSeriesDetailView({
               <ChapterDownloadTrigger picker={picker} label="Pick chapters" />
             ) : null}
             {chapters.length > 1 ? (
+              <GoToChapterField
+                value={goToText}
+                onChange={setGoToText}
+                onSubmit={() => {
+                  if (goToMatches[0]) goToChapter(goToMatches[0].chapterKey);
+                }}
+              />
+            ) : null}
+            {chapters.length > 1 ? (
               <div className="flex items-center gap-3 text-xs">
                 {(["oldest", "newest"] as const).map((order) => (
                   <button
@@ -463,6 +536,10 @@ export function NovelSeriesDetailView({
               </div>
             ) : null}
           </div>
+
+          {goToText.trim() ? (
+            <GoToMatches query={goToText} matches={goToMatches} onPick={goToChapter} />
+          ) : null}
 
           {chapterListState === "loading" ? (
             <TocSkeleton />
@@ -507,10 +584,22 @@ export function NovelSeriesDetailView({
             </div>
           ) : (
             <>
+              {hiddenBefore > 0 ? (
+                <div className="pb-2 pt-4 text-center">
+                  <Button variant="ghost" onClick={() => widen("earlier")}>
+                    Show earlier chapters
+                    <span className="ml-1 font-mono text-xs tabular-nums text-muted">
+                      {hiddenBefore.toLocaleString()}
+                    </span>
+                  </Button>
+                </div>
+              ) : null}
               <ol className="divide-y divide-border/60">
                 {visibleChapters.map((chapter) => (
                   <TocRow
                     key={chapter.id}
+                    id={tocRowId(chapter.id)}
+                    focused={chapter.id === focusKey}
                     href={novelChapterHref({
                       sourceId,
                       seriesKey: seriesId,
@@ -526,10 +615,13 @@ export function NovelSeriesDetailView({
                   />
                 ))}
               </ol>
-              {visibleChapters.length < orderedChapters.length ? (
+              {hiddenAfter > 0 ? (
                 <div className="pt-6 text-center">
-                  <Button variant="secondary" onClick={() => setShowAll(true)}>
-                    Show all {orderedChapters.length.toLocaleString()} chapters
+                  <Button variant="secondary" onClick={() => widen("later")}>
+                    Show more chapters
+                    <span className="ml-1 font-mono text-xs tabular-nums text-muted">
+                      {hiddenAfter.toLocaleString()}
+                    </span>
                   </Button>
                 </div>
               ) : null}
@@ -544,8 +636,106 @@ export function NovelSeriesDetailView({
   );
 }
 
+/**
+ * "Go to chapter": a printed chapter number, typed.
+ *
+ * Text rather than `type="number"`: "ch 120" and "12.5" are both things a
+ * reader types, and a number input rejects the first and spins the second.
+ * Enter goes to the first match — the usual case, one chapter by that number.
+ */
+function GoToChapterField({
+  value,
+  onChange,
+  onSubmit,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          onSubmit();
+        } else if (event.key === "Escape") {
+          onChange("");
+        }
+      }}
+      placeholder="Go to chapter"
+      aria-label="Go to chapter number"
+      className="h-8 w-36 rounded-lg border border-border bg-transparent px-2.5 text-sm text-fg placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 [@media(pointer:coarse)]:h-11"
+    />
+  );
+}
+
+/**
+ * The chapters a typed number matches — every one, with its row.
+ *
+ * Printed numbers repeat (TBATE's rows 531 and 532 are both "Chapter 529"),
+ * so this never jumps on its own; the row number is what tells two matches
+ * apart.
+ */
+function GoToMatches({
+  query,
+  matches,
+  onPick,
+}: {
+  query: string;
+  matches: readonly { chapterKey: string; number: number | null; title: string }[];
+  onPick: (chapterKey: string) => void;
+}) {
+  const wanted = goToChapterQuery(query);
+  if (wanted === null) {
+    return <p className="pt-3 text-sm text-muted">Type a chapter number.</p>;
+  }
+  if (matches.length === 0) {
+    return (
+      <p className="pt-3 text-sm text-muted">
+        No chapter {wanted.toLocaleString()} in this book.
+      </p>
+    );
+  }
+  const shown = matches.slice(0, MAX_GO_TO_MATCHES);
+  return (
+    <div className="pt-3">
+      <ul className="flex flex-col gap-1">
+        {shown.map((match) => (
+          <li key={match.chapterKey}>
+            <button
+              type="button"
+              onClick={() => onPick(match.chapterKey)}
+              className="flex w-full items-baseline gap-3 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-fg/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 [@media(pointer:coarse)]:min-h-11"
+            >
+              <span className="min-w-0 flex-1 truncate font-book text-[0.975rem] text-fg">
+                {match.title || `Chapter ${wanted}`}
+              </span>
+              {match.number != null ? (
+                <span className="shrink-0 text-xs tabular-nums text-muted">
+                  row {match.number.toLocaleString()}
+                </span>
+              ) : null}
+            </button>
+          </li>
+        ))}
+      </ul>
+      {matches.length > shown.length ? (
+        <p className="px-2 pt-1 text-xs text-muted">
+          and {(matches.length - shown.length).toLocaleString()} more
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 /** One line of the contents: number, title, and how long it is. */
 function TocRow({
+  id,
+  focused,
   href,
   entry,
   wordCount,
@@ -555,6 +745,9 @@ function TocRow({
   selected,
   onPick,
 }: {
+  id: string;
+  /** The chapter "Go to" or the reader's Contents button opened the list at. */
+  focused: boolean;
   href: string;
   entry: { ordinal: string | null; title: string | null };
   wordCount: number | null;
@@ -573,9 +766,10 @@ function TocRow({
       : null;
 
   return (
-    <li>
+    <li id={id} className="scroll-mt-24">
       <Link
         href={href}
+        aria-current={focused ? "location" : undefined}
         // While the contents are in selection mode the row ticks rather than
         // opens. The whole line stays the hit area either way — a 20px checkbox
         // beside a full-width row would make choosing forty chapters harder
@@ -589,6 +783,7 @@ function TocRow({
         className={cn(
           "group flex items-baseline gap-4 py-3 transition-colors hover:bg-fg/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50",
           selecting && selected && "bg-primary/10",
+          focused && !selecting && "bg-primary/[0.07]",
         )}
       >
         {selecting ? (

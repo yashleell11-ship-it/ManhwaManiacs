@@ -1,16 +1,24 @@
 import { describe, expect, it } from "vitest";
 import {
+  caseBook,
+  readingNavigationCases,
+} from "@/features/library/reading-navigation-cases.testkit";
+import {
   byline,
   estimateSeriesLength,
+  extendTocWindow,
   formatChapterCount,
   formatChapterNumber,
   formatEstimatedTotal,
   formatEstimatedWords,
+  goToChapterMatches,
   isSceneBreak,
   MIN_DROP_CAP_LENGTH,
   MIN_LENGTH_SAMPLE,
+  printedChapterNumber,
   splitDropCap,
   tocEntry,
+  tocWindowAround,
 } from "./book";
 
 const LONG = "A".repeat(MIN_DROP_CAP_LENGTH + 20);
@@ -226,5 +234,70 @@ describe("isSceneBreak", () => {
     expect(isSceneBreak("   ")).toBe(false);
     // A long line of punctuation is a formatting accident, not an ornament.
     expect(isSceneBreak("*".repeat(60))).toBe(false);
+  });
+});
+
+// --- Go to chapter: the shared table (backend/tests/fixtures/
+// reading_navigation_cases.json), which the phone's port answers too.
+
+describe("printedChapterNumber", () => {
+  for (const { title, number, expect: printed } of readingNavigationCases.printed_numbers) {
+    it(`reads ${JSON.stringify(title)} (row ${number}) as ${printed}`, () => {
+      expect(printedChapterNumber({ title, number })).toBe(printed);
+    });
+  }
+});
+
+describe("goToChapterMatches", () => {
+  for (const { book, query, expect: keys } of readingNavigationCases.goto) {
+    it(`finds ${JSON.stringify(query)} in ${book} at rows [${keys.join(", ")}]`, () => {
+      expect(goToChapterMatches(caseBook(book), query).map((c) => c.chapterKey)).toEqual(keys);
+    });
+  }
+
+  it("never lands on the key that merely equals the typed number", () => {
+    // TBATE key 120 is printed "Chapter 118"; a number filter over keys would
+    // open it for "120" — two chapters short.
+    const matches = goToChapterMatches(caseBook("tbate"), "120");
+    expect(matches.map((c) => c.title)).toEqual(["Chapter 120"]);
+    expect(matches.map((c) => c.chapterKey)).not.toContain("120");
+  });
+
+  it("answers in reading order however the source listed the chapters", () => {
+    const reversed = [...caseBook("tbate")].reverse();
+    expect(goToChapterMatches(reversed, "529").map((c) => c.chapterKey)).toEqual(["531", "532"]);
+  });
+});
+
+describe("tocWindowAround", () => {
+  it("renders everything when the book fits", () => {
+    expect(tocWindowAround(120, 100, 400)).toEqual({ start: 0, end: 120 });
+  });
+
+  it("puts a far chapter near the top of a bounded window", () => {
+    // Shadow Slave: going to row 3,000 renders 400 rows, not 3,188.
+    expect(tocWindowAround(3188, 3000, 400)).toEqual({ start: 2788, end: 3188 });
+    expect(tocWindowAround(3188, 1500, 400)).toEqual({ start: 1450, end: 1850 });
+  });
+
+  it("never starts before the first row", () => {
+    expect(tocWindowAround(3188, 10, 400)).toEqual({ start: 0, end: 400 });
+  });
+});
+
+describe("extendTocWindow", () => {
+  it("grows earlier and later, and stops at the ends", () => {
+    expect(extendTocWindow({ start: 1450, end: 1850 }, 3188, "earlier", 400)).toEqual({
+      start: 1050,
+      end: 1850,
+    });
+    expect(extendTocWindow({ start: 100, end: 500 }, 3188, "earlier", 400)).toEqual({
+      start: 0,
+      end: 500,
+    });
+    expect(extendTocWindow({ start: 2788, end: 3000 }, 3188, "later", 400)).toEqual({
+      start: 2788,
+      end: 3188,
+    });
   });
 });
