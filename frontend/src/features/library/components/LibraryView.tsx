@@ -14,7 +14,7 @@ import { cn } from "@/lib/cn";
 import { BulkActionBar } from "./BulkActionBar";
 import { ContinueReading } from "./ContinueReading";
 import { LibraryToolbar } from "./LibraryToolbar";
-import { SeriesGrid } from "./SeriesGrid";
+import { SeriesGrid, type SeriesGridSelection } from "./SeriesGrid";
 import { libraryCoverUrl } from "../api";
 import { followedShelfNote } from "../read-state";
 import {
@@ -193,6 +193,14 @@ export function LibraryView() {
     writeLibraryDensity(next);
   }, []);
 
+  // One object for as long as the selection is unchanged. The grid is memoised
+  // on it, so a search keystroke or a bulk-progress tick re-renders this view
+  // without touching the up-to-200 cards under it.
+  const gridSelection = useMemo<SeriesGridSelection>(
+    () => ({ selecting, selectedIds: selection.ids, onSelect: handleSelect }),
+    [handleSelect, selecting, selection.ids],
+  );
+
   // The shelf addresses rows by their view-model key; the selection is keyed by
   // the numeric follow id, so the translation happens here rather than leaking
   // either shape into the other.
@@ -318,11 +326,7 @@ export function LibraryView() {
             isLoading={seriesQuery.isLoading}
             emptyState={emptyState}
             density={density}
-            selection={{
-              selecting,
-              selectedIds: selection.ids,
-              onSelect: handleSelect,
-            }}
+            selection={gridSelection}
           />
         )}
 

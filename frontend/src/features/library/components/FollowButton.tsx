@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { ApiError } from "@/types/api";
 import type { SeriesId } from "@/types/api";
 import { cn } from "@/lib/cn";
-import { useFollow, useFollowedIndex, useUnfollow } from "../hooks";
+import { followKey, useFollow, useFollowedIndex, useUnfollow } from "../hooks";
 
 interface FollowButtonProps {
   /** The series to follow / unfollow. */
@@ -26,20 +26,35 @@ interface FollowButtonProps {
  * control (spec §3.4, merges `SeriesFollowButton` + `LibraryMembershipButton`).
  * Following a series adds it to the profile's library and enables update
  * checks; unfollowing removes the row (reading progress survives).
+ *
+ * Only a button that does not know its follow-row id subscribes to the followed
+ * index. Every library card passes its id, and each of up to 200 cards used to
+ * hold its own observer on the whole followed set anyway — re-rendering on each
+ * of its fetches — for a lookup it never read.
  */
-export function FollowButton({
+export function FollowButton(props: FollowButtonProps) {
+  return props.followedId != null ? (
+    <FollowToggle {...props} resolvedId={props.followedId} />
+  ) : (
+    <IndexedFollowButton {...props} />
+  );
+}
+
+function IndexedFollowButton(props: FollowButtonProps) {
+  const { index } = useFollowedIndex();
+  return <FollowToggle {...props} resolvedId={index.get(followKey(props.series)) ?? null} />;
+}
+
+function FollowToggle({
   series,
-  followedId,
+  resolvedId,
   compact = false,
   className,
-}: FollowButtonProps) {
-  const index = useFollowedIndex();
+}: FollowButtonProps & { resolvedId: number | null }) {
   const follow = useFollow();
   const unfollow = useUnfollow();
   const [error, setError] = useState<string | null>(null);
 
-  const resolvedId =
-    followedId ?? index.index.get(`${series.sourceId}:${series.seriesKey}`) ?? null;
   const isFollowed = resolvedId !== null;
   const busy = follow.isPending || unfollow.isPending;
 
@@ -74,7 +89,10 @@ export function FollowButton({
         aria-label={label}
         title={error ?? label}
         className={cn(
-          "z-10 flex size-8 items-center justify-center rounded-full bg-black/50 backdrop-blur-sm transition-colors disabled:opacity-50",
+          // A solid fill rather than a frosted one: this sits on every library
+          // card, and each `backdrop-blur` was its own render pass redrawn on
+          // every scroll frame for a frost too small to see over a cover.
+          "z-10 flex size-8 items-center justify-center rounded-full bg-black/60 transition-colors disabled:opacity-50",
           isFollowed ? "text-primary" : "text-white/70 hover:text-white",
           error && "text-danger",
           className,

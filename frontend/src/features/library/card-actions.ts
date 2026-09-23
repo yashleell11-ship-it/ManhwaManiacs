@@ -12,6 +12,11 @@
  * its sibling while focus is anywhere in the card. The select checkbox beside
  * them already did the first half.
  *
+ * `pinned` is for an action that should always show — a favourite's star. Hover
+ * is not a reason to pin: the unpinned classes already reveal on hover in CSS,
+ * so a card needs no hover state of its own (and re-rendering a card on every
+ * pointer enter and leave is what tracking one cost).
+ *
  * Pure so the node test environment can hold it.
  */
 export function cardActionVisibility(pinned: boolean): string {

@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { cardActionVisibility } from "./card-actions";
 
 describe("cardActionVisibility", () => {
-  it("shows a pinned action (hovered, or already a favourite) outright", () => {
+  it("shows a pinned action (an existing favourite) outright", () => {
     expect(cardActionVisibility(true)).toBe("opacity-100");
   });
 

@@ -1,5 +1,6 @@
 "use client";
 
+import { memo } from "react";
 import { Compass, Library, SearchX, SlidersHorizontal, type LucideIcon } from "lucide-react";
 import { EmptyState, type EmptyStateAction } from "@/components/ui/empty-state";
 import {
@@ -71,7 +72,13 @@ function skeletonCount(density: LibraryDensity): number {
   }
 }
 
-export function SeriesGrid({
+/**
+ * Memoised, and hands each card plain values, so a re-render of the view above
+ * — a search keystroke, a bulk-progress tick — skips the grid, and a selection
+ * click re-renders only the cards whose `selected` changed. Callers keep
+ * `selection` referentially stable for this to hold.
+ */
+export const SeriesGrid = memo(function SeriesGrid({
   items,
   isLoading,
   emptyState = "library",
@@ -120,14 +127,8 @@ export function SeriesGrid({
     );
   }
 
-  const cardSelection = (series: FollowedSeries) =>
-    selection
-      ? {
-          selecting: selection.selecting,
-          selected: selection.selectedIds.has(series.id),
-          onSelect: selection.onSelect,
-        }
-      : undefined;
+  const selecting = selection?.selecting ?? false;
+  const onSelect = selection?.onSelect;
 
   return (
     <div
@@ -137,28 +138,33 @@ export function SeriesGrid({
         // Cards arrive in a short cascade rather than all in one frame. Not
         // applied while selecting: re-running an entrance every time the
         // selection changes would animate the grid on each click.
-        !selection?.selecting && "stagger-in",
+        !selecting && "stagger-in",
         // Shift-click drags the browser's own text selection across every card
         // it passes, which looks like a bug and hides the highlight.
-        selection?.selecting && "select-none",
+        selecting && "select-none",
       )}
     >
-      {items.map((series) =>
-        density === "list" ? (
+      {items.map((series) => {
+        const selected = selection?.selectedIds.has(series.id) ?? false;
+        return density === "list" ? (
           <SeriesListItem
             key={series.id}
             series={series}
-            selection={cardSelection(series)}
+            selecting={selecting}
+            selected={selected}
+            onSelect={onSelect}
           />
         ) : (
           <SeriesCard
             key={series.id}
             series={series}
             density={density}
-            selection={cardSelection(series)}
+            selecting={selecting}
+            selected={selected}
+            onSelect={onSelect}
           />
-        ),
-      )}
+        );
+      })}
     </div>
   );
-}
+});

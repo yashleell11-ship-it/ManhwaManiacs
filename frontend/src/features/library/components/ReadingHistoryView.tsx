@@ -130,7 +130,10 @@ function HistoryTile({
 
   return (
     <article className="content-in group min-w-0">
-      <div className="relative aspect-[2/3] w-full overflow-hidden rounded-2xl bg-surface-2 ring-1 ring-white/5 transition-all duration-300 group-hover:ring-primary/30">
+      {/* The hover ring changes at once. A ring is a box-shadow, which the
+          compositor cannot animate, so fading it repainted the tile on every
+          frame for 300ms; the cover's own scale still eases. */}
+      <div className="relative aspect-[2/3] w-full overflow-hidden rounded-2xl bg-surface-2 ring-1 ring-white/5 group-hover:ring-primary/30">
         {/* The cover opens the book's page, exactly as a library cover does.
             Continue sits beside it rather than inside it: a link inside a
             link is invalid markup and swallows the inner click. */}
@@ -173,8 +176,14 @@ function HistoryTile({
   );
 }
 
+/**
+ * A near-opaque fill, not a frosted one: the pill is on every tile of the
+ * shelf, and each `backdrop-blur` was its own render pass redrawn on every
+ * scroll frame. The extra opacity keeps the white text as legible over a bright
+ * cover as the frost did.
+ */
 const CONTINUE_CLASS =
-  "absolute bottom-2 right-2 inline-flex items-center gap-1 rounded-full bg-black/60 px-2.5 py-1 text-xs font-medium text-white backdrop-blur-sm transition-colors hover:bg-primary hover:text-primary-fg disabled:opacity-60 [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:px-3.5";
+  "absolute bottom-2 right-2 inline-flex items-center gap-1 rounded-full bg-black/70 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-primary hover:text-primary-fg disabled:opacity-60 [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:px-3.5";
 
 /**
  * Continue, by the one rule `historyResumePoint` states: an unfinished chapter
