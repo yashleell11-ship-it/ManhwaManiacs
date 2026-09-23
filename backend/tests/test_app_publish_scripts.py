@@ -1,11 +1,12 @@
-"""The scripts that put a build in front of phones publish in a safe order.
+"""The two scripts that put a build in front of phones publish in a safe order.
 
-``fetch-ios-build.sh`` advertises a version through a file that sits beside the
-binary it describes, and used to be able to leave that description pointing at
-a build the box was not serving: it published an .ipa, and stamped its release
+Both advertise a version through a file that sits beside the binary it
+describes, and both used to be able to leave that description pointing at a
+build the box was not serving: ``push.sh apk`` synced the pubspec before the APK
+upload, and ``fetch-ios-build.sh`` published an .ipa, and stamped its release
 done, when the release's ios-build.json had failed to download.
 
-These run the real scripts against stand-ins for curl and friends, so what is
+These run the real scripts against stand-ins for curl/ssh/scp/rsync, so what is
 asserted is what lands in the destination, not what the source says.
 """
 
@@ -152,3 +153,61 @@ def test_ios_release_is_not_published_when_its_metadata_fails(tmp_path: Path):
     assert _ipa_marker(dest) == "1086"
     assert json.loads((dest / "ios-build.json").read_text())["buildVersion"] == "1086"
 
+
+# ── push.sh apk ──────────────────────────────────────────────────────────────
+
+_RECORDER = """#!/usr/bin/env bash
+echo "$(basename "$0") $*" >> "$PUSH_LOG"
+"""
+
+
+def test_push_apk_publishes_the_binary_before_the_pubspec(tmp_path: Path):
+    # The pubspec names the release /app/version reports. Synced before the
+    # upload, it named a release the box could not serve for as long as the
+    # 43 MB scp took -- and for good if the scp then failed.
+    repo = tmp_path / "repo"
+    (repo / "ops" / "vps").mkdir(parents=True)
+    shutil.copy(OPS / "vps" / "push.sh", repo / "ops" / "vps" / "push.sh")
+    (repo / "mobile").mkdir()
+    (repo / "mobile" / "pubspec.yaml").write_text(
+        "name: manhwamaniacs\nversion: 3.3.1+53\n", encoding="utf-8"
+    )
+    apk_dir = repo / "mobile" / "build" / "app" / "outputs" / "flutter-apk"
+    apk_dir.mkdir(parents=True)
+    with zipfile.ZipFile(apk_dir / "app-release.apk", "w") as apk:
+        for abi in ("arm64-v8a", "armeabi-v7a"):
+            apk.writestr(f"lib/{abi}/libflutter.so", b"engine")
+            apk.writestr(f"lib/{abi}/libapp.so", b"https://app.manhwamaniacs.xyz")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool in ("rsync", "scp", "ssh"):
+        _stub(bin_dir, tool, _RECORDER)
+    log = tmp_path / "push.log"
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "HOME": str(tmp_path),
+        # No aapt2 here: the version gate notes that and moves on.
+        "ANDROID_HOME": str(tmp_path / "no-sdk"),
+        "MM_APK_NO_BUILD": "1",
+        "MM_VPS_HOST": "box",
+        "PUSH_LOG": str(log),
+    }
+
+    result = subprocess.run(
+        ["bash", str(repo / "ops" / "vps" / "push.sh"), "apk"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = log.read_text().splitlines()
+    upload = next(i for i, c in enumerate(calls) if c.startswith("scp "))
+    swap = next(i for i, c in enumerate(calls) if c.startswith("ssh ") and "mv -f" in c)
+    pubspec = next(
+        i for i, c in enumerate(calls) if c.startswith("rsync ") and "pubspec" in c
+    )
+    assert upload < swap < pubspec, calls

@@ -317,21 +317,23 @@ case "${1:-all}" in
     verify_apk "$APK"
     verify_apk_is_production "$APK"
     say "publishing the APK"
-    # The version endpoint reads the pubspec through a single-FILE bind mount,
-    # and `apk` is usually run on its own — so without this the box happily
-    # serves a 1.9.0 APK while /app/version still advertises the previous
-    # release. --inplace is load-bearing: replacing a bind-mounted file
-    # normally leaves the container holding the old inode, which would need a
-    # container recreate to clear.
-    say "syncing the pubspec the version endpoint reads"
-    rsync -a --inplace -e "ssh -o BatchMode=yes" \
-      "$REPO/mobile/pubspec.yaml" "$HOST:$REMOTE/mobile/pubspec.yaml"
     # Same-filesystem temp + mv so the backend never serves a half-written file.
     scp -o BatchMode=yes "$APK" "$HOST:/srv/manhwamaniacs/apk/.app-release.apk.tmp"
     ssh -o BatchMode=yes "$HOST" \
       'mv -f /srv/manhwamaniacs/apk/.app-release.apk.tmp /srv/manhwamaniacs/apk/app-release.apk \
        && sudo chown 1000:1000 /srv/manhwamaniacs/apk/app-release.apk \
        && ls -lh /srv/manhwamaniacs/apk/app-release.apk'
+    # Phones are offered the build read out of the served APK itself; the
+    # pubspec only supplies /app/version's release name, and `apk` is usually
+    # run on its own — so this keeps that name in step with the new binary.
+    # It goes AFTER the mv, never before: a pubspec that lands first names a
+    # release the box cannot serve yet, and one that lands while the scp then
+    # fails names it until somebody notices. --inplace is load-bearing:
+    # replacing a bind-mounted file normally leaves the container holding the
+    # old inode, which would need a container recreate to clear.
+    say "syncing the pubspec the version endpoint reads"
+    rsync -a --inplace -e "ssh -o BatchMode=yes" \
+      "$REPO/mobile/pubspec.yaml" "$HOST:$REMOTE/mobile/pubspec.yaml"
     say "https://app.manhwamaniacs.xyz now serves it" ;;
   *)
     echo "usage: $0 {all|frontend|backend|apk}" >&2; exit 2 ;;
