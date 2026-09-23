@@ -151,8 +151,12 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
 
     return Scaffold(
       backgroundColor: context.colors.bg,
+      // A new query is a reload, and it shows as loading. Skipping it drew the
+      // PREVIOUS query's sections under "N results found" for the whole
+      // fan-out, and the very first search "No results found", because the
+      // value carried over was the blank query's empty result. A pull to
+      // refresh of the same query still keeps its sections on screen.
       body: listAsync.when(
-        skipLoadingOnReload: true,
         loading: () => _SearchScrollView(
           scrollController: _scrollController,
           onRefresh: () => ref.read(searchListProvider.notifier).refresh(),

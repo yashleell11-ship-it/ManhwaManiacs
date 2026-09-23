@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -98,6 +100,42 @@ class _FakeSourcesRepository implements SourcesRepository {
     String chapterId,
   ) =>
       throw UnimplementedError();
+}
+
+/// A search that answers only when the test says so, per query, so the screen
+/// can be looked at while a query is still in flight.
+class _GatedSourcesRepository extends _FakeSourcesRepository {
+  final _gates = <String, Completer<Result<GroupedSearchResult>>>{};
+
+  Completer<Result<GroupedSearchResult>> gate(String query) =>
+      _gates.putIfAbsent(query, Completer.new);
+
+  @override
+  Future<Result<GroupedSearchResult>> searchGrouped(
+    String query, {
+    int page = 1,
+    int perPage = 40,
+  }) {
+    queries.add(query);
+    return gate(query).future;
+  }
+}
+
+GroupedSearchResult _oneHit(String title) => GroupedSearchResult(
+      groups: [
+        _group(
+          items: [GlobalSearchItem(kind: 'local', seriesId: '1', title: title)],
+        ),
+      ],
+      sourcesQueried: 12,
+    );
+
+/// Types [term] and lets the debounce fire, without waiting for an answer
+/// (the skeleton shown meanwhile never settles).
+Future<void> _type(WidgetTester tester, String term) async {
+  await tester.enterText(find.byType(TextField), term);
+  await tester.pump(const Duration(milliseconds: 350));
+  await tester.pump();
 }
 
 /// Source ids here are deliberately ones with no known favicon so [SourceLogo]
@@ -342,6 +380,47 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('SOURCE demonicscans md-1'), findsOneWidget);
+    });
+  });
+
+  group('SearchScreen (while a query is in flight)', () {
+    testWidgets('the first search says it is searching, not "No results found"',
+        (tester) async {
+      final repo = _GatedSourcesRepository();
+      await _pumpSearch(tester, repo);
+
+      await _type(tester, 'solo');
+
+      expect(repo.queries, ['solo']);
+      expect(find.text('Searching sources…'), findsOneWidget);
+      expect(find.text('No results found'), findsNothing);
+      expect(find.textContaining('results found'), findsNothing);
+
+      repo.gate('solo').complete(Ok(_oneHit('Solo A')));
+      await tester.pumpAndSettle();
+      expect(find.text('Solo A'), findsOneWidget);
+    });
+
+    testWidgets("a new query does not show the last one's results as its own",
+        (tester) async {
+      final repo = _GatedSourcesRepository();
+      await _pumpSearch(tester, repo);
+      await _type(tester, 'solo');
+      repo.gate('solo').complete(Ok(_oneHit('Solo A')));
+      await tester.pumpAndSettle();
+      expect(find.text('1 result found · 12 sources'), findsOneWidget);
+
+      await _type(tester, 'omni');
+
+      expect(repo.queries, ['solo', 'omni']);
+      expect(find.text('Solo A'), findsNothing);
+      expect(find.textContaining('result found'), findsNothing);
+      expect(find.text('Searching sources…'), findsOneWidget);
+
+      repo.gate('omni').complete(Ok(_oneHit('Omni P1')));
+      await tester.pumpAndSettle();
+      expect(find.text('Omni P1'), findsOneWidget);
+      expect(find.text('Solo A'), findsNothing);
     });
   });
 
