@@ -26,13 +26,20 @@ class TestDownloadsHarness {
   final Directory tempDir;
   final String _dbPath;
 
+  /// Every handle handed out, so [dispose] can close them before deleting.
+  final List<Future<Database>> _opened = [];
+
   static Future<TestDownloadsHarness> create() async {
     final tempDir = await Directory.systemTemp.createTemp('mm-downloads-test-');
     final dbPath = '${tempDir.path}/downloads.db';
     return TestDownloadsHarness._(tempDir, dbPath);
   }
 
-  Future<Database> openDatabase() => openDownloadsDatabase(overridePath: _dbPath);
+  Future<Database> openDatabase() {
+    final opened = openDownloadsDatabase(overridePath: _dbPath);
+    _opened.add(opened);
+    return opened;
+  }
 
   Future<BlobStore> openBlobStore() async {
     final dir = Directory('${tempDir.path}/blobs');
@@ -49,8 +56,31 @@ class TestDownloadsHarness {
         blobStore: openBlobStore(),
       );
 
+  /// Close every database handle, then delete the tree.
+  ///
+  /// Deleting under open handles raced on CI: a query still queued when the
+  /// test body ended recreated its journal files mid-delete, and the delete
+  /// failed with "Directory not empty" — a teardown failure reported against
+  /// whichever test happened to be running. `close()` waits for queued work,
+  /// so closing first removes the race; the short retry covers a blob write
+  /// that is still landing from work the test did not await.
   Future<void> dispose() async {
-    if (tempDir.existsSync()) await tempDir.delete(recursive: true);
+    for (final opened in _opened) {
+      try {
+        await (await opened).close();
+      } catch (_) {
+        // Already closed, or never opened: nothing left to wait for.
+      }
+    }
+    _opened.clear();
+    for (var attempt = 0; tempDir.existsSync(); attempt++) {
+      try {
+        await tempDir.delete(recursive: true);
+      } on FileSystemException {
+        if (attempt >= 20) rethrow;
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+    }
   }
 }
 
