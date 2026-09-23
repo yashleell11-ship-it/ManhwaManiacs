@@ -25,6 +25,7 @@ import json
 import os
 import struct
 import zipfile
+import zlib
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
@@ -1355,7 +1356,11 @@ def read_apk_release(apk: Path) -> tuple[str, int] | None:
     try:
         with zipfile.ZipFile(apk) as archive:
             release = _manifest_version(archive.read("AndroidManifest.xml"))
-    except (OSError, KeyError, zipfile.BadZipFile, struct.error, IndexError):
+    # zlib.error: a corrupt deflate stream inside an intact zip directory.
+    # ValueError: a manifest whose strings do not decode. Either used to escape
+    # and turn /app/version into a 500 for every phone asking.
+    except (OSError, KeyError, zipfile.BadZipFile, struct.error, IndexError,
+            zlib.error, ValueError):
         release = None
     _apk_release_cache = (key, release)
     return release

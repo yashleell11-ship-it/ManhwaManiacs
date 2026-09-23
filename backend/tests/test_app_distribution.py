@@ -555,3 +555,30 @@ def test_ios_download_treats_directory_path_as_not_published(
     ipa_dir.mkdir(parents=True)
     monkeypatch.setattr("routes.app_distribution.IPA_PATH", ipa_dir)
     assert client.get("/app/ios/download").status_code == 404
+
+
+def test_a_corrupt_apk_does_not_take_the_version_route_down(
+    client: TestClient, tmp_path: Path, monkeypatch
+):
+    # An intact zip directory around a corrupt deflate stream: reading the
+    # manifest raises zlib.error, which used to escape as a 500 on
+    # /app/version — every phone's update check failing at once. An unreadable
+    # APK falls back to the pubspec like a missing one.
+    pubspec = tmp_path / "pubspec.yaml"
+    pubspec.write_text("name: manhwamaniacs\nversion: 7.3.2+405\n", encoding="utf-8")
+    monkeypatch.setattr("routes.app_distribution.PUBSPEC_PATH", pubspec)
+    apk = tmp_path / "app-release.apk"
+    with zipfile.ZipFile(apk, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("AndroidManifest.xml", b"\x03\x00" * 4096)
+    raw = bytearray(apk.read_bytes())
+    # Flip bytes inside the compressed data, past the 30-byte local header and
+    # the 19-byte name, leaving the central directory intact.
+    for i in range(60, 90):
+        raw[i] ^= 0xFF
+    apk.write_bytes(bytes(raw))
+    monkeypatch.setattr("routes.app_distribution.APK_PATH", apk)
+
+    response = client.get("/app/version")
+
+    assert response.status_code == 200
+    assert response.json()["build"] == 405
