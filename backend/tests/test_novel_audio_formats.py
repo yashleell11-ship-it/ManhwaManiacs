@@ -37,13 +37,13 @@ CHAPTER = "ch-1"
 PARAGRAPHS = ["The first line.", "“Then we go,” he said."]
 
 
-def render(tmp_path, monkeypatch, *, fingerprint=None, timing=True):
+def render(tmp_path, monkeypatch, *, fingerprint=None, timing=True, segments=None):
     """A real opus on disk, the way /render/complete leaves it."""
     monkeypatch.setenv("MM_AUDIO_DIR", str(tmp_path))
     audio, timing_path = chapter_paths(STUB_SOURCE, SERIES, CHAPTER)
     make_opus(audio)
     if timing:
-        record = {"total_ms": 1500, "segments": [
+        record = {"total_ms": 1500, "segments": segments or [
             {"i": 0, "start_ms": 0, "end_ms": 1500, "p": 0, "s": 0, "e": 15,
              "voice": "v1", "speech": True},
         ]}
@@ -51,6 +51,17 @@ def render(tmp_path, monkeypatch, *, fingerprint=None, timing=True):
             record["text_fingerprint"] = fingerprint
         timing_path.write_text(json.dumps(record), encoding="utf-8")
     return audio
+
+
+def _voicing(paragraphs):
+    """A timing map voicing every paragraph the way the render cuts them: the
+    closing quote of a line of dialogue is left out of the spoken segment."""
+    segments = []
+    for p, text in enumerate(paragraphs):
+        end = len(text) - 1 if text.endswith("\u201d") else len(text)
+        segments.append({"i": p, "start_ms": p * 700, "end_ms": p * 700 + 700,
+                         "p": p, "s": 0, "e": end, "voice": "v1", "speech": True})
+    return segments
 
 
 def cache(db, paragraphs=PARAGRAPHS, *, chapter=CHAPTER):
@@ -228,11 +239,38 @@ class TestHighlightSafe:
         assert body["highlight_safe"] is False
         assert body["segments"]  # still served; the client just does not follow
 
-    def test_false_when_the_render_did_not_record_its_text(
+    def test_an_old_map_that_still_fits_the_text_keeps_follow_along(
         self, novels_on, db_session, tmp_path, monkeypatch
     ):
+        # Every chapter narrated before the fingerprint existed has a map like
+        # this. Answering false for all of them switched follow-along off for
+        # every chapter anyone had. The map is checked against the text
+        # instead: every paragraph voiced, each ending at its paragraph's end
+        # but for the closing quote the render leaves unspoken.
+        # The last paragraph is a line of dialogue: its closing quote is left
+        # unspoken, as it is in 116 of production's 488 narrated paragraphs.
+        text = PARAGRAPHS + ["\u201cRun.\u201d"]
+        cache(db_session, text)
+        render(tmp_path, monkeypatch, fingerprint=None, segments=_voicing(text))
+
+        assert meta(novels_on)["highlight_safe"] is True
+
+    def test_an_old_map_over_edited_text_does_not_follow(
+        self, novels_on, db_session, tmp_path, monkeypatch
+    ):
+        # The same map, but a word was added to the first paragraph since: its
+        # last segment no longer reaches the paragraph's end.
+        cache(db_session, [PARAGRAPHS[0].replace("first", "very first"), PARAGRAPHS[1]])
+        render(tmp_path, monkeypatch, fingerprint=None, segments=_voicing(PARAGRAPHS))
+
+        assert meta(novels_on)["highlight_safe"] is False
+
+    def test_an_old_map_that_skips_a_paragraph_does_not_follow(
+        self, novels_on, db_session, tmp_path, monkeypatch
+    ):
+        # A paragraph the map never voices is text the render never saw.
         cache(db_session)
-        render(tmp_path, monkeypatch, fingerprint=None)
+        render(tmp_path, monkeypatch, fingerprint=None)  # voices paragraph 0 only
 
         assert meta(novels_on)["highlight_safe"] is False
 

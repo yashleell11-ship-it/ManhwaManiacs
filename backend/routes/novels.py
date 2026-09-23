@@ -14,6 +14,7 @@ moment the registry gate lets the connectors through.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Annotated, Literal
 
 from fastapi import (
@@ -178,28 +179,50 @@ def get_novel_audio(
         "bytes": found.bytes,
         "total_ms": found.total_ms,
         "highlight_safe": found.available and _highlight_safe(
-            db, source, series, chapter, found.text_fingerprint
+            db, source, series, chapter, found.text_fingerprint, found.segments
         ),
         "segments": list(found.segments),
     }
 
 
+#: What may legitimately follow a paragraph's last spoken segment. The render
+#: cuts closing quotation marks off the sentence it voices, so measured over
+#: all 488 narrated paragraphs in production (2026-09-23) the leftover was
+#: empty 372 times and exactly one closing quote 116 times — never anything
+#: else.
+_UNSPOKEN_TAIL = frozenset(" \t\n\u201d\u2019\"'\u00bb\u300d\u300f)")
+
+
 def _highlight_safe(
-    db: Session, source: str, series: str, chapter: str, recorded: str | None
+    db: Session,
+    source: str,
+    series: str,
+    chapter: str,
+    recorded: str | None,
+    segments: Sequence[dict] = (),
 ) -> bool:
     """Whether the render was cut from the text ``/novels/chapter`` serves now.
 
-    True only when both sides are KNOWN and equal. A timing map without a
-    fingerprint, or a chapter no longer in the text cache (the next read would
-    fetch it fresh, and it may differ), is "cannot tell" — and a highlight on
-    the wrong words is worse than none, so that answers false.
+    With a recorded fingerprint, true only when it equals the current text's.
+    A chapter no longer in the text cache (the next read would fetch it fresh,
+    and it may differ) is "cannot tell" — and a highlight on the wrong words is
+    worse than none, so that answers false.
+
+    Without one, the map predates the field: every chapter narrated before
+    2026-09-23 was cut by the manual render tool, which never wrote it.
+    Answering false there switched follow-along OFF for every chapter anyone
+    had — a regression dressed as caution, since nothing checked at all
+    before. Those maps are checked STRUCTURALLY instead, against the text:
+    every segment inside a real paragraph, every paragraph voiced, and each
+    paragraph's last segment ending at the paragraph's end but for closing
+    quotes. An edit to a narrated chapter almost always moves a paragraph end
+    or the paragraph count; a map that survives all three still points at the
+    words it was cut from.
 
     The cache row is looked up the way ``NovelService.get_chapter`` looks it
     up, keys unquoted, because that is the text a reader is actually shown.
     Read-only: this must not bump the row in the LRU order.
     """
-    if not recorded:
-        return False
     stored = db.execute(
         select(NovelChapterCache.paragraphs).where(
             NovelChapterCache.source_id == source,
@@ -215,7 +238,36 @@ def _highlight_safe(
         return False
     if not isinstance(paragraphs, list):
         return False
-    return chapter_fingerprint(paragraphs) == recorded
+    if recorded:
+        return chapter_fingerprint(paragraphs) == recorded
+    return _segments_fit_text(segments, paragraphs)
+
+
+def _segments_fit_text(segments: Sequence[dict], paragraphs: list) -> bool:
+    """The structural check for a timing map with no fingerprint."""
+    if not segments:
+        return False
+    last_end: dict[int, int] = {}
+    for segment in segments:
+        try:
+            p, s, e = int(segment["p"]), int(segment["s"]), int(segment["e"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if not (0 <= p < len(paragraphs)) or not isinstance(paragraphs[p], str):
+            return False
+        if not (0 <= s <= e <= len(paragraphs[p])):
+            return False
+        last_end[p] = max(last_end.get(p, 0), e)
+    voiced_all = all(
+        i in last_end
+        for i, text in enumerate(paragraphs)
+        if isinstance(text, str) and text.strip()
+    )
+    if not voiced_all:
+        return False
+    return all(
+        set(paragraphs[p][end:]) <= _UNSPOKEN_TAIL for p, end in last_end.items()
+    )
 
 
 @router.get("/audio/series")
