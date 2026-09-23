@@ -8,6 +8,7 @@ import 'package:manhwamaniacs/app/app.dart';
 import 'package:manhwamaniacs/app/router/app_router.dart';
 import 'package:manhwamaniacs/app/router/routes.dart';
 import 'package:manhwamaniacs/core/utils/result.dart';
+import 'package:manhwamaniacs/features/library/providers/library_read_state.dart';
 import 'package:manhwamaniacs/features/library/providers/series_detail_provider.dart';
 import 'package:manhwamaniacs/features/reader/models/chapter_manifest.dart';
 import 'package:manhwamaniacs/features/reader/models/chapter_manifest_window.dart';
@@ -109,8 +110,20 @@ class _ProgressOnlyReaderRepository implements ReaderRepository {
       throw UnimplementedError();
 }
 
-/// The source-browse reader's online reading position is client-side only
-/// (`sourceProgressProvider`), so no repository override is needed for it.
+/// The source-browse reader pushes through the same progress outbox, which
+/// with no downloads store has nowhere to queue a row and so makes no request
+/// — no repository override is needed for it.
+
+/// Closing either reader refreshes the Library tab's shelves, which in the
+/// real app mounted here are alive — through the real repository, a request
+/// whose Timer outlives the test. Which route the jump lands on is all these
+/// tests are about.
+class _NoShelfRefresh extends LibraryReadState {
+  _NoShelfRefresh(super.ref);
+
+  @override
+  void refresh() {}
+}
 
 /// Series-detail payloads are irrelevant here — only the route we land on is.
 /// A completer that never completes parks each destination on its skeleton
@@ -141,6 +154,7 @@ Future<ProviderContainer> _pumpApp(WidgetTester tester) async {
       sharedPrefsProvider.overrideWithValue(prefs),
       readerRepositoryProvider
           .overrideWithValue(_ProgressOnlyReaderRepository()),
+      libraryReadStateProvider.overrideWith(_NoShelfRefresh.new),
       authenticatedAuthOverride(),
       activeProfileOverride(),
       ...noDownloadsStoreOverrides(),
