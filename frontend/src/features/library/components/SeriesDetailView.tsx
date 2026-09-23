@@ -428,8 +428,12 @@ export function SeriesDetailView({ seriesId }: SeriesDetailViewProps) {
             </div>
           </div>
 
+          {/* `glass-flat`: the panel's fill and edge without its blur. The list
+              sits on the page's opaque `bg-bg`, so the blur drew the pixels it
+              was given, and with every chapter inside it, it re-ran over most
+              of the viewport on each scroll frame. */}
           <div
-            className="glass-panel divide-y divide-border/60 overflow-hidden rounded-3xl border border-border"
+            className="glass-panel glass-flat divide-y divide-border/60 overflow-hidden rounded-3xl border border-border"
             aria-busy={!linksReady}
           >
             {!linksReady ? (
@@ -475,8 +479,10 @@ export function SeriesDetailView({ seriesId }: SeriesDetailViewProps) {
                       picker.pick(chapter.key, event.shiftKey);
                     }}
                     aria-pressed={picker.selecting ? picked : undefined}
+                    // `cv-row`: a row scrolled out of view skips layout and
+                    // paint. The list is every chapter, with no windowing.
                     className={cn(
-                      "group flex items-center gap-4 px-4 py-3.5 transition-colors hover:bg-primary/[0.06]",
+                      "cv-row group flex items-center gap-4 px-4 py-3.5 transition-colors hover:bg-primary/[0.06]",
                       isCompleted && "bg-black/25",
                       picker.selecting && picked && "bg-primary/10",
                     )}
