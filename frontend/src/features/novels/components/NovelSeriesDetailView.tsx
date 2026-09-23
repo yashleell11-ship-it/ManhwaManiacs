@@ -14,6 +14,7 @@ import {
   useFollowedIndex,
   useUnfollow,
 } from "@/features/library/hooks";
+import { seriesContinue } from "@/features/library/history-continue";
 import { useSeriesProgress } from "@/features/reader/hooks";
 import { sourceImageUrl } from "@/features/sources/api";
 import { resolveChapterListState } from "@/features/sources/chapter-list-state";
@@ -112,7 +113,7 @@ export function NovelSeriesDetailView({
   // positions adopted from a pre-scoping device. See `series-progress.ts`.
   const localProgress = useSourceSeriesProgress(sourceId, seriesId);
   const seriesProgressQuery = useSeriesProgress({ sourceId, seriesKey: seriesId });
-  const { map: progressMap, latest: latestRead } = useMemo(
+  const { map: progressMap } = useMemo(
     () =>
       resolveSeriesProgress({
         serverRows: seriesProgressQuery.data ?? [],
@@ -140,16 +141,12 @@ export function NovelSeriesDetailView({
     return copy;
   }, [chapters, sortOrder]);
 
-  const earliestChapter = useMemo(() => {
-    let earliest: (typeof chapters)[number] | null = null;
-    for (const chapter of chapters) {
-      if (chapter.number == null) continue;
-      if (!earliest || (earliest.number != null && chapter.number < earliest.number)) {
-        earliest = chapter;
-      }
-    }
-    return earliest ?? chapters[0] ?? null;
-  }, [chapters]);
+  // The one Continue rule: the chapter the reader got furthest in, or the one
+  // after it once that is finished — see `seriesContinue`.
+  const continueTo = useMemo(
+    () => seriesContinue(chapters, progressMap),
+    [chapters, progressMap],
+  );
 
   // Warm the opening chapters: "Start reading" becomes instant, and the length
   // estimate below gets its sample.
@@ -280,19 +277,14 @@ export function NovelSeriesDetailView({
     );
   }
 
-  const primaryHref = latestRead
-    ? novelChapterHref(
-        { sourceId, seriesKey: seriesId, chapterKey: latestRead.chapterId },
-        latestRead.progress.page,
-      )
-    : earliestChapter
-      ? novelChapterHref({
-          sourceId,
-          seriesKey: seriesId,
-          chapterKey: earliestChapter.id,
-        })
+  const primaryHref =
+    continueTo && continueTo.kind !== "caught-up"
+      ? novelChapterHref(
+          { sourceId, seriesKey: seriesId, chapterKey: continueTo.point.chapterKey },
+          continueTo.point.page,
+        )
       : null;
-  const primaryLabel = latestRead ? "Continue reading" : "Start reading";
+  const primaryLabel = continueTo?.kind === "start" ? "Start reading" : "Continue reading";
 
   const toggleFollow = async () => {
     setFeedback(null);
@@ -401,6 +393,11 @@ export function NovelSeriesDetailView({
             <div className="mt-8 flex flex-wrap items-center gap-3">
               {primaryHref ? (
                 <PrimaryPillButton href={primaryHref}>{primaryLabel}</PrimaryPillButton>
+              ) : continueTo?.kind === "caught-up" ? (
+                // Everything up to the last chapter is read. Continue's answer
+                // everywhere else is "the book's page" — this page — so it has
+                // nowhere to send the reader and says why instead.
+                <PrimaryPillButton disabled>All caught up</PrimaryPillButton>
               ) : null}
               <Button
                 variant={isFollowed ? "ghost" : "secondary"}

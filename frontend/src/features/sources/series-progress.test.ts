@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   mergeSeriesProgress,
-  pickLatestProgress,
   resolveSeriesProgress,
   serverProgressMap,
   type ServerChapterProgress,
@@ -54,29 +53,6 @@ describe("mergeSeriesProgress", () => {
   });
 });
 
-describe("pickLatestProgress", () => {
-  it("compares instants, not the two timestamp spellings", () => {
-    // The naive server row is 2026-09-04T18:00 UTC; the local one, written
-    // with a Z, is an hour earlier. A string compare would pick the local one.
-    const map = mergeSeriesProgress(
-      {
-        "ch-local": {
-          page: 3,
-          pageCount: 20,
-          completed: false,
-          updatedAt: "2026-09-04T17:00:00.000Z",
-        },
-      },
-      serverProgressMap([serverRow("ch-server", 9, "2026-09-04T18:00:00")]),
-    );
-    expect(pickLatestProgress(map)?.chapterId).toBe("ch-server");
-  });
-
-  it("is null with nothing read", () => {
-    expect(pickLatestProgress({})).toBeNull();
-  });
-});
-
 describe("resolveSeriesProgress", () => {
   it("shows the position the reader saved to the server", () => {
     // The regression: the reader posts progress to `/reader/progress`, and the
@@ -92,10 +68,11 @@ describe("resolveSeriesProgress", () => {
     });
 
     expect(view.map["ch-1"]?.completed).toBe(true);
-    expect(view.map["ch-2"]?.page).toBe(7);
-    expect(view.latest).toEqual({
-      chapterId: "ch-2",
-      progress: { page: 7, pageCount: 20, completed: false, updatedAt: "2026-09-04T10:00:00" },
+    expect(view.map["ch-2"]).toEqual({
+      page: 7,
+      pageCount: 20,
+      completed: false,
+      updatedAt: "2026-09-04T10:00:00",
     });
   });
 
@@ -111,6 +88,6 @@ describe("resolveSeriesProgress", () => {
         },
       },
     });
-    expect(view.latest?.chapterId).toBe("ch-legacy");
+    expect(view.map["ch-legacy"]?.page).toBe(11);
   });
 });

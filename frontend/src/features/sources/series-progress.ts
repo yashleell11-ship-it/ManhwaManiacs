@@ -1,5 +1,4 @@
-import { parseUtcTimestamp } from "@/lib/utc-time";
-import type { SourceChapterProgress, SourceSeriesProgressMap } from "./source-progress";
+import type { SourceSeriesProgressMap } from "./source-progress";
 
 /**
  * Where a profile is in each chapter of one series, for the series page's
@@ -52,29 +51,6 @@ export function mergeSeriesProgress(
   return { ...local, ...server };
 }
 
-/**
- * The most recently read chapter, or null.
- *
- * Compared through `parseUtcTimestamp` rather than as strings: server rows
- * carry a naive-UTC `last_read_at` while local records carry a `Z`-suffixed
- * ISO string, so a lexicographic compare would rank the two formats against
- * each other by their text, not their instant.
- */
-export function pickLatestProgress(
-  map: SourceSeriesProgressMap,
-): { chapterId: string; progress: SourceChapterProgress } | null {
-  let latest: { chapterId: string; progress: SourceChapterProgress } | null = null;
-  let latestMs = Number.NEGATIVE_INFINITY;
-  for (const [chapterId, progress] of Object.entries(map)) {
-    const at = parseUtcTimestamp(progress.updatedAt) ?? Number.NEGATIVE_INFINITY;
-    if (latest === null || at > latestMs) {
-      latest = { chapterId, progress };
-      latestMs = at;
-    }
-  }
-  return latest;
-}
-
 export interface SeriesProgressInput {
   /** Rows from `GET /reader/progress/series`; empty while it loads. */
   serverRows: readonly ServerChapterProgress[];
@@ -82,9 +58,15 @@ export interface SeriesProgressInput {
   localMap: SourceSeriesProgressMap;
 }
 
+/**
+ * Where Continue goes is not decided here any more. This used to hand back
+ * the most recently touched chapter as well, and both series pages resumed
+ * there — so re-reading chapter 1 sent Continue back to chapter 1. The pages
+ * now ask `seriesContinue` (`features/library/history-continue.ts`), the rule
+ * every other Continue answers with.
+ */
 export interface SeriesProgressView {
   map: SourceSeriesProgressMap;
-  latest: { chapterId: string; progress: SourceChapterProgress } | null;
 }
 
 /** Everything the series page needs to render progress, from both stores. */
@@ -92,6 +74,5 @@ export function resolveSeriesProgress({
   serverRows,
   localMap,
 }: SeriesProgressInput): SeriesProgressView {
-  const map = mergeSeriesProgress(localMap, serverProgressMap(serverRows));
-  return { map, latest: pickLatestProgress(map) };
+  return { map: mergeSeriesProgress(localMap, serverProgressMap(serverRows)) };
 }

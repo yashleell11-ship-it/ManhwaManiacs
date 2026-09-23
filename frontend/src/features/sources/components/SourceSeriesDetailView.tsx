@@ -48,6 +48,7 @@ import {
   useSourceChapters,
   useSourceSeriesDetail,
 } from "../hooks";
+import { seriesContinue } from "@/features/library/history-continue";
 import { resolveSeriesProgress } from "../series-progress";
 import { useSourceSeriesProgress } from "../source-progress";
 import {
@@ -117,7 +118,7 @@ function MangaSeriesDetailView({
     sourceId,
     seriesKey: seriesId,
   });
-  const { map: progressMap, latest: latestRead } = useMemo(
+  const { map: progressMap } = useMemo(
     () =>
       resolveSeriesProgress({
         serverRows: seriesProgressQuery.data ?? [],
@@ -128,6 +129,11 @@ function MangaSeriesDetailView({
 
   const series = seriesQuery.data;
   const chapters = useMemo(() => chaptersQuery.data ?? [], [chaptersQuery.data]);
+  // The one Continue rule — see `seriesContinue`.
+  const continueTo = useMemo(
+    () => seriesContinue(chapters, progressMap),
+    [chapters, progressMap],
+  );
 
   const sortedChapters = useMemo(() => {
     const copy = [...chapters];
@@ -139,19 +145,6 @@ function MangaSeriesDetailView({
     });
     return copy;
   }, [chapters, sortOrder]);
-
-  // Earliest numbered chapter — the "start from the beginning" target when the
-  // reader has no saved progress. Falls back to raw order if none are numbered.
-  const earliestChapter = useMemo(() => {
-    let earliest: (typeof chapters)[number] | null = null;
-    for (const chapter of chapters) {
-      if (chapter.number == null) continue;
-      if (!earliest || (earliest.number != null && chapter.number < earliest.number)) {
-        earliest = chapter;
-      }
-    }
-    return earliest ?? chapters[0] ?? null;
-  }, [chapters]);
 
   // Warm the first few chapters so the most likely next tap is instant. Gated
   // on the same connection rule the reader's own next-chapter preload uses:
@@ -271,15 +264,19 @@ function MangaSeriesDetailView({
     );
   }
 
-  // "Continue" resumes the most recently read chapter at its saved page;
-  // otherwise "Read Online" starts from the earliest chapter at page 1.
-  const primaryChapterId = latestRead ? latestRead.chapterId : earliestChapter?.id ?? null;
-  const primaryHref = latestRead
-    ? `${sourceReaderChapterPath(sourceId, seriesId, latestRead.chapterId)}?page=${latestRead.progress.page}`
-    : earliestChapter
-      ? sourceReaderChapterPath(sourceId, seriesId, earliestChapter.id)
-      : null;
-  const primaryLabel = latestRead ? "Continue" : "Read Online";
+  // "Continue" opens the chapter the reader got furthest in, at its saved
+  // page, or the one after it once that is finished; "Read Online" starts
+  // from the first chapter. Caught up, there is nothing to open.
+  const primaryPoint =
+    continueTo && continueTo.kind !== "caught-up" ? continueTo.point : null;
+  const primaryChapterId = primaryPoint?.chapterKey ?? null;
+  const primaryHref = primaryPoint
+    ? `${sourceReaderChapterPath(sourceId, seriesId, primaryPoint.chapterKey)}${
+        primaryPoint.page > 1 ? `?page=${primaryPoint.page}` : ""
+      }`
+    : null;
+  const primaryLabel = continueTo?.kind === "start" ? "Read Online" : "Continue";
+  const caughtUp = continueTo?.kind === "caught-up";
 
   /**
    * Read all (spec 2026-09-05 R2): the whole series as one continuous scroll.
@@ -293,7 +290,7 @@ function MangaSeriesDetailView({
    */
   const readAllTarget =
     chapters.length > 1
-      ? readAllHref({ sourceId, seriesKey: seriesId }, latestRead?.chapterId ?? null)
+      ? readAllHref({ sourceId, seriesKey: seriesId }, primaryChapterId)
       : null;
 
   const prefetchChapter = prefetchChapterPayload;
@@ -396,6 +393,7 @@ function MangaSeriesDetailView({
                 <PrimaryPillButton href={primaryHref}>{primaryLabel}</PrimaryPillButton>
               </span>
             )}
+            {caughtUp && <PrimaryPillButton disabled>All caught up</PrimaryPillButton>}
             {readAllTarget && (
               <span
                 className="inline-flex"

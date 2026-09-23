@@ -1,5 +1,6 @@
 import type { SourceChapterSummary } from "@/features/sources/types";
 import { readingOrder } from "@/features/reader/read-all";
+import { parseUtcTimestamp } from "@/lib/utc-time";
 import { libraryCoverUrl } from "./api";
 import type { ReadingHistoryItem } from "./types";
 
@@ -46,6 +47,92 @@ export function historyResumePoint(
   const index = order.findIndex((chapter) => chapter.chapterKey === entry.chapter_key);
   if (index === -1 || index + 1 >= order.length) return null;
   return { chapterKey: order[index + 1].chapterKey, page: 1 };
+}
+
+/** One chapter's stored position, as a series page holds it. */
+export interface SeriesChapterPosition {
+  page: number;
+  completed: boolean;
+  /** When it was last read — breaks a tie between unnumbered chapters. */
+  updatedAt?: string;
+}
+
+/**
+ * What a series page's Continue button offers.
+ *
+ * `start` — nothing read yet: the first chapter in reading order.
+ * `resume` — a chapter and the position to open it at.
+ * `caught-up` — the furthest chapter is finished and nothing follows it. On a
+ * book's own page that is the answer "Continue" gives everywhere else — the
+ * book's page — so the button has nowhere to go and says so instead.
+ */
+export type SeriesContinue =
+  | { kind: "start"; point: ResumePoint }
+  | { kind: "resume"; point: ResumePoint }
+  | { kind: "caught-up" };
+
+/**
+ * Continue for a whole series: the chapter the reader got FURTHEST in.
+ *
+ * The same rule {@link historyResumePoint} applies to one row, applied to the
+ * furthest row rather than the newest. The series pages used to take the most
+ * recently touched chapter, and production shows what that costs: re-reading
+ * Shadow Slave chapter 1 made Continue reopen chapter 1 at its last paragraph
+ * while chapter 5 sat half read, and five seconds on TBATE's prologue made it
+ * resume there instead of at the chapter after the one just finished. The
+ * server's continue-reading strip answers the same shared table
+ * (`backend/tests/fixtures/reading_navigation_cases.json`).
+ *
+ * "Furthest" is highest chapter number; an unnumbered chapter ranks below
+ * every numbered one, and between unnumbered chapters the newest read wins —
+ * the order the server ranks its rows in. A position for a key the list does
+ * not carry is ignored: there is no chapter to open for it.
+ *
+ * Null only when the series has no chapters at all.
+ */
+export function seriesContinue(
+  chapters: readonly SourceChapterSummary[],
+  progress: Readonly<Record<string, SeriesChapterPosition | undefined>>,
+): SeriesContinue | null {
+  const order = readingOrder(chapters);
+  if (order.length === 0) return null;
+
+  let best = -1;
+  let bestReadAt = Number.NEGATIVE_INFINITY;
+  for (let index = 0; index < order.length; index += 1) {
+    const row = progress[order[index].chapterKey];
+    if (!row) continue;
+    const readAt = parseUtcTimestamp(row.updatedAt) ?? Number.NEGATIVE_INFINITY;
+    if (best === -1 || isFurther(order[index].number, readAt, order[best].number, bestReadAt)) {
+      best = index;
+      bestReadAt = readAt;
+    }
+  }
+
+  if (best === -1) {
+    return { kind: "start", point: { chapterKey: order[0].chapterKey, page: 1 } };
+  }
+  const row = progress[order[best].chapterKey]!;
+  const point = historyResumePoint(
+    { chapter_key: order[best].chapterKey, last_page: row.page, is_completed: row.completed },
+    chapters,
+  );
+  return point ? { kind: "resume", point } : { kind: "caught-up" };
+}
+
+/** Whether a chapter at (`number`, `readAt`) is further than the current pick. */
+function isFurther(
+  number: number | null,
+  readAt: number,
+  bestNumber: number | null,
+  bestReadAt: number,
+): boolean {
+  if (number != null && bestNumber == null) return true;
+  if (number == null && bestNumber != null) return false;
+  if (number != null && bestNumber != null && number !== bestNumber) {
+    return number > bestNumber;
+  }
+  return readAt > bestReadAt;
 }
 
 /**
