@@ -56,10 +56,15 @@ class LibraryReadState {
     if (_ref.exists(updatesProvider)) {
       unawaited(_ref.read(updatesProvider.notifier).refreshFollowed());
     }
-    // Both fall back to what they already hold when the fetch fails — the
-    // list to its offline cache, the strip to its previous value — so reading
-    // downloaded chapters offline does not come back to an error screen.
-    if (_ref.exists(libraryListProvider)) _ref.invalidate(libraryListProvider);
+    // Both keep what they already hold when the fetch fails, so reading
+    // downloaded chapters offline does not come back to an error screen. The
+    // browse list is re-read page for page rather than invalidated: it is
+    // paginated, and a rebuild is page 1 only — someone scrolled past the
+    // first twenty series came back to find the rest gone and their place
+    // lost, every time a reader closed.
+    if (_ref.exists(libraryListProvider)) {
+      unawaited(_ref.read(libraryListProvider.notifier).refreshLoaded());
+    }
     if (_ref.exists(continueReadingProvider)) {
       _ref.invalidate(continueReadingProvider);
     }

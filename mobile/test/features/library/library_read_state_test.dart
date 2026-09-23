@@ -9,21 +9,24 @@ import 'package:manhwamaniacs/features/library/models/continue_reading_item.dart
 import 'package:manhwamaniacs/features/library/models/followed_series.dart';
 import 'package:manhwamaniacs/features/library/models/read_state.dart';
 import 'package:manhwamaniacs/features/library/providers/dashboard_providers.dart';
+import 'package:manhwamaniacs/features/library/providers/library_list_provider.dart';
 import 'package:manhwamaniacs/features/library/providers/library_read_state.dart';
 import 'package:manhwamaniacs/features/library/repositories/library_repository.dart';
 import 'package:manhwamaniacs/features/updates/models/update_notification.dart';
 import 'package:manhwamaniacs/features/updates/providers/updates_provider.dart';
 import 'package:manhwamaniacs/features/updates/repositories/updates_repository.dart';
+import 'package:manhwamaniacs/shared/providers/core_providers.dart';
 import 'package:manhwamaniacs/shared/providers/repository_providers.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// The Library tab and the resume strip stay mounted under a reader, so the
 /// reader closing is the only moment they can learn that anything was read.
 
-FollowedSeries _series({ReadState? readState}) => FollowedSeries(
-      id: 42,
+FollowedSeries _series({ReadState? readState, int id = 42}) => FollowedSeries(
+      id: id,
       sourceId: 'asurascans',
-      seriesKey: 'solo-leveling',
-      title: 'Solo Leveling',
+      seriesKey: id == 42 ? 'solo-leveling' : 'series-$id',
+      title: id == 42 ? 'Solo Leveling' : 'Series $id',
       coverUrl: '',
       isFavorite: false,
       readingStatus: 'reading',
@@ -65,13 +68,15 @@ class _FakeLibraryRepository implements LibraryRepository {
   }) async {
     listCalls++;
     if (failList) return const Err(NetworkError(message: 'offline'));
+    // Paged for real: the browse list asks twenty at a time.
+    final start = (page - 1) * perPage;
     return Ok(
       PagedResult(
-        items: followed,
+        items: followed.skip(start).take(perPage).toList(),
         total: followed.length,
         page: page,
         perPage: perPage,
-        hasNext: false,
+        hasNext: start + perPage < followed.length,
       ),
     );
   }
@@ -122,6 +127,32 @@ class _FakeUpdatesRepository implements UpdatesRepository {
   );
   addTearDown(container.dispose);
   return (container: container, library: library, updates: updates);
+}
+
+/// The browse screen's list, mounted and scrolled to its second page: 25
+/// followed series, twenty a page.
+Future<({ProviderContainer container, _FakeLibraryRepository library})>
+    _scrolledBrowseList() async {
+  SharedPreferences.setMockInitialValues({});
+  final prefs = await SharedPreferences.getInstance();
+  final library = _FakeLibraryRepository([
+    for (var id = 1; id <= 25; id++) _series(id: id, readState: _notStarted),
+  ]);
+  final container = ProviderContainer(
+    overrides: [
+      libraryRepositoryProvider.overrideWithValue(library),
+      updatesRepositoryProvider.overrideWithValue(_FakeUpdatesRepository()),
+      sharedPrefsProvider.overrideWithValue(prefs),
+    ],
+  );
+  addTearDown(container.dispose);
+  container.listen(libraryListProvider, (_, __) {});
+  await container.read(libraryListProvider.future);
+  await container.read(libraryListProvider.notifier).loadMore();
+  final scrolled = container.read(libraryListProvider).requireValue;
+  expect(scrolled.items, hasLength(25));
+  expect(scrolled.page, 2);
+  return (container: container, library: library);
 }
 
 ReadState? _shelfReadState(ProviderContainer container) =>
@@ -195,6 +226,39 @@ void main() {
     await Future<void>.delayed(Duration.zero);
 
     expect(_shelfReadState(container)?.started, isTrue);
+  });
+
+  test('the browse list keeps every page it had loaded', () async {
+    final (:container, :library) = await _scrolledBrowseList();
+
+    // Series 22 lives on the second page; it is the one that was read.
+    library.followed = [
+      for (final series in library.followed)
+        series.id == 22 ? _series(id: 22, readState: _onChapterOne) : series,
+    ];
+    await container.read(libraryReadStateProvider).afterReading(Future.value());
+    await Future<void>.delayed(Duration.zero);
+
+    final list = container.read(libraryListProvider).requireValue;
+    expect(list.items, hasLength(25));
+    expect(list.page, 2);
+    expect(list.hasNext, isFalse);
+    final read = list.items.singleWhere((series) => series.id == 22);
+    expect(read.readState?.started, isTrue);
+  });
+
+  test('a browse list that cannot reach the server stays as it was',
+      () async {
+    final (:container, :library) = await _scrolledBrowseList();
+
+    library.failList = true;
+    await container.read(libraryReadStateProvider).afterReading(Future.value());
+    await Future<void>.delayed(Duration.zero);
+
+    final list = container.read(libraryListProvider);
+    expect(list.hasError, isFalse);
+    expect(list.requireValue.items, hasLength(25));
+    expect(list.requireValue.page, 2);
   });
 
   test('shelves nobody is showing are not fetched', () async {

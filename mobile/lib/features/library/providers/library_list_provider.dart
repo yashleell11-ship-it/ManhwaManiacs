@@ -141,8 +141,14 @@ final visibleSearchGroupsProvider = Provider.autoDispose<List<SourceSearchGroup>
 );
 
 class LibraryListNotifier extends AutoDisposeAsyncNotifier<LibraryListState> {
+  /// Riverpod 2.6 has no `ref.mounted`, and [refreshLoaded] runs after the
+  /// reader that asked for it has gone — the browse screen may have too.
+  bool _disposed = false;
+
   @override
   Future<LibraryListState> build() async {
+    _disposed = false;
+    ref.onDispose(() => _disposed = true);
     final query = ref.watch(libraryQueryProvider);
     return _fetchFirstPage(query);
   }
@@ -171,6 +177,54 @@ class LibraryListNotifier extends AutoDisposeAsyncNotifier<LibraryListState> {
         hasNext: result.hasNext,
         total: result.total,
         isLoadingMore: false,
+      ),
+    );
+  }
+
+  /// Re-reads the pages already on screen, in place — what a reader closing
+  /// calls (`libraryReadStateProvider`) so the cards pick up what was read.
+  ///
+  /// Not [refresh] and not an invalidate: both go back to page 1, which
+  /// throws away every page [loadMore] added and snaps someone forty rows
+  /// down back to twenty, and offline they end on an error screen when the
+  /// cache has nothing for this query. Here a fetch that fails keeps the
+  /// list exactly as it was, and a list that changed while the pages were in
+  /// flight (a new query, another page loaded) is left alone rather than
+  /// overwritten with an answer to an older question.
+  Future<void> refreshLoaded() async {
+    final current = state.valueOrNull;
+    if (current == null) return;
+    final query = ref.read(libraryQueryProvider);
+
+    final items = <FollowedSeries>[];
+    var page = 0;
+    var total = current.total;
+    var hasNext = false;
+    try {
+      while (page < current.page) {
+        page++;
+        final result = await _fetchPage(query, page);
+        if (_disposed) return;
+        await _cachePage(query, result.items, isFirstPage: page == 1);
+        items.addAll(result.items);
+        total = result.total;
+        hasNext = result.hasNext;
+        // The library shrank under us (an unfollow elsewhere): stop where
+        // the server says it ends instead of asking for pages past it.
+        if (!hasNext) break;
+      }
+    } catch (_) {
+      return;
+    }
+    if (_disposed || !identical(state.valueOrNull, current)) return;
+
+    state = AsyncData(
+      current.copyWith(
+        items: items,
+        page: page,
+        total: total,
+        hasNext: hasNext,
+        isOffline: false,
       ),
     );
   }
