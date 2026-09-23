@@ -31,6 +31,7 @@ import 'package:manhwamaniacs/features/downloads/services/blob_store.dart';
 import 'package:manhwamaniacs/features/downloads/services/device_storage_info.dart';
 import 'package:manhwamaniacs/features/downloads/services/retention_maintenance.dart';
 import 'package:manhwamaniacs/features/downloads/store/downloads_store.dart';
+import 'package:manhwamaniacs/features/novels/models/narration_save_state.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_audio.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_audio_format.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter.dart';
@@ -392,6 +393,70 @@ void main() {
       expect(playable.audio.totalMs, 4200);
       expect(repo.audioRequests, ['c120']);
     });
+
+    test('the book knows which saves need saving again', () async {
+      // The series page and the audiobook sheet list a whole book, and the
+      // store only says "complete". Before, an Ogg save from before the
+      // server could convert read as saved on both.
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      repo.audioBytesByChapter = {'c120': _opus};
+      final c = container();
+      await saveNarration(c);
+      expect(
+        await c.read(unplayableNarrationSavesProvider(_series).future),
+        isEmpty,
+      );
+
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final onIphone = container();
+      expect(
+        await onIphone.read(unplayableNarrationSavesProvider(_series).future),
+        {'c120'},
+      );
+    });
+
+    test('a save made in MP4 is not flagged', () async {
+      final c = container();
+      await saveNarration(c);
+
+      expect(
+        await c.read(unplayableNarrationSavesProvider(_series).future),
+        isEmpty,
+      );
+    });
+  });
+
+  group('what a chapter list shows', () {
+    test('a complete copy that cannot play is offered again, not "saved"',
+        () {
+      const complete = (state: DownloadChapterState.complete, error: null);
+      expect(
+        narrationSaveState(complete, unplayable: false),
+        NarrationSaveState.saved,
+      );
+      expect(
+        narrationSaveState(complete, unplayable: true),
+        NarrationSaveState.unplayable,
+      );
+      expect(offersNarrationSave(NarrationSaveState.unplayable), isTrue);
+      expect(offersNarrationSave(NarrationSaveState.saved), isFalse);
+      expect(offersNarrationSave(NarrationSaveState.saving), isFalse);
+      expect(offersNarrationSave(NarrationSaveState.failed), isTrue);
+      expect(offersNarrationSave(NarrationSaveState.none), isTrue);
+      // Only a finished copy can be the wrong one.
+      expect(
+        narrationSaveState(
+          (state: DownloadChapterState.downloading, error: null),
+          unplayable: true,
+        ),
+        NarrationSaveState.saving,
+      );
+    });
+
+    test('only an iPhone has saves worth opening to check', () {
+      expect(savedNarrationMayBeUnplayable(TargetPlatform.iOS), isTrue);
+      expect(savedNarrationMayBeUnplayable(TargetPlatform.android), isFalse);
+    });
   });
 
   group('listing', () {
@@ -468,6 +533,7 @@ void main() {
       WidgetTester tester,
       Widget child, {
       Map<String, ChapterDownloadStatus> saved = const {},
+      Set<String> unplayable = const {},
     }) async {
       await tester.pumpWidget(
         ProviderScope(
@@ -486,6 +552,8 @@ void main() {
             downloadQueueControllerProvider.overrideWith(() => queue),
             seriesNarrationStatusProvider(_series)
                 .overrideWith((ref) async => saved),
+            unplayableNarrationSavesProvider(_series)
+                .overrideWith((ref) async => unplayable),
           ],
           child: MaterialApp(
             theme: AppTheme.dark,
@@ -661,6 +729,69 @@ void main() {
       expect(
         find.text('Saving the audio of 1 chapter to this phone.'),
         findsOneWidget,
+      );
+    });
+
+    testWidgets(
+        'the picker offers a save this phone cannot play, and replaces it',
+        (tester) async {
+      await pump(
+        tester,
+        Builder(
+          builder: (context) => TextButton(
+            onPressed: () => AudiobookPickerSheet.show(
+              context,
+              sourceId: 'novelarchive',
+              seriesKey: 'tbate',
+              canRender: false,
+              cached: {'c120', 'c122'},
+              chapters: const [
+                (
+                  key: 'c120',
+                  number: 120,
+                  title: 'Old Ogg',
+                  isRead: false,
+                  isDownloaded: true,
+                ),
+                (
+                  key: 'c122',
+                  number: 122,
+                  title: 'Kept',
+                  isRead: false,
+                  isDownloaded: true,
+                ),
+              ],
+            ),
+            child: const Text('open'),
+          ),
+        ),
+        saved: const {
+          'c120': (state: DownloadChapterState.complete, error: null),
+          'c122': (state: DownloadChapterState.complete, error: null),
+        },
+        unplayable: const {'c120'},
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Saved on this phone'), findsOneWidget);
+      expect(
+        find.text('Saved copy cannot play on this phone — select to save '
+            'again'),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.text('All narrated (1)'));
+      await tester.pump();
+      await tester.tap(find.text('Save audio of 1 chapter'));
+      await tester.pumpAndSettle();
+
+      // The unplayable copy goes first — saving onto a complete row keeps
+      // its bytes — and the one that plays is left alone.
+      expect(queue.cancelled, [audioIdentity(_chapter)]);
+      expect(
+        queue.requests.map((r) => r.id.chapterKey),
+        ['c120', 'c120:audio'],
       );
     });
   });

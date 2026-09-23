@@ -2,8 +2,13 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:manhwamaniacs/features/downloads/models/chapter_identity.dart';
+import 'package:manhwamaniacs/features/downloads/models/download_chapter_state.dart';
 import 'package:manhwamaniacs/features/downloads/providers/downloads_scope.dart';
+import 'package:manhwamaniacs/features/downloads/providers/series_download_status_provider.dart';
 import 'package:manhwamaniacs/features/downloads/queue/download_queue_controller.dart';
+import 'package:manhwamaniacs/features/downloads/store/downloads_store.dart';
+import 'package:manhwamaniacs/features/novels/models/narration_save_state.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_audio.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_audio_format.dart';
 import 'package:manhwamaniacs/features/novels/providers/novel_chapter_provider.dart';
@@ -107,4 +112,61 @@ final playableNovelAudioProvider = FutureProvider.autoDispose
   }
   final remote = await ref.watch(novelAudioProvider(key).future);
   return remote.available ? (audio: remote, file: null) : null;
+});
+
+/// What each saved narration's bytes are, by blob path.
+///
+/// Blobs are named by their content hash, so a path always holds the same
+/// bytes and one look lasts. Kept alive for that reason: a chapter list
+/// re-asks every time the queue moves, and on a long book that is hundreds
+/// of files opened again for an answer that cannot have changed. A read that
+/// failed is not remembered, so it is tried again next time.
+final _savedNarrationFormatsProvider =
+    Provider<Map<String, NovelAudioFormat>>((ref) => {});
+
+/// The chapters of [series] whose narration is saved, complete, and cannot
+/// play on this phone — keyed by the CHAPTER's key, as
+/// [seriesNarrationStatusProvider] is.
+///
+/// An Ogg narration saved on an iPhone before the server could convert is a
+/// complete row like any other, and that row is all the status provider
+/// knows. Without this a chapter list calls it saved, and a bulk save passes
+/// it over as already done — so the only way to replace a book's worth of
+/// them was the reader's button, one chapter at a time.
+///
+/// Empty wherever every format plays (see [savedNarrationMayBeUnplayable]).
+final unplayableNarrationSavesProvider = FutureProvider.autoDispose
+    .family<Set<String>, SeriesIdentity>((ref, series) async {
+  final platform = defaultTargetPlatform;
+  if (!savedNarrationMayBeUnplayable(platform)) return const {};
+  final store = ref.watch(downloadsStoreProvider);
+  if (store == null) return const {};
+  final statuses =
+      await ref.watch(seriesNarrationStatusProvider(series).future);
+  final formats = ref.read(_savedNarrationFormatsProvider);
+
+  final unplayable = <String>{};
+  for (final entry in statuses.entries) {
+    if (entry.value.state != DownloadChapterState.complete) continue;
+    final ChapterIdentity chapter = (
+      sourceId: series.sourceId,
+      seriesKey: series.seriesKey,
+      chapterKey: entry.key,
+    );
+    final Map<int, File> blobs;
+    try {
+      blobs = await store.localPagePaths(audioIdentity(chapter));
+    } catch (_) {
+      continue;
+    }
+    final blob = blobs[DownloadsStore.audioBlobNumber];
+    // No file is not a copy that fails to play: the reader streams for a
+    // save it cannot find, exactly as it would with none.
+    if (blob == null) continue;
+    final format =
+        formats[blob.path] ?? await sniffNovelAudioFile(blob);
+    if (format != null) formats[blob.path] = format;
+    if (!canPlayNovelAudio(format, platform)) unplayable.add(entry.key);
+  }
+  return unplayable;
 });

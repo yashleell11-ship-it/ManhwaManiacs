@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:manhwamaniacs/app/theme/app_presets.dart';
+import 'package:manhwamaniacs/features/downloads/models/chapter_identity.dart';
 import 'package:manhwamaniacs/features/downloads/models/chapter_selection.dart';
-import 'package:manhwamaniacs/features/downloads/models/download_chapter_state.dart';
 import 'package:manhwamaniacs/features/downloads/providers/downloads_scope.dart';
 import 'package:manhwamaniacs/features/downloads/providers/series_download_status_provider.dart';
 import 'package:manhwamaniacs/features/downloads/queue/download_queue_controller.dart';
+import 'package:manhwamaniacs/features/novels/models/narration_save_state.dart';
+import 'package:manhwamaniacs/features/novels/providers/novel_audio_provider.dart';
 import 'package:manhwamaniacs/features/novels/providers/series_audio_provider.dart';
 import 'package:manhwamaniacs/shared/providers/repository_providers.dart';
 
@@ -121,11 +123,27 @@ class _AudiobookPickerSheetState extends ConsumerState<AudiobookPickerSheet> {
 
   void _onSelectionChanged() => setState(() {});
 
-  /// Saved-narration state per chapter key, from the phone's own store.
-  Map<String, ChapterDownloadStatus> get _saved {
+  /// What the rows showed at the last build, for the save button to act on:
+  /// what the reader saw is what they chose from.
+  Map<String, NarrationSaveState> _shown = const {};
+
+  /// Saved-narration state per chapter key, from the phone's own store, with
+  /// a complete copy this phone cannot play told apart from one it can.
+  Map<String, NarrationSaveState> get _saved {
     final series = (sourceId: widget.sourceId, seriesKey: widget.seriesKey);
-    return ref.watch(seriesNarrationStatusProvider(series)).valueOrNull ??
-        const {};
+    final statuses =
+        ref.watch(seriesNarrationStatusProvider(series)).valueOrNull ??
+            const <String, ChapterDownloadStatus>{};
+    final unplayable =
+        ref.watch(unplayableNarrationSavesProvider(series)).valueOrNull ??
+            const <String>{};
+    return {
+      for (final entry in statuses.entries)
+        entry.key: narrationSaveState(
+          entry.value,
+          unplayable: unplayable.contains(entry.key),
+        ),
+    };
   }
 
   /// The chapters that can actually be narrated: text on the server, and no
@@ -137,12 +155,12 @@ class _AudiobookPickerSheetState extends ConsumerState<AudiobookPickerSheet> {
   ];
 
   /// The chapters whose audio can be saved: narrated, and not already on the
-  /// phone or on its way. A FAILED save is offered again — that is the retry.
-  List<SelectableChapter> _savable(Map<String, ChapterDownloadStatus> saved) => [
+  /// phone or on its way. A FAILED save is offered again — that is the retry
+  /// — and so is a copy this phone cannot play, which saving replaces.
+  List<SelectableChapter> _savable(Map<String, NarrationSaveState> saved) => [
     for (final chapter in widget.chapters)
       if (chapter.isDownloaded &&
-          (saved[chapter.key] == null ||
-              saved[chapter.key]!.state == DownloadChapterState.failed))
+          offersNarrationSave(saved[chapter.key] ?? NarrationSaveState.none))
         chapter,
   ];
 
@@ -192,6 +210,20 @@ class _AudiobookPickerSheetState extends ConsumerState<AudiobookPickerSheet> {
   Future<void> _save() async {
     final selected = _selection.selected;
     if (selected.isEmpty || _sending) return;
+    final saved = _shown;
+    final queue = ref.read(downloadQueueControllerProvider.notifier);
+    setState(() => _sending = true);
+    // A copy that cannot play has to go first: saving onto a complete row
+    // keeps the bytes it already has, which are the ones that do not play.
+    for (final key in selected) {
+      if (saved[key] != NarrationSaveState.unplayable) continue;
+      final ChapterIdentity chapter = (
+        sourceId: widget.sourceId,
+        seriesKey: widget.seriesKey,
+        chapterKey: key,
+      );
+      await queue.cancelChapter(audioIdentity(chapter));
+    }
     final requests = [
       for (final chapter in widget.chapters)
         if (selected.contains(chapter.key))
@@ -206,10 +238,7 @@ class _AudiobookPickerSheetState extends ConsumerState<AudiobookPickerSheet> {
             seriesTitle: widget.seriesTitle,
           ),
     ];
-    setState(() => _sending = true);
-    await ref
-        .read(downloadQueueControllerProvider.notifier)
-        .enqueueChapters(requests);
+    await queue.enqueueChapters(requests);
     if (!mounted) return;
     final count = selected.length;
     Navigator.of(context).pop();
@@ -238,7 +267,7 @@ class _AudiobookPickerSheetState extends ConsumerState<AudiobookPickerSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final saved = _saved;
+    final saved = _shown = _saved;
     final saving = _mode == AudiobookPickerMode.save;
     // Saving needs somewhere to save into; the rest of the app hides its
     // download controls with no active profile, and so does this.
@@ -408,7 +437,7 @@ class _AudiobookPickerSheetState extends ConsumerState<AudiobookPickerSheet> {
     overflow: TextOverflow.ellipsis,
   );
 
-  Widget _narrateRow(SelectableChapter chapter, ChapterDownloadStatus? saved) {
+  Widget _narrateRow(SelectableChapter chapter, NarrationSaveState? saved) {
     final narratable = widget.cached.contains(chapter.key);
     final already = chapter.isDownloaded;
     return CheckboxListTile(
@@ -422,7 +451,7 @@ class _AudiobookPickerSheetState extends ConsumerState<AudiobookPickerSheet> {
       title: _title(chapter),
       subtitle: already
           ? Text(
-              saved?.state == DownloadChapterState.complete
+              saved == NarrationSaveState.saved
                   ? 'Already narrated · saved on this phone'
                   : 'Already narrated',
             )
@@ -435,10 +464,9 @@ class _AudiobookPickerSheetState extends ConsumerState<AudiobookPickerSheet> {
     );
   }
 
-  Widget _saveRow(SelectableChapter chapter, ChapterDownloadStatus? saved) {
-    final state = saved?.state;
-    final selectable = chapter.isDownloaded &&
-        (state == null || state == DownloadChapterState.failed);
+  Widget _saveRow(SelectableChapter chapter, NarrationSaveState? saved) {
+    final state = saved ?? NarrationSaveState.none;
+    final selectable = chapter.isDownloaded && offersNarrationSave(state);
     return CheckboxListTile(
       dense: true,
       value: _selection.isSelected(chapter.key),
@@ -446,17 +474,22 @@ class _AudiobookPickerSheetState extends ConsumerState<AudiobookPickerSheet> {
       title: _title(chapter),
       subtitle: Text(
         switch (state) {
-          DownloadChapterState.complete => 'Saved on this phone',
-          DownloadChapterState.queued ||
-          DownloadChapterState.downloading => 'Saving…',
-          DownloadChapterState.failed => 'Could not be saved — select to retry',
-          null when chapter.isDownloaded => 'Narrated',
-          null => 'Not narrated yet',
+          NarrationSaveState.saved => 'Saved on this phone',
+          NarrationSaveState.unplayable =>
+            'Saved copy cannot play on this phone — select to save again',
+          NarrationSaveState.saving => 'Saving…',
+          NarrationSaveState.failed => 'Could not be saved — select to retry',
+          NarrationSaveState.none when chapter.isDownloaded => 'Narrated',
+          NarrationSaveState.none => 'Not narrated yet',
         },
       ),
-      secondary: state == DownloadChapterState.complete
-          ? const Icon(Icons.download_done_rounded, size: 18)
-          : null,
+      secondary: switch (state) {
+        NarrationSaveState.saved =>
+          const Icon(Icons.download_done_rounded, size: 18),
+        NarrationSaveState.unplayable =>
+          const Icon(Icons.sync_problem_rounded, size: 18),
+        _ => null,
+      },
     );
   }
 

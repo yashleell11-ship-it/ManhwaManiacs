@@ -5,7 +5,6 @@ import 'package:manhwamaniacs/app/router/routes.dart';
 import 'package:manhwamaniacs/app/theme/app_colors.dart';
 import 'package:manhwamaniacs/app/theme/app_presets.dart';
 import 'package:manhwamaniacs/features/downloads/models/chapter_selection.dart';
-import 'package:manhwamaniacs/features/downloads/models/download_chapter_state.dart';
 import 'package:manhwamaniacs/features/downloads/models/saved_chapter.dart';
 import 'package:manhwamaniacs/features/downloads/providers/downloads_scope.dart';
 import 'package:manhwamaniacs/features/downloads/providers/series_download_status_provider.dart';
@@ -13,7 +12,9 @@ import 'package:manhwamaniacs/features/downloads/queue/download_queue_controller
 import 'package:manhwamaniacs/features/downloads/widgets/chapter_download_action.dart';
 import 'package:manhwamaniacs/features/downloads/widgets/download_series_button.dart';
 import 'package:manhwamaniacs/features/library/utils/resume_location.dart';
+import 'package:manhwamaniacs/features/novels/models/narration_save_state.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_typography.dart';
+import 'package:manhwamaniacs/features/novels/providers/novel_audio_provider.dart';
 import 'package:manhwamaniacs/features/novels/providers/novel_series_providers.dart';
 import 'package:manhwamaniacs/features/novels/providers/series_audio_provider.dart';
 import 'package:manhwamaniacs/features/novels/utils/novel_book.dart';
@@ -87,6 +88,11 @@ class _NovelSeriesDetailViewState extends ConsumerState<NovelSeriesDetailView> {
     final narration =
         ref.watch(seriesNarrationStatusProvider(identity)).valueOrNull ??
             const <String, ChapterDownloadStatus>{};
+    // A complete save this phone cannot play is not "saved": the marker
+    // promises the chapter plays offline.
+    final unplayableAudio =
+        ref.watch(unplayableNarrationSavesProvider(identity)).valueOrNull ??
+            const <String>{};
 
     final ordered = sortSeriesChapters(
       widget.chapters,
@@ -186,8 +192,11 @@ class _NovelSeriesDetailViewState extends ConsumerState<NovelSeriesDetailView> {
                 progress: progressMap[chapter.id],
                 hasScope: hasScope,
                 status: downloadStatuses?[chapter.id],
-                audioSaved: narration[chapter.id]?.state ==
-                    DownloadChapterState.complete,
+                audioSaved: narrationSaveState(
+                      narration[chapter.id],
+                      unplayable: unplayableAudio.contains(chapter.id),
+                    ) ==
+                    NarrationSaveState.saved,
                 onOpen: () => context.push(
                   RoutePaths.novelReader(
                     widget.sourceId,
