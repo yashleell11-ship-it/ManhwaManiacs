@@ -401,6 +401,12 @@ class SearchListNotifier
   }
 
   Future<void> loadMore() async {
+    // While a new query's first page is on its way, the value still held is
+    // the OLD query's. Paging it would ask for page 2 of the new query, win
+    // the request-id race against that query's page 1, and merge the two for
+    // good: the old hits plus the new query's second page, its first never
+    // shown.
+    if (state.isLoading) return;
     final current = state.valueOrNull;
     if (current == null || !current.hasMore || current.isLoadingMore) return;
 

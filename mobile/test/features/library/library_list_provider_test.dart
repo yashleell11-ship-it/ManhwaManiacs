@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:manhwamaniacs/core/error/app_error.dart';
@@ -607,6 +609,57 @@ void main() {
       expect(state.sourcesFailed, 0);
     });
 
+    test("scrolling while a new query loads never pages the old one's answer",
+        () async {
+      GroupedSearchResult hit(String title, {bool hasMore = false}) =>
+          GroupedSearchResult(
+            groups: [
+              group_(
+                source: 'mangadex',
+                name: 'MangaDex',
+                items: [
+                  GlobalSearchItem(
+                    kind: 'source',
+                    source: 'mangadex',
+                    seriesId: title,
+                    title: title,
+                  ),
+                ],
+              ),
+            ],
+            sourcesQueried: 12,
+            hasMore: hasMore,
+          );
+
+      final fakeRepo = _GatedSearchSourcesRepository();
+      final container = await searchContainer(fakeRepo);
+      container.listen(searchListProvider, (_, __) {});
+      final notifier = container.read(searchListProvider.notifier);
+
+      container.read(searchQueryProvider.notifier).state = 'solo';
+      container.read(searchListProvider);
+      fakeRepo.gate('solo', 1).complete(Ok(hit('Solo A', hasMore: true)));
+      await container.read(searchListProvider.future);
+
+      container.read(searchQueryProvider.notifier).state = 'omni';
+      expect(container.read(searchListProvider).isLoading, isTrue);
+      // The reader scrolls to the bottom of the old answer meanwhile.
+      unawaited(notifier.loadMore());
+      await Future<void>.delayed(Duration.zero);
+
+      fakeRepo.gate('omni', 1).complete(Ok(hit('Omni P1', hasMore: true)));
+      fakeRepo.gate('omni', 2).complete(Ok(hit('Omni P2')));
+      await container.read(searchListProvider.future);
+      await Future<void>.delayed(Duration.zero);
+
+      final shown = container.read(searchListProvider).value!;
+      expect(
+        [for (final g in shown.groups) for (final i in g.items) i.title],
+        ['Omni P1'],
+      );
+      expect(fakeRepo.requests, [('solo', 1), ('omni', 1)]);
+    });
+
     test('repository error surfaces as AsyncError, never stuck loading',
         () async {
       final fakeRepo = _FakeSearchSourcesRepository(
@@ -623,6 +676,29 @@ void main() {
       expect(container.read(searchListProvider).hasError, isTrue);
     });
   });
+}
+
+/// A grouped search that answers each (query, page) only when the test
+/// completes its gate, so what happens while a query is in flight can be
+/// driven step by step.
+class _GatedSearchSourcesRepository extends _FakeSearchSourcesRepository {
+  _GatedSearchSourcesRepository() : super(const {});
+
+  final requests = <(String, int)>[];
+  final _gates = <(String, int), Completer<Result<GroupedSearchResult>>>{};
+
+  Completer<Result<GroupedSearchResult>> gate(String query, int page) =>
+      _gates.putIfAbsent((query, page), Completer.new);
+
+  @override
+  Future<Result<GroupedSearchResult>> searchGrouped(
+    String query, {
+    int page = 1,
+    int perPage = 40,
+  }) {
+    requests.add((query, page));
+    return gate(query, page).future;
+  }
 }
 
 /// Grouped-search double. Only [searchGrouped] and [listSeries] (the
