@@ -402,6 +402,10 @@ class FollowedSeriesService:
             profile_id=self._profile_id,
             source_id=source_id,
             series_key=series_key,
+            # After everything already followed, not the column default of 0:
+            # every follow used to land on 0, so "Manual Order" had nothing to
+            # order by and a new follow tied with whatever had been placed first.
+            sort_order=self._next_follow_sort_order(),
             title=str(meta.get("title") or series_key),
             cover_url=meta.get("cover_url"),
             content_rating=content_rating,
@@ -433,6 +437,20 @@ class FollowedSeriesService:
             self._cache.write_through(source_id, series_key, meta, chapters)
         # Progress outlives an unfollow, so a re-follow can already be started.
         return self._serialize_with_state(row)
+
+    def _next_follow_sort_order(self) -> int:
+        """One past the largest ``sort_order`` this profile's follows hold.
+
+        The maximum, not the row count: a patched position or an unfollow
+        leaves gaps, and a count then lands on a position already taken.
+        """
+        return int(
+            self._db.execute(
+                self._scope(
+                    select(func.coalesce(func.max(FollowedSeries.sort_order), -1))
+                )
+            ).scalar_one()
+        ) + 1
 
     def _followed_under_another_key(
         self, source_id: str, series_key: str
@@ -570,6 +588,13 @@ class FollowedSeriesService:
         if search:
             stmt = stmt.where(FollowedSeries.title.ilike(f"%{search.strip()}%"))
 
+        # Ordered by id before the sorts below, which are stable: rows that tie
+        # on the sort key (every follow shares sort_order 0 until moved; two
+        # series can share a title) keep one order from request to request.
+        # Unordered, the database may hand ties back differently each time, and
+        # a client paging through the whole library then sees a row on two
+        # pages and never sees another.
+        stmt = stmt.order_by(FollowedSeries.id)
         rows = self._visible(list(self._db.execute(stmt).scalars().all()))
 
         reverse = sort.startswith("-")
@@ -1263,7 +1288,7 @@ class FollowedSeriesService:
                     CollectionSeries.series_key,
                     CollectionSeries.sort_order,
                 ).where(CollectionSeries.collection_id == collection_id)
-            ).order_by(CollectionSeries.sort_order)
+            ).order_by(CollectionSeries.sort_order, CollectionSeries.added_at)
         ).all()
         payload = self._serialize_collection(row, series_count=len(members))
         payload["series"] = [
@@ -1300,25 +1325,33 @@ class FollowedSeriesService:
         self, collection_id: int, source_id: str, series_key: str
     ) -> dict[str, Any]:
         self._require_owner()
-        row = self._owned_collection(collection_id)
-        # ``sort_order`` below is the membership count at insert time, and
-        # production sessions are built with ``expire_on_commit=False``: a
-        # ``series`` collection loaded by an earlier add in this same session
-        # survives that add's commit, so without this the second member is
-        # counted against stale membership and lands on the first one's
-        # position.
-        self._db.expire(row, ["series"])
+        self._owned_collection(collection_id)
         series_key = fully_unquote(series_key)
         exists = self._db.get(
             CollectionSeries, (collection_id, source_id, series_key)
         )
         if exists is None:
+            # One past the largest position in use, read from the table. It
+            # was the membership count, which after any removal is smaller
+            # than the last position: remove A from A0 B1 C2, add D, and D
+            # took 2 beside C and could sort ahead of it. Queried rather than
+            # read off ``Collection.series`` also because production sessions
+            # are built with ``expire_on_commit=False``, so a relationship
+            # loaded by an earlier add in the same session survives its commit
+            # and is counted one write behind.
+            next_position = int(
+                self._db.execute(
+                    select(
+                        func.coalesce(func.max(CollectionSeries.sort_order), -1)
+                    ).where(CollectionSeries.collection_id == collection_id)
+                ).scalar_one()
+            ) + 1
             self._db.add(
                 CollectionSeries(
                     collection_id=collection_id,
                     source_id=source_id,
                     series_key=series_key,
-                    sort_order=len(row.series),
+                    sort_order=next_position,
                 )
             )
             self._db.commit()

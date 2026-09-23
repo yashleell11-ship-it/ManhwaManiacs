@@ -284,6 +284,57 @@ def test_add_series_response_is_not_one_write_behind(api, h):
     assert repeat["series_count"] == 2
 
 
+def test_a_series_added_after_a_remove_takes_the_next_position(api, h):
+    """A new member goes after every member already there, never beside one.
+
+    Its position was the membership count, which after a removal is smaller
+    than the last position in use: remove A from A0 B1 C2, add D, and D took
+    2 beside C. Ties come back in key order, so the newest member could list
+    ahead of an older one (and become the phone's collection cover).
+    """
+    cid = api.post(
+        "/library/collections", json={"name": "Shelf"}, headers=h
+    ).json()["id"]
+    # "zz-..." sorts after "b-..." and "c-..." by key, and "a-..." before them,
+    # so a tie on position would put D (the newest) ahead of C.
+    for key in ("a-first", "b-second", "zz-third"):
+        api.post(
+            f"/library/collections/{cid}/series",
+            json={"source_id": SRC, "series_key": key},
+            headers=h,
+        )
+    api.request(
+        "DELETE", f"/library/collections/{cid}/series",
+        json={"source_id": SRC, "series_key": "a-first"}, headers=h,
+    )
+
+    added = api.post(
+        f"/library/collections/{cid}/series",
+        json={"source_id": SRC, "series_key": "c-fourth"},
+        headers=h,
+    ).json()
+
+    assert [s["series_key"] for s in added["series"]] == [
+        "b-second", "zz-third", "c-fourth"
+    ]
+    positions = [s["sort_order"] for s in added["series"]]
+    assert len(set(positions)) == len(positions), positions
+
+
+def test_each_new_follow_takes_the_next_manual_position(api, h):
+    """Every follow landed on sort_order 0, so "Manual Order" had nothing to
+    order by and a new follow tied with the one placed first."""
+    first = _follow(api, h, S1)
+    second = _follow(api, h, S2)
+
+    assert second["sort_order"] == first["sort_order"] + 1
+
+    listed = api.get(
+        "/library/series", params={"sort": "sort_order"}, headers=h
+    ).json()["items"]
+    assert [row["series_key"] for row in listed] == [S1, S2]
+
+
 # --- tags -------------------------------------------------------------
 
 
