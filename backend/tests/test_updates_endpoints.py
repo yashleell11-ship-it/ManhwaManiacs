@@ -113,6 +113,68 @@ def test_notifications_list_count_mark(api, h, acct, db_session, seed_follow):
     assert api.patch("/updates/notifications/999999/read", headers=h).status_code == 404
 
 
+@pytest.fixture
+def two_modes(api, h, acct, db_session, seed_follow, monkeypatch):
+    """One unread manga notification and one unread novel notification, with
+    novels switched on so the Updates screen shows them in different modes."""
+    from core.config import get_settings
+
+    monkeypatch.setenv("MM_NOVELS_ENABLED", "true")
+    get_settings.cache_clear()
+    uid, pid = acct
+    manga = seed_follow(uid, pid, source_id=SRC, series_key=SERIES)
+    novel = seed_follow(uid, pid, source_id="novelarchive", series_key="a-novel")
+    _seed_notif(db_session, uid, pid, manga.id, chapter_key="m1")
+    row = _seed_notif(db_session, uid, pid, novel.id, chapter_key="n1")
+    row.source_id, row.series_key = "novelarchive", "a-novel"
+    db_session.commit()
+    yield
+    get_settings.cache_clear()
+
+
+def _unread_keys(api, h) -> set[str]:
+    rows = api.get(
+        "/updates/notifications", params={"unread_only": True}, headers=h
+    ).json()
+    return {n["chapter_key"] for n in rows}
+
+
+def test_mark_all_read_in_one_mode_leaves_the_other_modes_rows_unread(
+    api, h, two_modes
+):
+    """The Updates screen lists one content mode at a time. "Mark all read" in
+    Manga mode used to clear the novel chapters too, which the reader had not
+    been shown and then never saw as new in Novels mode."""
+    manga = api.post(
+        "/updates/notifications/read-all", json={"content_kind": "manga"}, headers=h
+    )
+    assert manga.status_code == 200, manga.text
+    assert manga.json()["updated"] == 1
+    assert _unread_keys(api, h) == {"n1"}
+
+    novel = api.post(
+        "/updates/notifications/read-all", json={"content_kind": "novel"}, headers=h
+    )
+    assert novel.json()["updated"] == 1
+    assert _unread_keys(api, h) == set()
+
+
+def test_mark_all_read_without_a_mode_still_clears_every_mode(api, h, two_modes):
+    # What an installed app that predates the option sends.
+    cleared = api.post("/updates/notifications/read-all", headers=h)
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["updated"] == 2
+    assert _unread_keys(api, h) == set()
+
+
+def test_mark_all_read_refuses_an_unknown_mode(api, h, two_modes):
+    bad = api.post(
+        "/updates/notifications/read-all", json={"content_kind": "comics"}, headers=h
+    )
+    assert bad.status_code == 422
+    assert _unread_keys(api, h) == {"m1", "n1"}
+
+
 def test_notifications_isolated_between_profiles(
     api, as_user, acct, make_profile, db_session, seed_follow
 ):

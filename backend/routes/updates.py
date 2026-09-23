@@ -11,7 +11,7 @@ absent, never a 403. See ``UpdateService._visible_notifications``.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel, Field
@@ -44,6 +44,11 @@ class GlobalSettingsUpdate(BaseModel):
     check_interval_minutes: int | None = Field(default=None, ge=5)
     notify_enabled: bool | None = None
     check_on_startup: bool | None = None
+
+
+class MarkAllReadRequest(BaseModel):
+    # The content mode the screen is showing; omitted means every mode.
+    content_kind: Literal["manga", "novel"] | None = None
 
 
 class ManualCheckRequest(BaseModel):
@@ -95,8 +100,15 @@ def mark_read(notification_id: int, service: UpdateDep) -> dict[str, object]:
 
 
 @router.post("/notifications/read-all")
-def mark_all_read(service: UpdateDep) -> dict[str, int]:
-    return service.mark_all_notifications_read()
+def mark_all_read(
+    service: UpdateDep, body: MarkAllReadRequest | None = None
+) -> dict[str, int]:
+    """Mark every visible unread notification read — or, with
+    ``content_kind``, only those of the mode the client's screen shows. The
+    body is optional so a client that sends none keeps the old behaviour."""
+    return service.mark_all_notifications_read(
+        content_kind=body.content_kind if body is not None else None
+    )
 
 
 @router.get("/runs", dependencies=[Depends(require_admin_user)])

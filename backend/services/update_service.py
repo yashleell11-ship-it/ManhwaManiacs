@@ -344,17 +344,37 @@ class UpdateService:
         self._db.commit()
         return self.serialize_notification(row)
 
-    def mark_all_notifications_read(self) -> dict[str, int]:
+    def mark_all_notifications_read(
+        self, *, content_kind: str | None = None
+    ) -> dict[str, int]:
         """Clear the unread badge — over exactly what the badge counted.
 
         Gated with the listing, not merely scoped with it: a bulk clear that
         reached rows the profile cannot see would consume its own mature
         notifications unread, so turning the gate back on would surface a
         library of new chapters already marked as seen.
+
+        ``content_kind`` ("manga" / "novel") narrows it to the rows of one
+        content mode, which is all the Updates screen shows at a time: a
+        reader in Manga mode who tapped "Mark all read" also cleared every
+        novel chapter they had not been shown, so those never read as new in
+        Novels mode. The split is the clients' own — a source is a novel
+        source iff its connector says so, and anything else, including a
+        source no longer installed, is manga — so the rows cleared are the
+        rows the screen listed. Omitted, it is the whole account, as before
+        (installed apps that predate the option still send nothing).
         """
         stmt = self._visible_notifications(
             select(UpdateNotification).where(UpdateNotification.is_read.is_(False))
         )
+        if content_kind is not None:
+            novel_sources = [
+                descriptor.source_type
+                for descriptor in list_installed_connectors()
+                if descriptor.content_kind == "novel"
+            ]
+            in_novels = UpdateNotification.source_id.in_(novel_sources)
+            stmt = stmt.where(in_novels if content_kind == "novel" else ~in_novels)
         rows = self._db.execute(stmt).scalars().all()
         for row in rows:
             row.is_read = True
