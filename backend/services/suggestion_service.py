@@ -176,6 +176,13 @@ class _DeadlineTransport(httpx.BaseTransport):
     def __init__(self, seconds: float) -> None:
         self._deadline = _now() + seconds
         self._inner: httpx.BaseTransport | None = None
+        #: Attempts DeepSeek ANSWERED — headers back, so accepted and being
+        #: billed — that this deadline then cut mid-body. deepseek_client only
+        #: counts a request once it has a whole response, and a cut surfaces to
+        #: it as a transport error, so without this a slow answer near
+        #: MAX_TOKENS would be paid for and never counted against either
+        #: ledger: a reader could repeat such prompts past every ceiling.
+        self.cut_after_answer = 0
 
     def remaining(self, request: httpx.Request) -> float:
         left = self._deadline - _now()
@@ -223,7 +230,13 @@ class _DeadlineStream(httpx.SyncByteStream):
 
     def __iter__(self) -> Iterator[bytes]:
         for chunk in self._inner:
-            self._transport.remaining(self._request)
+            try:
+                self._transport.remaining(self._request)
+            except httpx.ReadTimeout:
+                # Headers already arrived: this attempt was accepted and is
+                # being paid for. See _DeadlineTransport.cut_after_answer.
+                self._transport.cut_after_answer += 1
+                raise
             yield chunk
 
     def close(self) -> None:
@@ -531,6 +544,8 @@ class SuggestionService:
                 "" if taste.get("gate_open") else _MATURE_CLAUSE_CLOSED
             ),
         )
+        deadline = _DeadlineTransport(TIMEOUT_SECONDS)
+        account_budget = self._account_budget()
         try:
             completion = deepseek_client.complete_json(
                 self._user_message(prompt, taste, shelf),
@@ -540,8 +555,8 @@ class SuggestionService:
                 timeout=TIMEOUT_SECONDS,
                 ceiling=self._global_ceiling(),
                 budget_path=BUDGET_PATH,
-                account_budget=self._account_budget(),
-                transport=_DeadlineTransport(TIMEOUT_SECONDS),
+                account_budget=account_budget,
+                transport=deadline,
             )
         except LLMBudgetExhausted as exc:
             raise AppError(
@@ -557,6 +572,14 @@ class SuggestionService:
                 status_code=503,
             ) from exc
         except LLMError as exc:
+            # A request the deadline cut after DeepSeek had answered was still
+            # paid for, so it still counts — against the shared day and this
+            # account's share alike. A request refused before it was sent is
+            # not counted: it cost nothing.
+            for _ in range(deadline.cut_after_answer):
+                deepseek_client._record_request(BUDGET_PATH)
+                if account_budget is not None:
+                    deepseek_client._record_account_request(account_budget)
             # The upstream body is never echoed — it can carry the request,
             # and the request carries the key's account. The client already
             # redacts; do not undo that by logging the cause.

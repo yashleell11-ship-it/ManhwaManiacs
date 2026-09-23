@@ -725,6 +725,31 @@ def clock(monkeypatch):
     return now
 
 
+class _KeepAlive:
+    """DeepSeek holding a slow request open with blank lines, 5 s apart on the
+    fake clock. Bounded, then a real answer: if the deadline check ever goes
+    missing, the test gets an answer and fails loudly instead of hanging CI."""
+
+    def __init__(self, clock, answer: bytes):
+        self._clock, self._answer = clock, answer
+
+    def __iter__(self):
+        for _ in range(60):  # 300 s of keep-alives, far past the deadline
+            self._clock[0] += 5
+            yield b"\n"
+        yield self._answer
+
+
+def _keepalive_answer() -> bytes:
+    return json.dumps({
+        "model": "deepseek-flash",
+        "choices": [{"message": {"content": json.dumps(
+            {"suggestions": [{"title": "Filler Book 0", "why": "because"}]}
+        )}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    }).encode()
+
+
 def test_a_slow_answer_is_abandoned_before_the_edge_gives_up(
     service, shelf, clock, monkeypatch
 ):
@@ -740,9 +765,7 @@ def test_a_slow_answer_is_abandoned_before_the_edge_gives_up(
 
     class KeepAlive(httpx.SyncByteStream):
         def __iter__(self):
-            while True:
-                clock[0] += 5
-                yield b"\n"
+            return iter(_KeepAlive(clock, _keepalive_answer()))
 
     def handle(request: httpx.Request) -> httpx.Response:
         sent.append(request)
@@ -761,6 +784,52 @@ def test_a_slow_answer_is_abandoned_before_the_edge_gives_up(
     # and all of it inside the edge's limit.
     assert clock[0] - start <= suggestion_service.TIMEOUT_SECONDS + 5 + 2
     assert clock[0] - start < EDGE_GIVES_UP_AT
+    # DeepSeek answered and was generating when the deadline cut it: that is
+    # a paid request, so it counts against the day like any other.
+    assert deepseek_client.spent_today(suggestion_service.BUDGET_PATH) == 1
+
+
+def test_a_cut_answer_counts_against_the_accounts_own_share_too(
+    member_of, shelf, clock, monkeypatch
+):
+    # Without this a non-admin account could repeat slow prompts forever: the
+    # cut request cost money and counted against nothing.
+    import httpx
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-not-a-real-key-0000000000")
+    _fill_shelf(shelf)
+    member = member_of("slowreader")
+
+    class KeepAlive(httpx.SyncByteStream):
+        def __iter__(self):
+            return iter(_KeepAlive(clock, _keepalive_answer()))
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, stream=KeepAlive()))
+    monkeypatch.setattr(suggestion_service, "_upstream_transport", lambda: transport)
+
+    with pytest.raises(AppError):
+        member.suggest("anything", base_url="http://x/")
+
+    budget = member._account_budget()
+    assert deepseek_client.account_spent_today(budget.path, budget.account) == 1
+    assert deepseek_client.spent_today(suggestion_service.BUDGET_PATH) == 1
+
+
+def test_a_request_refused_before_sending_costs_nothing(service, shelf, clock, monkeypatch):
+    # The other side of the same rule: a retry the deadline refuses before it
+    # is sent never reached DeepSeek, so it must not be charged.
+    import httpx
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-not-a-real-key-0000000000")
+    _fill_shelf(shelf)
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, stream=httpx.ByteStream(b"")))
+    monkeypatch.setattr(suggestion_service, "_upstream_transport", lambda: transport)
+    monkeypatch.setattr(suggestion_service, "TIMEOUT_SECONDS", 0.0)
+
+    with pytest.raises(AppError):
+        service.suggest("anything", base_url="http://x/")
+
+    assert deepseek_client.spent_today(suggestion_service.BUDGET_PATH) == 0
 
 
 def test_the_retry_gets_only_what_the_first_attempt_left(
