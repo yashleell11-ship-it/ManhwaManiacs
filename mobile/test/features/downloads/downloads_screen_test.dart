@@ -24,9 +24,13 @@ class _MockDownloadsStore extends Mock implements DownloadsStore {}
 class _FixedQueueController extends DownloadQueueController {
   _FixedQueueController(this._state);
   final DownloadQueueState _state;
+  var storageRetries = 0;
 
   @override
   DownloadQueueState build() => _state;
+
+  @override
+  void retryAfterStorageChange() => storageRetries++;
 }
 
 SavedChapter _chapter({
@@ -290,6 +294,42 @@ void main() {
           (sourceId: 'asura', seriesKey: 'solo-leveling', chapterKey: '1'),
         ),
       ).called(1);
+    });
+
+    testWidgets('removing downloads lets a queue stopped at the cap retry',
+        (tester) async {
+      final store = _MockDownloadsStore();
+      when(() => store.deleteDownload(any())).thenAnswer((_) async {});
+      final container = await pumpScreen(
+        tester,
+        groups: [
+          _group([
+            _chapter(rowId: 1, chapterKey: '1'),
+            _chapter(rowId: 2, chapterKey: '2'),
+          ]),
+        ],
+        store: store,
+        queueState: const DownloadQueueState(
+          pauseReason: DownloadQueuePauseReason.cap,
+        ),
+      );
+      final queue = container.read(downloadQueueControllerProvider.notifier)
+          as _FixedQueueController;
+
+      await tester.tap(find.text('Solo Leveling'));
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('remove-asura-solo-leveling-1')));
+      await tester.pump();
+      expect(queue.storageRetries, 1);
+
+      await tester
+          .tap(find.byKey(const Key('series-menu-asura-solo-leveling')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Remove all downloads'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Remove'));
+      await tester.pumpAndSettle();
+      expect(queue.storageRetries, 2);
     });
 
     testWidgets('removing a whole series confirms first, then deletes each',

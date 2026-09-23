@@ -5,9 +5,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:manhwamaniacs/core/error/app_error.dart';
 import 'package:manhwamaniacs/core/utils/result.dart';
 import 'package:manhwamaniacs/features/downloads/models/download_chapter_state.dart';
+import 'package:manhwamaniacs/features/downloads/models/retention_policy.dart';
 import 'package:manhwamaniacs/features/downloads/models/saved_chapter.dart';
 import 'package:manhwamaniacs/features/downloads/models/storage_cap.dart';
 import 'package:manhwamaniacs/features/downloads/providers/downloads_scope.dart';
+import 'package:manhwamaniacs/features/downloads/providers/downloads_storage_providers.dart';
 import 'package:manhwamaniacs/features/downloads/providers/retention_maintenance_provider.dart';
 import 'package:manhwamaniacs/features/downloads/providers/storage_settings_provider.dart';
 import 'package:manhwamaniacs/features/downloads/queue/download_constants.dart';
@@ -15,6 +17,7 @@ import 'package:manhwamaniacs/features/downloads/queue/download_queue_controller
 import 'package:manhwamaniacs/features/downloads/services/chapter_page_fetcher.dart';
 import 'package:manhwamaniacs/features/downloads/services/device_storage_info.dart';
 import 'package:manhwamaniacs/features/downloads/services/retention_maintenance.dart';
+import 'package:manhwamaniacs/features/downloads/store/downloads_store.dart';
 import 'package:manhwamaniacs/features/reader/models/bookmark.dart';
 import 'package:manhwamaniacs/features/reader/models/chapter_manifest.dart';
 import 'package:manhwamaniacs/features/reader/models/chapter_manifest_window.dart';
@@ -143,10 +146,12 @@ void main() {
     required ChapterPageFetcher pageFetcher,
     DeviceStorageInfo? deviceStorageInfo,
     StorageCap storageCap = StorageCap.unlimited,
+    Override? storeOverride,
   }) {
     final container = ProviderContainer(
       overrides: [
-        downloadsStoreProvider.overrideWithValue(harness.storeFor('u1p1')),
+        storeOverride ??
+            downloadsStoreProvider.overrideWithValue(harness.storeFor('u1p1')),
         retentionMaintenanceProvider.overrideWithValue(
           RetentionMaintenance(
             database: harness.openDatabase(),
@@ -161,6 +166,9 @@ void main() {
         storageCapProvider.overrideWith(
           () => _FixedStorageCapNotifier(storageCap),
         ),
+        // Only "Free up space" reads it; Off keeps its sweep out of the way
+        // of the cap eviction those tests are about.
+        retentionIntervalProvider.overrideWith(_FixedRetentionIntervalNotifier.new),
         downloadConcurrencyOverride(),
       ],
     );
@@ -596,6 +604,235 @@ void main() {
     );
     expect(await harness.storeFor('u1p1').pendingChapters(), hasLength(5));
   });
+
+  group('a scope appearing after the first pass', () {
+    // Stands in for sign-in: null until the test says the session resolved,
+    // which on a cold launch is well after the lifecycle gate's first kick.
+    late StateProvider<DownloadsStore?> session;
+
+    setUp(() {
+      session = StateProvider<DownloadsStore?>((ref) => null);
+    });
+
+    Override sessionStore() =>
+        downloadsStoreProvider.overrideWith((ref) => ref.watch(session));
+
+    test('resumes rows left queued by the last run', () async {
+      final store = harness.storeFor('u1p1');
+      await store.ensureQueued(id: _id);
+
+      final container = buildContainer(
+        readerRepository: _ScriptedReaderRepository(
+          () async => Ok(_manifestWithPages(2)),
+        ),
+        pageFetcher: _ScriptedPageFetcher((url) async => [1]),
+        storeOverride: sessionStore(),
+      );
+      final controller =
+          container.read(downloadQueueControllerProvider.notifier);
+      controller.resumePendingOnLaunch();
+      await controller.debugWaitUntilIdle();
+      expect(
+        container.read(downloadQueueControllerProvider).pauseReason,
+        DownloadQueuePauseReason.noScope,
+      );
+
+      container.read(session.notifier).state = store;
+      await container.pump();
+      await controller.debugWaitUntilIdle();
+
+      expect(
+        (await store.getChapter(_id))!.state,
+        DownloadChapterState.complete,
+      );
+      expect(
+        container.read(downloadQueueControllerProvider).pauseReason,
+        DownloadQueuePauseReason.none,
+      );
+    });
+
+    test('leaves a deliberate pause alone', () async {
+      final store = harness.storeFor('u1p1');
+      await store.ensureQueued(id: _id);
+      var fetchCount = 0;
+
+      final container = buildContainer(
+        readerRepository: _ScriptedReaderRepository(
+          () async => Ok(_manifestWithPages(2)),
+        ),
+        pageFetcher: _ScriptedPageFetcher((url) async {
+          fetchCount++;
+          return [1];
+        }),
+        storeOverride: sessionStore(),
+      );
+      final controller =
+          container.read(downloadQueueControllerProvider.notifier);
+      controller.pause();
+
+      container.read(session.notifier).state = store;
+      await container.pump();
+      await controller.debugWaitUntilIdle();
+
+      expect(fetchCount, 0);
+      expect(
+        (await store.getChapter(_id))!.state,
+        DownloadChapterState.queued,
+      );
+    });
+  });
+
+  group('a storage pause clears once the user makes room', () {
+    // Pushes the device total past a 2 GB cap without writing 3 GB: the cap
+    // is enforced against the blobs table, so one oversized row is enough.
+    Future<void> fillPastTwoGigabytes() async {
+      final db = await harness.openDatabase();
+      await db.insert('blobs', {
+        'hash': 'huge',
+        'refcount': 1,
+        'size': 3 * 1024 * 1024 * 1024,
+      });
+    }
+
+    Future<(ProviderContainer, DownloadQueueController)> pausedAtCap() async {
+      final container = buildContainer(
+        readerRepository: _ScriptedReaderRepository(
+          () async => Ok(_manifestWithPages(2)),
+        ),
+        pageFetcher: _ScriptedPageFetcher((url) async => [1]),
+        storageCap: StorageCap.gb2,
+      );
+      await fillPastTwoGigabytes();
+      final controller =
+          container.read(downloadQueueControllerProvider.notifier);
+      await controller.enqueueChapter(id: _id);
+      await controller.debugWaitUntilIdle();
+      expect(
+        container.read(downloadQueueControllerProvider).pauseReason,
+        DownloadQueuePauseReason.cap,
+      );
+      return (container, controller);
+    }
+
+    test('raising the cap restarts the queue', () async {
+      final (container, controller) = await pausedAtCap();
+
+      await container
+          .read(storageCapProvider.notifier)
+          .setCap(StorageCap.unlimited);
+      await controller.debugWaitUntilIdle();
+
+      expect(
+        (await harness.storeFor('u1p1').getChapter(_id))!.state,
+        DownloadChapterState.complete,
+      );
+      expect(
+        container.read(downloadQueueControllerProvider).pauseReason,
+        DownloadQueuePauseReason.none,
+      );
+    });
+
+    test('a cap still too low pauses again with the same reason', () async {
+      final (container, controller) = await pausedAtCap();
+
+      await container.read(storageCapProvider.notifier).setCap(StorageCap.gb2);
+      await controller.debugWaitUntilIdle();
+
+      expect(
+        container.read(downloadQueueControllerProvider).pauseReason,
+        DownloadQueuePauseReason.cap,
+      );
+      expect(
+        (await harness.storeFor('u1p1').getChapter(_id))!.state,
+        DownloadChapterState.queued,
+      );
+    });
+
+    test('deleting downloads and retrying restarts the queue', () async {
+      final (container, controller) = await pausedAtCap();
+
+      // What any delete path does to the device total.
+      final db = await harness.openDatabase();
+      await db.delete('blobs', where: 'hash = ?', whereArgs: ['huge']);
+      controller.retryAfterStorageChange();
+      await controller.debugWaitUntilIdle();
+
+      expect(
+        (await harness.storeFor('u1p1').getChapter(_id))!.state,
+        DownloadChapterState.complete,
+      );
+    });
+
+    test('"Free up space" restarts the queue once it has made room',
+        () async {
+      // A chapter already read, holding the bytes that put the device over
+      // the cap — exactly what eviction is allowed to take.
+      const read = (
+        sourceId: 'asura',
+        seriesKey: 'omniscient-reader',
+        chapterKey: 'c9',
+      );
+      final store = harness.storeFor('u1p1');
+      final readRow = await store.ensureQueued(id: read);
+      await store.updateManifestInfo(rowId: readRow, pageCount: 1);
+      await store.savePage(rowId: readRow, pageNumber: 1, bytes: [5, 5]);
+      expect(await store.markCompleteIfAllPagesPresent(readRow), isTrue);
+      await store.markRead(read);
+      final db = await harness.openDatabase();
+      await db.update('blobs', {'size': 3 * 1024 * 1024 * 1024});
+
+      final container = buildContainer(
+        readerRepository: _ScriptedReaderRepository(
+          () async => Ok(_manifestWithPages(2)),
+        ),
+        pageFetcher: _ScriptedPageFetcher((url) async => [1]),
+        storageCap: StorageCap.gb2,
+      );
+      final controller =
+          container.read(downloadQueueControllerProvider.notifier);
+      await controller.enqueueChapter(id: _id);
+      await controller.debugWaitUntilIdle();
+      expect(
+        container.read(downloadQueueControllerProvider).pauseReason,
+        DownloadQueuePauseReason.cap,
+      );
+
+      final removed =
+          await container.read(downloadsStorageActionsProvider).freeUpSpace();
+      await controller.debugWaitUntilIdle();
+
+      expect(removed, 1);
+      expect(
+        (await store.getChapter(_id))!.state,
+        DownloadChapterState.complete,
+      );
+    });
+
+    test('a user pause is not undone by a storage change', () async {
+      final (container, controller) = await pausedAtCap();
+      controller.pause();
+
+      await container
+          .read(storageCapProvider.notifier)
+          .setCap(StorageCap.unlimited);
+      controller.retryAfterStorageChange();
+      await controller.debugWaitUntilIdle();
+
+      expect(
+        container.read(downloadQueueControllerProvider).pauseReason,
+        DownloadQueuePauseReason.userPaused,
+      );
+      expect(
+        (await harness.storeFor('u1p1').getChapter(_id))!.state,
+        DownloadChapterState.queued,
+      );
+    });
+  });
+}
+
+class _FixedRetentionIntervalNotifier extends RetentionIntervalNotifier {
+  @override
+  RetentionInterval build() => RetentionInterval.off;
 }
 
 class _FixedStorageCapNotifier extends StorageCapNotifier {
@@ -604,4 +841,9 @@ class _FixedStorageCapNotifier extends StorageCapNotifier {
 
   @override
   StorageCap build() => _cap;
+
+  /// The real one also writes SharedPreferences, which these tests never
+  /// stand up; the queue only ever sees the state change.
+  @override
+  Future<void> setCap(StorageCap cap) async => state = cap;
 }

@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:manhwamaniacs/core/error/app_error.dart';
 import 'package:manhwamaniacs/features/downloads/models/chapter_identity.dart';
 import 'package:manhwamaniacs/features/downloads/models/saved_chapter.dart';
+import 'package:manhwamaniacs/features/downloads/models/storage_cap.dart';
 import 'package:manhwamaniacs/features/downloads/providers/downloads_scope.dart';
 import 'package:manhwamaniacs/features/downloads/providers/retention_maintenance_provider.dart';
 import 'package:manhwamaniacs/features/downloads/providers/storage_settings_provider.dart';
@@ -219,7 +220,43 @@ class DownloadQueueController extends Notifier<DownloadQueueState> {
   Future<void> debugWaitUntilIdle() => _activeRun ?? Future<void>.value();
 
   @override
-  DownloadQueueState build() => const DownloadQueueState();
+  DownloadQueueState build() {
+    // A pass with no store stops at `noScope`, and nothing else would ever
+    // start the next one: on a cold launch the lifecycle gate's first kick
+    // lands before sign-in has resolved, and switching back to a profile with
+    // pending rows kicks nothing at all. So a store appearing — or changing
+    // to another scope's — is itself a reason to look for work. The store,
+    // not the scope id, because it is what the loop reads and what tests pin.
+    //
+    // `listen`, never `watch`, here and below: a rebuild would reset the
+    // pause flag, the in-flight bookkeeping and the prefetched windows.
+    ref.listen<DownloadsStore?>(downloadsStoreProvider, (previous, next) {
+      if (next == null || identical(previous, next)) return;
+      if (!_foreground || _userPaused) return;
+      unawaited(_kick());
+    });
+    // Raising (or lifting) the cap is the remedy the cap pause tells the user
+    // to reach for; the loop re-checks the cap itself, so a kick that is still
+    // over it simply pauses again with the same reason.
+    ref.listen<StorageCap>(storageCapProvider, (previous, next) {
+      if (previous != next) retryAfterStorageChange();
+    });
+    return const DownloadQueueState();
+  }
+
+  /// Restarts a queue that stopped at the storage cap or the free-space floor
+  /// once the user has done something about it — deleted downloads, run
+  /// "Free up space", or changed the cap. Both pauses only clear on a fresh
+  /// pass, and without this one arrives only when the app is next brought to
+  /// the foreground.
+  ///
+  /// Deliberately doesn't clear the pause reason itself: the pass re-checks
+  /// every guard and sets whichever still applies. A deliberate pause is left
+  /// alone, as it is everywhere else.
+  void retryAfterStorageChange() {
+    if (_userPaused) return;
+    unawaited(_kick());
+  }
 
   /// Marks a chapter for download and (re)starts the loop if it was idle.
   /// A no-op with no active scope — the caller's UI should already be

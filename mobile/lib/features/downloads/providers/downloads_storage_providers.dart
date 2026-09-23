@@ -57,6 +57,9 @@ class DownloadsStorageActions {
 
     ref.invalidate(totalDeviceDownloadBytesProvider);
     ref.invalidate(seriesStorageBreakdownProvider);
+    // "Free up space" is one of the two remedies the cap pause names; a queue
+    // stopped there would otherwise stay stopped until the next foreground.
+    ref.read(downloadQueueControllerProvider.notifier).retryAfterStorageChange();
     return removed;
   }
 }

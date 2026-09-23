@@ -13,6 +13,7 @@ import 'package:manhwamaniacs/features/downloads/models/saved_chapter.dart';
 import 'package:manhwamaniacs/features/downloads/providers/active_download_queue_provider.dart';
 import 'package:manhwamaniacs/features/downloads/providers/downloaded_series_provider.dart';
 import 'package:manhwamaniacs/features/downloads/providers/downloads_scope.dart';
+import 'package:manhwamaniacs/features/downloads/queue/download_queue_controller.dart';
 import 'package:manhwamaniacs/features/downloads/widgets/active_downloads_panel.dart';
 import 'package:manhwamaniacs/features/downloads/widgets/downloads_storage_card.dart';
 import 'package:manhwamaniacs/features/downloads/widgets/export_downloads_action.dart';
@@ -499,6 +500,9 @@ class _SeriesDownloadCardState extends ConsumerState<_SeriesDownloadCard> {
       await store.deleteDownload(chapter.identity);
     }
     ref.invalidate(downloadedSeriesProvider);
+    // Deleting is how a user makes room under the cap — a queue that stopped
+    // there resumes now rather than on the next trip to the home screen.
+    ref.read(downloadQueueControllerProvider.notifier).retryAfterStorageChange();
   }
 
   Future<void> _togglePin(DownloadedSeriesGroup group) async {
@@ -609,6 +613,8 @@ class _ChapterRow extends ConsumerWidget {
       };
 
   Future<void> _remove(WidgetRef ref) async {
+    // Read up front: the row is gone from the list once the delete lands.
+    final queue = ref.read(downloadQueueControllerProvider.notifier);
     await ref.read(downloadsStoreProvider)?.deleteDownload(
           (
             sourceId: chapter.sourceId,
@@ -616,6 +622,9 @@ class _ChapterRow extends ConsumerWidget {
             chapterKey: chapter.chapterKey,
           ),
         );
+    // Deleting is how a user makes room under the cap — see the series-wide
+    // remove above.
+    queue.retryAfterStorageChange();
     onRemoved();
   }
 }
