@@ -332,22 +332,6 @@ export function ChapterReader({
       ? undefined
       : `linear-gradient(90deg, ${marginWash} 0%, transparent calc((100% - 48rem) / 2), transparent calc(100% - (100% - 48rem) / 2), ${marginWash} 100%)`;
 
-  const cinemaCtl = useCinema({
-    persistedEnabled: cinema,
-    scrollElement,
-    active: Boolean(chapter) && !isLoading && !error,
-    onEnabledChange: setCinema,
-    // `atBottom` is only kept up to date by the strip's scroll.
-    atEnd: continuous && atBottom,
-    pagedPosition: continuous ? null : `${activeChapterKey}#${visiblePage}`,
-  });
-
-  // The chrome follows cinema mode while it is engaged; otherwise the store
-  // value that a tap toggles and reading hides (see `useCinema`). Turning
-  // cinema off always leaves the chrome up.
-  const chromeVisible = cinemaCtl.chromeVisible;
-  const toggleCinema = cinemaCtl.toggle;
-
   const autoScroll = useAutoScroll({
     scrollElement,
     active: continuous && Boolean(chapter) && !isLoading && !error,
@@ -357,6 +341,25 @@ export function ChapterReader({
     atBottom,
     pxPerSecond: autoScrollPxPerSecond(autoScrollSpeed),
   });
+
+  const cinemaCtl = useCinema({
+    persistedEnabled: cinema,
+    scrollElement,
+    active: Boolean(chapter) && !isLoading && !error,
+    onEnabledChange: setCinema,
+    // `atBottom` is only kept up to date by the strip's scroll.
+    atEnd: continuous && atBottom,
+    pagedPosition: continuous ? null : `${activeChapterKey}#${visiblePage}`,
+    // Auto-scroll is reading on; the app's own scroll jumps are not.
+    autoScrolling: autoScroll.playing,
+  });
+
+  // The chrome follows cinema mode while it is engaged; otherwise the store
+  // value that a tap toggles and reading hides (see `useCinema`). Turning
+  // cinema off always leaves the chrome up.
+  const chromeVisible = cinemaCtl.chromeVisible;
+  const toggleCinema = cinemaCtl.toggle;
+  const intendScroll = cinemaCtl.intendScroll;
 
   useEffect(() => {
     readingModeRef.current = readingMode;
@@ -773,6 +776,10 @@ export function ChapterReader({
       const step = turn === "advance" ? 1 : -1;
 
       if (readingMode === "continuous") {
+        // A turn by key (J, D, the arrows) or by edge tap is the reader
+        // reading on: the scroll it makes may hide the chrome, which a jump
+        // the strip makes on its own may not.
+        intendScroll();
         const target = visiblePage + step;
         // The strip has no hard edge any more: a turn off the end of a chapter
         // continues into the neighbour that is already sitting under it.
@@ -805,6 +812,7 @@ export function ChapterReader({
       goNextChapter,
       goPreviousChapter,
       goToPage,
+      intendScroll,
       pages.length,
       readingMode,
       viewIndex,

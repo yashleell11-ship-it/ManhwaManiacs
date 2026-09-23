@@ -31,6 +31,7 @@ describe("createChromeController", () => {
   let controller: ChromeController;
   let events: EventTarget;
   let scroller: EventTarget & { scrollTop: number };
+  let clock: number;
   let uninstall: (() => void) | null;
 
   const timers: ChromeTimers = {
@@ -45,6 +46,7 @@ describe("createChromeController", () => {
     controller = createChromeController({ machine, setControlsVisible, timers });
     events = new EventTarget();
     scroller = Object.assign(new EventTarget(), { scrollTop: 1000 });
+    clock = 0;
     uninstall = null;
   });
 
@@ -60,12 +62,19 @@ describe("createChromeController", () => {
       scroller,
       viewport: () => ({ top: 0, bottom: 800 }),
       activeElement: () => null,
+      now: () => clock,
     });
   }
 
   function pointerOver(chrome: boolean) {
     const event = Object.assign(new Event("pointerover"), { pointerType: "mouse" });
     Object.defineProperty(event, "target", { value: element(chrome) });
+    events.dispatchEvent(event);
+  }
+
+  function wheelDown() {
+    const event = Object.assign(new Event("wheel"), { deltaY: 100 });
+    Object.defineProperty(event, "target", { value: element(false) });
     events.dispatchEvent(event);
   }
 
@@ -223,24 +232,52 @@ describe("createChromeController", () => {
       install();
       controller.setAtEnd(true, true);
       setControlsVisible.mockClear();
+      wheelDown();
       scrollBy(200);
       expect(setControlsVisible).not.toHaveBeenCalled();
 
       controller.setAtEnd(false, true);
+      wheelDown();
       scrollBy(200);
       expect(setControlsVisible).toHaveBeenLastCalledWith(false);
     });
   });
 
-  it("stops listening on uninstall, and nothing holds the chrome after", () => {
-    install();
-    pointerOver(true);
-    expect(controller.held()).toBe(true);
-    uninstall?.();
-    uninstall = null;
-    expect(controller.held()).toBe(false);
-    scrollBy(200);
-    expect(setControlsVisible).not.toHaveBeenCalled();
+  describe("which scrolls count", () => {
+    it("ignores a jump the app made, and counts one auto-scroll made", () => {
+      install();
+      scrollBy(900);
+      expect(setControlsVisible).not.toHaveBeenCalled();
+
+      controller.setAutoScrolling(true);
+      scrollBy(30);
+      expect(setControlsVisible).toHaveBeenLastCalledWith(false);
+
+      controller.setAutoScrolling(false);
+      setControlsVisible.mockClear();
+      clock += 10_000;
+      scrollBy(300);
+      expect(setControlsVisible).not.toHaveBeenCalled();
+    });
+
+    it("counts the scroll of a page turn the reader asked for", () => {
+      install();
+      controller.intendScroll();
+      scrollBy(1500);
+      expect(setControlsVisible).toHaveBeenLastCalledWith(false);
+    });
+
+    it("stops listening on uninstall, and nothing holds the chrome after", () => {
+      install();
+      pointerOver(true);
+      expect(controller.held()).toBe(true);
+      uninstall?.();
+      uninstall = null;
+      expect(controller.held()).toBe(false);
+      wheelDown();
+      scrollBy(200);
+      expect(setControlsVisible).not.toHaveBeenCalled();
+    });
   });
 
   describe("toggle", () => {

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CHROME_BOTTOM_BAND_PX,
   CHROME_HIDE_SCROLL_PX,
+  CHROME_SCROLL_INTENT_MS,
   CHROME_TOP_BAND_PX,
   classifyChromeKey,
   followScroll,
@@ -81,10 +82,10 @@ describe("pointerRevealsChrome", () => {
 });
 
 describe("followScroll", () => {
-  function feed(start: number, positions: number[]): boolean[] {
+  function feed(start: number, positions: number[], intended = true): boolean[] {
     let run: ScrollRun = { top: start, down: 0 };
     return positions.map((top) => {
-      const step = followScroll(run, top);
+      const step = followScroll(run, top, intended);
       run = step.run;
       return step.conceal;
     });
@@ -114,6 +115,18 @@ describe("followScroll", () => {
 
   it("keeps the run through a scroll event that did not move", () => {
     expect(feed(0, [20, 20, 24])).toEqual([false, false, true]);
+  });
+
+  it("follows a move the app made without counting it", () => {
+    // A 5000px fix-up after the previous chapter lands on the head.
+    expect(feed(1000, [6000, 9000], false)).toEqual([false, false]);
+
+    let run: ScrollRun = { top: 1000, down: 0 };
+    run = followScroll(run, 1010, true).run;
+    const jump = followScroll(run, 4010, false);
+    expect(jump).toEqual({ run: { top: 4010, down: 10 }, conceal: false });
+    // The reader's own 10px before the jump still counts toward the next 24.
+    expect(followScroll(jump.run, 4024, true).conceal).toBe(true);
   });
 });
 
@@ -246,6 +259,8 @@ describe("installChromeAutohide", () => {
   let scroller: EventTarget & { scrollTop: number };
   let active: ReturnType<typeof element> | null;
   let atEnd: boolean;
+  let autoScrolling: boolean;
+  let clock: number;
   let reveal: ReturnType<typeof vi.fn<() => void>>;
   let conceal: ReturnType<typeof vi.fn<() => void>>;
   let autohide: ChromeAutohide;
@@ -308,13 +323,25 @@ describe("installChromeAutohide", () => {
     dispatch(Object.assign(new Event("focusout"), { relatedTarget }), target);
   }
 
+  function wheel(deltaY: number, init: { ctrlKey?: boolean; target?: EventTarget | null } = {}) {
+    dispatch(
+      Object.assign(new Event("wheel"), { deltaY, ctrlKey: init.ctrlKey ?? false, metaKey: false }),
+      init.target ?? element({ chrome: false, tagName: "IMG" }),
+    );
+  }
+
+  function touchMove(target: EventTarget = element({ chrome: false, tagName: "IMG" })) {
+    dispatch(new Event("touchmove"), target);
+  }
+
   function scrollTo(top: number) {
     scroller.scrollTop = top;
     scroller.dispatchEvent(new Event("scroll"));
   }
 
-  /** The reader scrolls the strip down to `top`. */
+  /** The reader wheels the strip down to `top`. */
   function wheelTo(top: number) {
+    wheel(100);
     scrollTo(top);
   }
 
@@ -323,6 +350,8 @@ describe("installChromeAutohide", () => {
     scroller = Object.assign(new EventTarget(), { scrollTop: 2000 });
     active = null;
     atEnd = false;
+    autoScrolling = false;
+    clock = 10_000;
     reveal = vi.fn<() => void>();
     conceal = vi.fn<() => void>();
     autohide = installChromeAutohide({
@@ -331,6 +360,8 @@ describe("installChromeAutohide", () => {
       viewport: () => VIEWPORT,
       activeElement: () => active as unknown as Element | null,
       atEnd: () => atEnd,
+      autoScrolling: () => autoScrolling,
+      now: () => clock,
       reveal,
       conceal,
     });
@@ -409,6 +440,7 @@ describe("installChromeAutohide", () => {
 
   describe("reading hides it", () => {
     it("conceals on a downward scroll and not on an upward one", () => {
+      wheel(-100);
       scrollTo(1500);
       scrollTo(1000);
       expect(conceal).not.toHaveBeenCalled();
@@ -436,6 +468,111 @@ describe("installChromeAutohide", () => {
       key(" ");
       key("End");
       expect(conceal).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("only a scroll the reader made counts", () => {
+    it("ignores the app's own jumps: a chapter pulled onto the head, anchoring, a bookmark", () => {
+      scrollTo(7000);
+      scrollTo(7400);
+      scrollTo(9000);
+      expect(conceal).not.toHaveBeenCalled();
+    });
+
+    it("counts a downward scroll within ~500ms of a wheel, and not after", () => {
+      expect(CHROME_SCROLL_INTENT_MS).toBe(500);
+      wheel(100);
+      clock += 600;
+      scrollTo(2100);
+      expect(conceal).not.toHaveBeenCalled();
+
+      wheel(100);
+      clock += 400;
+      scrollTo(2200);
+      expect(conceal).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not count a wheel up, whose previous-chapter fix-up is a jump down", () => {
+      wheel(-120);
+      scrollTo(2000 + 5000);
+      expect(conceal).not.toHaveBeenCalled();
+    });
+
+    it("does not count a Ctrl+wheel, which zooms", () => {
+      wheel(100, { ctrlKey: true });
+      scrollTo(2300);
+      expect(conceal).not.toHaveBeenCalled();
+    });
+
+    it("does not count a wheel over the chrome", () => {
+      wheel(100, { target: element({ chrome: true }) });
+      scrollTo(2300);
+      expect(conceal).not.toHaveBeenCalled();
+    });
+
+    it("counts a touch drag on the pages, not one on the chrome's scrub bar", () => {
+      touchMove(element({ chrome: true, tagName: "INPUT", type: "range" }));
+      scrollTo(2300);
+      expect(conceal).not.toHaveBeenCalled();
+
+      touchMove();
+      scrollTo(2400);
+      expect(conceal).toHaveBeenCalledTimes(1);
+    });
+
+    it("counts the scroll a scroll key makes", () => {
+      key("PageDown");
+      conceal.mockClear();
+      scrollTo(2700);
+      expect(conceal).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not count a letter key, whose own action decides", () => {
+      key("c");
+      scrollTo(2300);
+      expect(conceal).not.toHaveBeenCalled();
+    });
+
+    it("counts a page turn the reader asked for (J, an edge tap)", () => {
+      autohide.intendScroll();
+      scrollTo(2800);
+      expect(conceal).toHaveBeenCalledTimes(1);
+    });
+
+    it("counts every scroll auto-scroll makes, however long it runs", () => {
+      autoScrolling = true;
+      clock += 60_000;
+      scrollTo(2030);
+      expect(conceal).toHaveBeenCalledTimes(1);
+    });
+
+    it("counts a scrollbar drag until the button comes up", () => {
+      pointer("pointerdown", { target: scroller });
+      clock += 2000;
+      scrollTo(2600);
+      expect(conceal).toHaveBeenCalledTimes(1);
+
+      pointer("pointerup", { target: scroller });
+      clock += 2000;
+      scrollTo(3200);
+      expect(conceal).toHaveBeenCalledTimes(1);
+    });
+
+    it("ends a scrollbar drag whose pointerup never came, on the next buttonless move", () => {
+      pointer("pointerdown", { target: scroller });
+      pointer("pointermove", { buttons: 0 });
+      clock += 2000;
+      scrollTo(2600);
+      expect(conceal).not.toHaveBeenCalled();
+    });
+
+    it("keeps the reader's travel across a jump the app made in between", () => {
+      wheelTo(2010);
+      clock += 1000;
+      scrollTo(5010);
+      expect(conceal).not.toHaveBeenCalled();
+      wheelTo(5024);
+      expect(conceal).toHaveBeenCalledTimes(1);
     });
   });
 

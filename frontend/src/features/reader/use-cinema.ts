@@ -26,6 +26,11 @@ export interface CinemaController {
   toggle: () => void;
   /** A tap in cinema mode — reveals the chrome and re-arms the idle timer. */
   notifyActivity: () => void;
+  /**
+   * The reader is about to move the strip for a page turn it was asked for (a
+   * key or a tap): that scroll is reading on, and hides the chrome like one.
+   */
+  intendScroll: () => void;
 }
 
 interface UseCinemaInput {
@@ -41,6 +46,8 @@ interface UseCinemaInput {
   atEnd: boolean;
   /** The page on screen in a paged mode, `null` in the strip. A change is a page turn. */
   pagedPosition: string | null;
+  /** Auto-scroll is playing: the scroll it makes is reading on. */
+  autoScrolling: boolean;
 }
 
 /** The {@link cinemaReduce} machine as an external store for `useSyncExternalStore`. */
@@ -108,6 +115,7 @@ export function useCinema({
   onEnabledChange,
   atEnd,
   pagedPosition,
+  autoScrolling,
 }: UseCinemaInput): CinemaController {
   const reducedMotion = usePrefersReducedMotion();
   const [machine] = useState(() => createCinemaMachine());
@@ -134,7 +142,11 @@ export function useCinema({
     controller.showPage(pagedPosition, active);
   }, [active, controller, pagedPosition]);
 
-  // Pointer, key, focus and scroll listeners. A tap on the page
+  useEffect(() => {
+    controller.setAutoScrolling(autoScrolling);
+  }, [autoScrolling, controller]);
+
+  // Pointer, wheel, touch, key, focus and scroll listeners. A tap on the page
   // stays the reader's own: its toggle, or notifyActivity in cinema mode.
   useEffect(() => {
     if (!active) return;
@@ -170,6 +182,7 @@ export function useCinema({
       reducedMotion,
       toggle,
       notifyActivity: controller.notifyActivity,
+      intendScroll: controller.intendScroll,
     }),
     [state, controlsVisible, reducedMotion, toggle, controller],
   );

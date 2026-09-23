@@ -8,8 +8,14 @@
  * the mouse popped it up again. The rules now, in both modes:
  *
  * - Reading hides it: a downward scroll of {@link CHROME_HIDE_SCROLL_PX} in the
- *   strip (wheel, Space, PageDown, arrows, touch, auto-scroll all scroll), or a
- *   page turn in the paged modes. Scrolling back up does NOT bring it back.
+ *   strip, or a page turn in the paged modes. Scrolling back up does NOT bring
+ *   it back.
+ * - Only a scroll the reader made counts: one within
+ *   {@link CHROME_SCROLL_INTENT_MS} of a wheel, a touch drag, a scroll or page
+ *   key, a page turn the reader asked for, or while auto-scroll or a scrollbar
+ *   drag is running. The app moves the strip on its own too — pulling the
+ *   previous chapter onto the head, scroll anchoring as images above load,
+ *   landing on a saved spot or a bookmark — and none of that is reading.
  * - A mouse or pen reveals it only by moving into the band where the chrome
  *   lives: the bottom {@link CHROME_BOTTOM_BAND_PX} or the top
  *   {@link CHROME_TOP_BAND_PX} of the reader. Touch never reveals by moving.
@@ -27,6 +33,12 @@
 
 /** Downward scroll, in CSS px, that counts as reading on and hides the chrome. */
 export const CHROME_HIDE_SCROLL_PX = 24;
+
+/**
+ * How long after a reading input (a wheel, a touch drag, a scroll or page key,
+ * a page turn) the strip's scroll still counts as the reader's own.
+ */
+export const CHROME_SCROLL_INTENT_MS = 500;
 
 /** Height of the band at the reader's bottom edge where the control bar lives. */
 export const CHROME_BOTTOM_BAND_PX = 120;
@@ -85,16 +97,20 @@ export interface ScrollRun {
 }
 
 /**
- * Feed one scroll position. Downward travel accumulates until it reaches
- * {@link CHROME_HIDE_SCROLL_PX}, which conceals and starts a new run. Any
- * upward movement restarts the run and never conceals — or reveals.
+ * Feed one scroll position. Downward travel the reader made (`intended`)
+ * accumulates until it reaches {@link CHROME_HIDE_SCROLL_PX}, which conceals
+ * and starts a new run. Downward travel the app made follows along without
+ * counting. Any upward movement restarts the run and never conceals — or
+ * reveals.
  */
 export function followScroll(
   run: ScrollRun,
   scrollTop: number,
+  intended = true,
 ): { run: ScrollRun; conceal: boolean } {
   const delta = scrollTop - run.top;
   if (delta < 0) return { run: { top: scrollTop, down: 0 }, conceal: false };
+  if (!intended) return { run: { top: scrollTop, down: run.down }, conceal: false };
   const down = run.down + delta;
   if (down >= CHROME_HIDE_SCROLL_PX) return { run: { top: scrollTop, down: 0 }, conceal: true };
   return { run: { top: scrollTop, down }, conceal: false };
@@ -106,7 +122,8 @@ export function followScroll(
  * - `focus`: Tab / Shift+Tab, moving keyboard focus — reveals, so the bar can
  *   take focus (hidden, it is out of the Tab order).
  * - `navigation`: the keys that scroll or turn pages. Never reveal. They are
- *   reading, so they let go of any focus hold and hide the chrome.
+ *   reading, so they let go of any focus hold and hide the chrome, and the
+ *   scroll they cause counts as the reader's.
  * - `other`: everything else, reader shortcuts included. Their own action
  *   decides (C toggles cinema, Escape peels it); the key itself is not
  *   activity.
@@ -234,6 +251,11 @@ export interface ChromeAutohide {
    * there, or its page box has focus.
    */
   held: () => boolean;
+  /**
+   * The reader is about to move the strip because the reader asked it to (a
+   * page turn by key or tap): let that scroll count as reading on.
+   */
+  intendScroll: () => void;
   teardown: () => void;
 }
 
@@ -257,8 +279,10 @@ export function installChromeAutohide({
   atEnd,
   reveal,
   conceal,
+  autoScrolling = () => false,
+  now = () => performance.now(),
 }: {
-  /** Where pointer, key and focus events arrive — the window. */
+  /** Where pointer, wheel, touch, key and focus events arrive — the window. */
   events: EventTarget;
   /** The strip's scroll container, when there is one. */
   scroller: (EventTarget & { scrollTop: number }) | null;
@@ -270,6 +294,10 @@ export function installChromeAutohide({
   atEnd: () => boolean;
   reveal: () => void;
   conceal: () => void;
+  /** Auto-scroll is playing: every scroll it makes is reading on. */
+  autoScrolling?: () => boolean;
+  /** A monotonic clock in ms, for the intent window. */
+  now?: () => number;
 }): ChromeAutohide {
   let pointerOnChrome = false;
   let lastPoint: { x: number; y: number } | null = null;
@@ -279,6 +307,8 @@ export function installChromeAutohide({
   let lastInput: "tab" | "pointer" | "reading" | null = null;
   // Focus came into the chrome on a Tab and has not left it since.
   let keyboardFocus = false;
+  let intentAt = Number.NEGATIVE_INFINITY;
+  let draggingScrollbar = false;
 
   const held = () => {
     if (pointerOnChrome) return true;
@@ -287,17 +317,35 @@ export function installChromeAutohide({
     return keyboardFocus || isTextEntry(active);
   };
 
+  const readingOn = () => {
+    intentAt = now();
+  };
+
+  const intended = () =>
+    draggingScrollbar || autoScrolling() || now() - intentAt <= CHROME_SCROLL_INTENT_MS;
+
   const onPointerDown = (event: Event) => {
+    const { pointerType, target } = event as PointerEvent;
     lastInput = "pointer";
     keyboardFocus = false;
-    const { target } = event;
+    // A press on the scroll container itself, not on anything in it, is its
+    // scrollbar: dragging that is the reader scrolling.
+    if (target === scroller && (pointerType === "mouse" || pointerType === "pen")) {
+      draggingScrollbar = true;
+    }
     // Using the bar is activity: in cinema mode it restarts the idle timer.
     // Hidden, the chrome takes no pointer, so this never brings it back.
     if (withinChrome(target)) reveal();
   };
 
+  const onPointerUp = () => {
+    draggingScrollbar = false;
+  };
+
   const onPointerMove = (event: Event) => {
-    const { pointerType, clientX, clientY } = event as PointerEvent;
+    const { pointerType, clientX, clientY, buttons } = event as PointerEvent;
+    // No button down: whatever drag there was is over, pointerup or not.
+    if (buttons === 0) draggingScrollbar = false;
     const sample = { pointerType, x: clientX, y: clientY };
     const reveals = pointerRevealsChrome(sample, lastPoint, viewport());
     if (pointerType !== "touch") lastPoint = { x: clientX, y: clientY };
@@ -315,6 +363,21 @@ export function installChromeAutohide({
     if ((event as PointerEvent).relatedTarget == null) pointerOnChrome = false;
   };
 
+  const onWheel = (event: Event) => {
+    const { deltaY, ctrlKey, metaKey, target } = event as WheelEvent;
+    // Downward only. Up never hides anyway, and a wheel up at the top of the
+    // strip is what pulls the previous chapter on — whose scroll fix-up, a
+    // jump DOWN by that chapter's height, must not count as reading on.
+    // Ctrl/⌘ turns the wheel into zoom.
+    if (deltaY > 0 && !ctrlKey && !metaKey && !withinChrome(target)) readingOn();
+  };
+
+  const onTouchMove = (event: Event) => {
+    // A drag on the chrome is working a control there (the scrub bar), not
+    // scrolling the pages.
+    if (!withinChrome(event.target)) readingOn();
+  };
+
   const onKeyDown = (event: Event) => {
     const kind = classifyChromeKey(event as KeyboardEvent);
     if (kind === "focus") {
@@ -327,6 +390,7 @@ export function installChromeAutohide({
     // the pages.
     lastInput = "reading";
     keyboardFocus = false;
+    readingOn();
     if (!atEnd() && !held()) conceal();
   };
 
@@ -352,7 +416,7 @@ export function installChromeAutohide({
 
   const onScroll = () => {
     if (!scroller || !run) return;
-    const step = followScroll(run, scroller.scrollTop);
+    const step = followScroll(run, scroller.scrollTop, intended());
     run = step.run;
     if (step.conceal && !atEnd() && !held()) conceal();
   };
@@ -362,22 +426,31 @@ export function installChromeAutohide({
   const passive = { passive: true } as const;
   const early = { passive: true, capture: true } as const;
   events.addEventListener("pointerdown", onPointerDown, early);
+  events.addEventListener("pointerup", onPointerUp, early);
+  events.addEventListener("pointercancel", onPointerUp, early);
   events.addEventListener("keydown", onKeyDown, early);
   events.addEventListener("pointermove", onPointerMove, passive);
   events.addEventListener("pointerover", onPointerOver, passive);
   events.addEventListener("pointerout", onPointerOut, passive);
+  events.addEventListener("wheel", onWheel, passive);
+  events.addEventListener("touchmove", onTouchMove, passive);
   events.addEventListener("focusin", onFocusIn, passive);
   events.addEventListener("focusout", onFocusOut, passive);
   scroller?.addEventListener("scroll", onScroll, passive);
 
   return {
     held,
+    intendScroll: readingOn,
     teardown() {
       events.removeEventListener("pointerdown", onPointerDown, early);
+      events.removeEventListener("pointerup", onPointerUp, early);
+      events.removeEventListener("pointercancel", onPointerUp, early);
       events.removeEventListener("keydown", onKeyDown, early);
       events.removeEventListener("pointermove", onPointerMove);
       events.removeEventListener("pointerover", onPointerOver);
       events.removeEventListener("pointerout", onPointerOut);
+      events.removeEventListener("wheel", onWheel);
+      events.removeEventListener("touchmove", onTouchMove);
       events.removeEventListener("focusin", onFocusIn);
       events.removeEventListener("focusout", onFocusOut);
       scroller?.removeEventListener("scroll", onScroll);

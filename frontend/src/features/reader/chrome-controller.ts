@@ -47,6 +47,8 @@ export interface ChromeEnvironment {
   viewport: () => ReaderViewport;
   /** `document.activeElement`. */
   activeElement: () => Element | null;
+  /** A monotonic clock in ms (defaults to `performance.now`). */
+  now?: () => number;
 }
 
 export interface ChromeController {
@@ -64,6 +66,10 @@ export interface ChromeController {
   setAtEnd: (atEnd: boolean, active: boolean) => void;
   /** The page on screen in a paged mode (`null` in the strip). A change is a page turn, which conceals. */
   showPage: (position: string | null, active: boolean) => void;
+  /** Auto-scroll started or stopped: while it runs, its scroll is reading on. */
+  setAutoScrolling: (playing: boolean) => void;
+  /** A page turn the reader asked for is about to move the strip: count that scroll as reading. */
+  intendScroll: () => void;
   /** Start listening to the reader's events; returns the teardown. */
   install: (environment: ChromeEnvironment) => () => void;
   /** Something holds the chrome up (see `ChromeAutohide.held`). */
@@ -92,6 +98,7 @@ export function createChromeController({
   let idleTimer: unknown = null;
   let autohide: ChromeAutohide | null = null;
   let atEnd = false;
+  let autoScrolling = false;
   let page: string | null = null;
   let autoEngaged = false;
 
@@ -180,13 +187,23 @@ export function createChromeController({
       if (active && pageTurnConceals(previous, position)) conceal();
     },
 
-    install({ events, scroller, viewport, activeElement }) {
+    setAutoScrolling(playing) {
+      autoScrolling = playing;
+    },
+
+    intendScroll() {
+      autohide?.intendScroll();
+    },
+
+    install({ events, scroller, viewport, activeElement, now }) {
       const handle = installChromeAutohide({
         events,
         scroller,
         viewport,
         activeElement,
         atEnd: () => atEnd,
+        autoScrolling: () => autoScrolling,
+        now,
         reveal,
         conceal,
       });
