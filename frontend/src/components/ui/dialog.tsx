@@ -61,12 +61,20 @@ export function Dialog({ open, onClose, title, children, className }: DialogProp
       {/* Click-outside target only. Hidden from assistive tech and out of the
           tab order: announcing a full-screen "Close dialog" button before the
           dialog's own content is noise, and Escape plus the Close button below
-          already give keyboard and screen-reader users the same way out. */}
+          already give keyboard and screen-reader users the same way out.
+
+          A denser scrim and no blur. The scrim covers the whole viewport, so
+          a blur here re-sampled every pixel of the screen on each frame of the
+          entrance animations and on every change underneath, and the panel's
+          own glass blurred it a second time. At 85% the page behind is dimmed
+          further than under the old 80% frosted scrim, so the dialog stands
+          off it as clearly, and the panel keeps its one glass pass over only
+          its own area, so the panel itself looks exactly as it did. */}
       <button
         type="button"
         aria-hidden
         tabIndex={-1}
-        className="overlay-in absolute inset-0 bg-bg/80 backdrop-blur-sm transition-opacity"
+        className="overlay-in absolute inset-0 bg-bg/85 transition-opacity"
         onClick={onClose}
       />
       <div
