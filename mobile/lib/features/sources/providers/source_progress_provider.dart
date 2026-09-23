@@ -10,8 +10,9 @@ import 'package:manhwamaniacs/shared/providers/repository_providers.dart';
 /// SharedPreferences key prefix holding the full source-progress map as a JSON
 /// object mapping `"sourceId:seriesId:chapterId"` → the progress record. The
 /// live storage key is namespaced per active profile (`"$prefix:$profileId"`)
-/// so personas never read or overwrite each other's online-read state. Shared
-/// cross-platform contract — the web client writes the identical record shape.
+/// so personas never read or overwrite each other's online-read state. Phone
+/// only: the server's progress rows are the record both clients share, and the
+/// Sources-tab reader pushes those too (see `SourceReaderScreen`).
 const String sourceProgressPrefsKey = 'mm.source_progress';
 
 /// Composite storage key for a single online chapter's progress record.
@@ -24,11 +25,12 @@ String sourceProgressKey({
 
 /// Holds the decoded source-progress map, hydrated from SharedPreferences.
 ///
-/// Online source chapters have no server-side read/progress model, so this
-/// store is the mobile side of the shared client-side contract (see
-/// [SourceChapterProgress]). It backs the "read" row styling, per-row progress
-/// text, and the "Continue" vs "Read Online" primary action on the series
-/// detail screen.
+/// This phone's own record of what the Sources-tab reader has read, written on
+/// every page alongside the push to the server's outbox. It is the half of
+/// [sourceSeriesProgressProvider] that moves the moment a page turns, before
+/// the outbox has flushed; the server's rows are merged over it there. It
+/// backs the "read" row styling, per-row progress text, and the "Continue" vs
+/// "Read Online" primary action on the series detail screen.
 class SourceProgressNotifier
     extends Notifier<Map<String, SourceChapterProgress>> {
   /// Per-profile storage key resolved in [build]; `null` when no profile is

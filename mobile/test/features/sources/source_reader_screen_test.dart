@@ -4,9 +4,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
+import 'package:manhwamaniacs/features/downloads/providers/progress_outbox_provider.dart';
 import 'package:manhwamaniacs/features/reader/models/reader_chapter.dart';
 import 'package:manhwamaniacs/features/reader/models/reader_page.dart';
+import 'package:manhwamaniacs/features/reader/models/reading_progress.dart';
+import 'package:manhwamaniacs/features/sources/models/source_series.dart';
+import 'package:manhwamaniacs/features/sources/providers/source_progress_provider.dart';
 import 'package:manhwamaniacs/features/sources/providers/source_reader_provider.dart';
+import 'package:manhwamaniacs/features/sources/providers/sources_provider.dart';
 import 'package:manhwamaniacs/features/sources/screens/source_reader_screen.dart';
 import 'package:manhwamaniacs/shared/providers/core_providers.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -41,6 +46,16 @@ ReaderChapter _onlineChapter({
       ),
     ],
   );
+}
+
+/// Records what the reader hands the outbox instead of storing and sending it.
+class _RecordingOutbox extends ProgressOutboxController {
+  _RecordingOutbox(super.ref);
+
+  final List<ProgressPush> pushes = [];
+
+  @override
+  Future<void> save(ProgressPush push) async => pushes.add(push);
 }
 
 GoRouter _router(Widget child) => GoRouter(
@@ -252,6 +267,128 @@ void main() {
 
       expect(find.text('Retry'), findsOneWidget);
       expect(find.text('Go back'), findsOneWidget);
+    });
+  });
+
+  group('SourceReaderScreen progress', () {
+    const chapterKey = (
+      sourceId: 'mangadex',
+      seriesId: 'manga-1',
+      chapterId: 'manga-1:1',
+    );
+    const series = (sourceId: 'mangadex', seriesId: 'manga-1');
+
+    Future<_RecordingOutbox> pumpReader(WidgetTester tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      await tester.binding.setSurfaceSize(const Size(430, 932));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      late _RecordingOutbox outbox;
+      await tester.pumpWidget(
+        _wrap(
+          [
+            sharedPrefsProvider.overrideWithValue(prefs),
+            progressOutboxControllerProvider.overrideWith(
+              (ref) => outbox = _RecordingOutbox(ref),
+            ),
+            sourceReaderPayloadProvider(chapterKey)
+                .overrideWith((ref) async => _onlineChapter()),
+            sourceSeriesDetailProvider(series).overrideWith(
+              (ref) async => const SourceSeriesDetailData(
+                series: SourceSeriesSummary(
+                  id: 'manga-1',
+                  sourceId: 'mangadex',
+                  title: 'Solo Leveling',
+                  chapterCount: 1,
+                  genres: [],
+                  coverUrl: '',
+                ),
+                chapters: [
+                  SourceChapterSummary(
+                    id: 'manga-1:1',
+                    sourceId: 'mangadex',
+                    seriesId: 'manga-1',
+                    title: 'Chapter 1',
+                    number: 1,
+                    pageCount: 2,
+                  ),
+                ],
+              ),
+            ),
+          ],
+          const SourceReaderScreen(
+            sourceId: 'mangadex',
+            seriesId: 'manga-1',
+            chapterId: 'manga-1:1',
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      return outbox;
+    }
+
+    testWidgets('a page read here is pushed to the server outbox',
+        (tester) async {
+      // This reader used to keep progress on the phone alone, so a chapter
+      // read from the Sources tab never reached the server: no progress row,
+      // no reading time, and the web and the home shelf never saw it.
+      final outbox = await pumpReader(tester);
+
+      // The series page the reader sits on holds its chapter list open; the
+      // number progress is filed under comes from there.
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(SourceReaderScreen)),
+      );
+      final keepAlive = container.listen(
+        sourceSeriesDetailProvider(series),
+        (_, __) {},
+      );
+      addTearDown(keepAlive.close);
+      await tester.pump();
+
+      await tester.pump(const Duration(milliseconds: 600));
+
+      expect(outbox.pushes, isNotEmpty);
+      final push = outbox.pushes.last;
+      expect(push.sourceId, 'mangadex');
+      expect(push.seriesKey, 'manga-1');
+      expect(push.chapterKey, 'manga-1:1');
+      expect(push.lastPage, 1);
+      expect(push.pageCount, 2);
+      expect(push.isCompleted, isFalse);
+      expect(push.chapterNumber, 1);
+
+      // The phone's own record is still written, for the series page.
+      final local = container.read(sourceProgressProvider.notifier).progressFor(
+            sourceId: 'mangadex',
+            seriesId: 'manga-1',
+            chapterId: 'manga-1:1',
+          );
+      expect(local?.page, 1);
+    });
+
+    testWidgets('the save made on the way out of the reader is pushed too',
+        (tester) async {
+      // ReaderContent flushes its pending save from dispose(). The screen used
+      // to reach its providers through `ref` at that moment, which throws on a
+      // deactivated element — and the error was swallowed, dropping the very
+      // save that finishes the chapter.
+      final outbox = await pumpReader(tester);
+
+      final list = tester.widget<ListView>(find.byType(ListView)).controller!;
+      list.jumpTo(list.position.maxScrollExtent);
+      await tester.pump();
+      // Leave before the 500ms debounce fires.
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+
+      expect(outbox.pushes, isNotEmpty);
+      final push = outbox.pushes.last;
+      expect(push.chapterKey, 'manga-1:1');
+      expect(push.lastPage, 2);
+      expect(push.isCompleted, isTrue);
     });
   });
 }

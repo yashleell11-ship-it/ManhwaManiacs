@@ -8,26 +8,33 @@ import 'package:manhwamaniacs/core/error/app_error.dart';
 import 'package:manhwamaniacs/core/network/network_connectivity.dart';
 import 'package:manhwamaniacs/features/downloads/providers/bookmark_outbox_provider.dart';
 import 'package:manhwamaniacs/features/downloads/providers/downloads_scope.dart';
+import 'package:manhwamaniacs/features/downloads/providers/progress_outbox_provider.dart';
 import 'package:manhwamaniacs/features/downloads/queue/download_queue_controller.dart';
+import 'package:manhwamaniacs/features/downloads/store/downloads_store.dart';
 import 'package:manhwamaniacs/features/downloads/widgets/open_chapter_scope.dart';
 import 'package:manhwamaniacs/features/reader/models/bookmark.dart';
 import 'package:manhwamaniacs/features/reader/models/reader_chapter.dart';
+import 'package:manhwamaniacs/features/reader/models/reading_progress.dart';
 import 'package:manhwamaniacs/features/reader/providers/series_reading_order_provider.dart';
 import 'package:manhwamaniacs/features/reader/utils/reader_feed_controller.dart';
 import 'package:manhwamaniacs/features/reader/utils/reader_series_navigation.dart';
+import 'package:manhwamaniacs/features/reader/utils/reading_clock.dart';
 import 'package:manhwamaniacs/features/reader/widgets/reader_content.dart';
 import 'package:manhwamaniacs/features/reader/widgets/reader_error_state.dart';
 import 'package:manhwamaniacs/features/reader/widgets/reader_skeleton.dart';
 import 'package:manhwamaniacs/features/sources/providers/source_progress_provider.dart';
 import 'package:manhwamaniacs/features/sources/providers/source_reader_provider.dart';
+import 'package:manhwamaniacs/features/sources/providers/sources_provider.dart';
 import 'package:manhwamaniacs/shared/providers/core_providers.dart';
 
 /// Online source chapter reader.
 ///
 /// Reuses [ReaderContent] for the full reading experience (fullscreen, zoom,
-/// virtualization, image cache, auto-next). Online chapters have no local
-/// series, so progress is persisted client-side via [sourceProgressProvider]
-/// (the shared cross-platform contract) rather than the library progress API.
+/// virtualization, image cache, auto-next). Progress goes to the server
+/// through the same on-device outbox the library reader uses — the server's
+/// progress is keyed by the source triple and needs no library row — and is
+/// also recorded in [sourceProgressProvider], which the series page reads
+/// back at once without waiting for the outbox to flush.
 ///
 /// Eagerly queues the next chapter for download the moment this one loads —
 /// gated on the "Wi-Fi only downloads" setting so idly reading never burns
@@ -65,6 +72,11 @@ class _SourceReaderScreenState extends ConsumerState<SourceReaderScreen> {
   /// The continuous feed (spec R1). Built the moment the anchor chapter
   /// resolves; null until then.
   ReaderFeedController? _feedController;
+
+  /// How long this reader has been read, for the reading-time statistic. One
+  /// clock for the whole feed, exactly as the library reader keeps: reading
+  /// across a seam is continuous.
+  final ReadingClock _clock = ReadingClock(DateTime.now());
 
   @override
   void didUpdateWidget(covariant SourceReaderScreen oldWidget) {
@@ -168,36 +180,96 @@ class _SourceReaderScreenState extends ConsumerState<SourceReaderScreen> {
     return controller;
   }
 
-  Future<void> _saveProgress(ReaderChapter chapter, int page) async {
-    // ReaderContent flushes progress from its dispose(), by which point this
-    // state (and its ref/context) may already be deactivated — swallow that
-    // race so a normal reader teardown never throws.
-    //
-    // Filed against the chapter the PAGE belongs to: a continuous feed spans
-    // several, and recording all of them against the one the reader opened
-    // would put resume in the wrong place.
+  /// The number progress is filed under, from the series page's chapter list.
+  ///
+  /// That list is the only place this reader can learn a number — the online
+  /// payload carries none — and it is almost always already loaded, because
+  /// this route sits on top of the series page (and Read-all watches it for
+  /// the chapter order). [ProviderContainer.exists] first, so a reader opened
+  /// without it never fetches a whole chapter list for one label. The number
+  /// is what orders a series' chapters on the server; without it a row still
+  /// saves, it just cannot say where in the series it falls.
+  double? _chapterNumberOf(ProviderContainer container, String chapterId) {
+    final series = (sourceId: widget.sourceId, seriesId: widget.seriesId);
+    if (!container.exists(sourceSeriesDetailProvider(series))) return null;
+    final detail = container.read(sourceSeriesDetailProvider(series));
+    final chapters = detail.valueOrNull?.chapters;
+    if (chapters == null) return null;
+    for (final chapter in chapters) {
+      if (chapter.id == chapterId) return chapter.number;
+    }
+    return null;
+  }
+
+  /// Saves [page] of [chapter] to the server outbox and to this phone's
+  /// record.
+  ///
+  /// Everything it touches is handed in, resolved in [build]: [ReaderContent]
+  /// flushes its last save from its own dispose(), by which point this state's
+  /// element may already be deactivated, and a `ref.read` there throws. That
+  /// used to be swallowed, so the save made on the way out of the reader — the
+  /// one most likely to be the chapter's last page — was dropped.
+  ///
+  /// Filed against the chapter the PAGE belongs to: a continuous feed spans
+  /// several, and recording all of them against the one the reader opened
+  /// would put resume in the wrong place.
+  Future<void> _saveProgress(
+    ReaderChapter chapter,
+    int page, {
+    required ProgressOutboxController outbox,
+    required SourceProgressNotifier localProgress,
+    required DownloadsStore? downloadsStore,
+    required ProviderContainer container,
+  }) async {
     final pageCount = chapter.pageCount;
+    // Guarded on a real count: a chapter that reports none must not be pushed
+    // as finished the moment it opens.
+    final isCompleted = pageCount > 0 && page >= pageCount;
+    // Local-first (spec §3), like the library reader: the outbox stores the
+    // push on the phone and flushes it best-effort, so the web, the home
+    // shelf, history and the reading-time statistic all see this read.
+    //
+    // Started before anything here is awaited. On the way out of the reader
+    // this runs inside a teardown, and the outbox looks up the downloads
+    // store as it starts — a lookup that has to happen now, not after the
+    // local write below has given the teardown time to finish.
+    final pushed = outbox.save(
+      ProgressPush(
+        sourceId: widget.sourceId,
+        seriesKey: widget.seriesId,
+        chapterKey: chapter.id,
+        chapterNumber: _chapterNumberOf(container, chapter.id),
+        lastPage: page,
+        pageCount: pageCount,
+        isCompleted: isCompleted,
+        timeSpentSeconds: _clock.elapsed(DateTime.now()),
+      ),
+    );
     try {
-      await ref.read(sourceProgressProvider.notifier).record(
-            sourceId: widget.sourceId,
-            seriesId: widget.seriesId,
-            chapterId: chapter.id,
-            page: page,
-            pageCount: pageCount,
-          );
-      if (pageCount > 0 && page >= pageCount) {
-        // Read-then-expire (spec §3/§3b): starts the 48h phone-copy timer.
-        // A no-op if this chapter was never downloaded.
-        await ref.read(downloadsStoreProvider)?.markRead(
-              (
-                sourceId: widget.sourceId,
-                seriesKey: widget.seriesId,
-                chapterKey: chapter.id,
-              ),
-            );
-      }
+      // Kept alongside the push: the series page merges this record with the
+      // server's, and it is the half that updates the moment the page turns
+      // rather than when the outbox next reaches the server.
+      await localProgress.record(
+        sourceId: widget.sourceId,
+        seriesId: widget.seriesId,
+        chapterId: chapter.id,
+        page: page,
+        pageCount: pageCount,
+      );
     } catch (_) {
       // ignore: best-effort client-side progress persistence
+    }
+    await pushed;
+    if (isCompleted) {
+      // Read-then-expire (spec §3/§3b): starts the 48h phone-copy timer.
+      // A no-op if this chapter was never downloaded.
+      await downloadsStore?.markRead(
+        (
+          sourceId: widget.sourceId,
+          seriesKey: widget.seriesId,
+          chapterKey: chapter.id,
+        ),
+      );
     }
   }
 
@@ -225,6 +297,11 @@ class _SourceReaderScreenState extends ConsumerState<SourceReaderScreen> {
       seriesId: widget.seriesId,
       chapterId: widget.chapterId,
     );
+    // Resolved here, never inside the save callback — see [_saveProgress].
+    final progressOutbox = ref.read(progressOutboxControllerProvider);
+    final localProgress = ref.read(sourceProgressProvider.notifier);
+    final downloadsStore = ref.read(downloadsStoreProvider);
+    final container = ProviderScope.containerOf(context, listen: false);
     final chapterAsync = ref.watch(sourceReaderChapterProvider(key));
     // Watched, never awaited (spec R3): a chapter served from disk knows its
     // pages but not its neighbours, and waiting on the network to learn them
@@ -382,7 +459,14 @@ class _SourceReaderScreenState extends ConsumerState<SourceReaderScreen> {
                 .then((bookmark) => bookmark != null),
             onReachedFeedEnd: feedController.extendForward,
             onReachedFeedStart: feedController.extendBackward,
-            onSaveProgress: _saveProgress,
+            onSaveProgress: (chapter, page) => _saveProgress(
+              chapter,
+              page,
+              outbox: progressOutbox,
+              localProgress: localProgress,
+              downloadsStore: downloadsStore,
+              container: container,
+            ),
             onBack: () => context.go(
               RoutePaths.sourceSeriesDetail(widget.sourceId, widget.seriesId),
             ),
