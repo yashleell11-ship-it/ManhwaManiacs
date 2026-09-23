@@ -1,5 +1,6 @@
 import 'package:dio/dio.dart';
 import 'package:manhwamaniacs/core/config/env.dart';
+import 'package:manhwamaniacs/core/network/interceptors/app_version_interceptor.dart';
 import 'package:manhwamaniacs/core/network/interceptors/auth_interceptor.dart';
 import 'package:manhwamaniacs/core/network/interceptors/error_interceptor.dart';
 import 'package:manhwamaniacs/core/network/interceptors/logging_interceptor.dart';
@@ -13,7 +14,15 @@ import 'package:manhwamaniacs/core/network/interceptors/logging_interceptor.dart
 /// session-expiry (401). It is added first so it can inspect the 401 before
 /// [ErrorInterceptor] maps and rejects the error. The throwaway client used to
 /// validate a server URL omits it (that probe only hits the public `/health`).
-Dio createDioClient({String? baseUrl, AuthInterceptor? authInterceptor}) {
+///
+/// Every request carries the app's build as `X-App-Version`
+/// ([AppVersionInterceptor]); [lookUpAppVersion] replaces the platform lookup
+/// in tests.
+Dio createDioClient({
+  String? baseUrl,
+  AuthInterceptor? authInterceptor,
+  Future<String?> Function()? lookUpAppVersion,
+}) {
   final dio = Dio(
     BaseOptions(
       baseUrl: baseUrl ?? Env.defaultApiUrl,
@@ -28,6 +37,7 @@ Dio createDioClient({String? baseUrl, AuthInterceptor? authInterceptor}) {
   );
 
   dio.interceptors.addAll([
+    AppVersionInterceptor(lookUpVersion: lookUpAppVersion),
     if (authInterceptor != null) authInterceptor,
     if (Env.isDev) LoggingInterceptor(),
     ErrorInterceptor(),
