@@ -92,6 +92,34 @@ export function activeParagraphIndex(
   return answer;
 }
 
+/**
+ * How far below a paragraph's top the reading line is put back when a chapter
+ * resumes at it. A couple of pixels, so the scroll writer's rounding and a
+ * sub-pixel offset cannot leave the line just above the paragraph and report
+ * the one before it.
+ */
+export const RESUME_LINE_INSET_PX = 2;
+
+/**
+ * The scroll offset that resumes a chapter at a paragraph: the one that puts
+ * that paragraph's top on the READING LINE, `lineRatio` of the way down the
+ * viewport — the same line progress is captured at.
+ *
+ * It used to put the paragraph near the top of the screen instead. The restore
+ * is itself a scroll, so the reader then reported whichever paragraph was
+ * under the reading line a third of a screen further down, and the save that
+ * followed moved the stored position forward by two to four paragraphs nobody
+ * had read. Every open did it again, so Continue skipped a little more text
+ * each time.
+ */
+export function resumeScrollTop(
+  paragraphOffset: number,
+  viewportHeight: number,
+  lineRatio: number,
+): number {
+  return paragraphOffset - viewportHeight * lineRatio + RESUME_LINE_INSET_PX;
+}
+
 export interface NovelProgressPosition {
   /** 1-based bucket index — goes in `last_page`. */
   bucket: number;

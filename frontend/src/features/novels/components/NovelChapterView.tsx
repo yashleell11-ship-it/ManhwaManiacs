@@ -50,7 +50,12 @@ import {
   type ParagraphAnchor,
 } from "../paragraph-anchor";
 import { createParagraphRefs } from "../paragraph-refs";
-import { activeParagraphIndex, paragraphForBucket, progressForParagraph } from "../progress";
+import {
+  activeParagraphIndex,
+  paragraphForBucket,
+  progressForParagraph,
+  resumeScrollTop,
+} from "../progress";
 import { createReadingPercent, type ReadingPercentStore } from "../reading-percent";
 import { formatChapterLength } from "../reading-time";
 import { novelFontStack, stepFontSize } from "../typography";
@@ -100,8 +105,6 @@ const READING_LINE_RATIO = 0.35;
 const SCROLL_EDGE_THRESHOLD = 48;
 /** Wheel travel past the bottom that drops into the next chapter. */
 const OVERSCROLL_TRIGGER = 140;
-/** Breathing room above a resumed paragraph, so it is not flush to the head. */
-const RESUME_OFFSET_PX = 96;
 /** How long the "opened at the nearest paragraph" explanation stays up. */
 const MOVED_NOTICE_MS = 5200;
 
@@ -370,9 +373,9 @@ export function NovelChapterView({
     // top of the paragraph: the recorded index is resolved against the
     // paragraphs this chapter has NOW (design §3 — an aggregator can re-split
     // the text under it), and the reading line is put back where the capture
-    // measured it. That is why this does not use `RESUME_OFFSET_PX`: the
-    // bucket resume below has only a paragraph and gives it some air; a
-    // bookmark has a pixel and must reproduce it.
+    // measured it. The bucket resume below has only a paragraph, so it puts
+    // that paragraph's top on the line; a bookmark has a pixel and must
+    // reproduce it.
     if (initialAnchor) {
       const target = restoreParagraphAnchor(
         offsets,
@@ -392,7 +395,12 @@ export function NovelChapterView({
     const index = paragraphForBucket(initialBucket, paragraphCount);
     const target = offsets[index];
     if (target == null) return;
-    setReaderScrollTop(scrollElement, target - RESUME_OFFSET_PX);
+    // On the reading line, not near the head: the landing is a scroll, and
+    // progress is read at that line (see `resumeScrollTop`).
+    setReaderScrollTop(
+      scrollElement,
+      resumeScrollTop(target, scrollElement.clientHeight, READING_LINE_RATIO),
+    );
   }, [hydrated, initialAnchor, initialBucket, paragraphCount, scrollElement]);
 
   const updateScrollState = useCallback(() => {

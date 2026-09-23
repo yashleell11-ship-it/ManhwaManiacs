@@ -8,6 +8,7 @@ import {
   nextProgressPush,
   paragraphForBucket,
   progressForParagraph,
+  resumeScrollTop,
 } from "./progress";
 
 describe("bucketCount", () => {
@@ -106,6 +107,53 @@ describe("activeParagraphIndex", () => {
 
   it("survives an unmeasured chapter", () => {
     expect(activeParagraphIndex([], 400)).toBe(0);
+  });
+});
+
+describe("resumeScrollTop", () => {
+  // The reader's own geometry: the reading line a third of the way down a
+  // 900px scroller, and paragraphs of uneven height, as prose has.
+  const lineRatio = 0.35;
+  const viewportHeight = 900;
+  const heights = [
+    40, 180, 72, 72, 250, 36, 108, 144, 72, 300, 36, 36, 90, 162, 72, 54, 216,
+    72, 108, 36, 144, 72, 90, 126, 72, 36, 180, 72, 54, 108, 36, 72, 90, 144,
+    72, 36, 108, 216, 72, 54, 90, 36, 126, 72, 36,
+  ];
+  const offsets: number[] = [];
+  heights.reduce((top, height) => {
+    offsets.push(top + 0.4);
+    return top + height + 26;
+  }, 400);
+
+  /** What the reader saves straight after landing — the restore is a scroll. */
+  function reportedAfterResume(bucket: number): number {
+    const paragraph = paragraphForBucket(bucket, offsets.length);
+    // `setReaderScrollTop` rounds, so the landing does too.
+    const scrollTop = Math.round(
+      resumeScrollTop(offsets[paragraph], viewportHeight, lineRatio),
+    );
+    const index = activeParagraphIndex(
+      offsets,
+      scrollTop + viewportHeight * lineRatio,
+    );
+    return progressForParagraph(index, offsets.length).bucket;
+  }
+
+  it("reports the saved position back, not paragraphs further on", () => {
+    // Opening at paragraph 20 used to save 23 half a second later without a
+    // scroll, and the next Continue opened there.
+    for (let bucket = 2; bucket <= offsets.length; bucket += 1) {
+      expect(reportedAfterResume(bucket)).toBe(bucket);
+    }
+  });
+
+  it("does not creep forward across repeated opens", () => {
+    let saved = 20;
+    for (let open = 0; open < 5; open += 1) {
+      saved = Math.max(saved, reportedAfterResume(saved));
+    }
+    expect(saved).toBe(20);
   });
 });
 
