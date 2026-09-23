@@ -1,10 +1,15 @@
-"""ops/vps/backup-db.sh keeps one weekly per week.
+"""ops/vps/backup-db.sh keeps one weekly per week, and its Undo names a real file.
 
-The weekly tier linked EVERY run on a Sunday. A manual run or a stage-restore
-on a Sunday took a second slot for the same week, so KEEP_WEEKLY=4 held 4
-files covering 3 weeks (weekly/ really did hold 20260913-033728 and
-20260913-122649). And a Sunday whose run failed, or that the box was off for,
-left its week with no weekly at all.
+Two ways the nightly job's promises quietly came apart on the live box:
+
+- The weekly tier linked EVERY run on a Sunday. A manual run or a stage-restore
+  on a Sunday took a second slot for the same week, so KEEP_WEEKLY=4 held 4
+  files covering 3 weeks (weekly/ really did hold 20260913-033728 and
+  20260913-122649). And a Sunday whose run failed, or that the box was off for,
+  left its week with no weekly at all.
+- stage-restore printed its Undo as ``stage-restore $ROOT/latest.db.zst``. That
+  symlink is repointed by every run, so once the 03:30 timer fired it named a
+  snapshot of the RESTORED data, and the printed undo restored the restore.
 
 These run the real script against a throwaway ROOT and database, with ``date``
 pinned so each run lands on a chosen day. Nothing here can reach a live path:
@@ -14,6 +19,7 @@ every location the script writes is passed in explicitly.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -116,3 +122,45 @@ def test_a_week_whose_sunday_run_never_happened_still_gets_a_weekly(box):
     box("2026-09-22 03:30:00 UTC", "run")   # Tue, week 39 again
 
     assert _weeks(box.root) == ["2026-W38", "2026-W39"]
+
+
+def test_undo_names_the_pre_restore_file_not_the_moving_symlink(box):
+    box("2026-09-21 03:30:00 UTC", "run")
+    target = sorted((box.root / "daily").glob("manhwamaniacs-*.db.zst"))[0]
+
+    out = subprocess.run(
+        ["bash", str(SCRIPT), "stage-restore", str(target)],
+        env={**box.env, "MM_FAKE_NOW": "2026-09-23 01:00:05 UTC", "MM_CONFIRM": "RESTORE"},
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    undo = re.search(r"Undo:\s+MM_CONFIRM=RESTORE \S+ stage-restore (\S+)", out)
+    assert undo, out
+    named = Path(undo.group(1))
+    assert "latest.db.zst" not in named.name
+    assert named.parent == (box.root / "daily").resolve()
+    assert named.name == "manhwamaniacs-20260923-010005.db.zst"
+
+    # The next nightly moves latest.db.zst on; the printed file must not move.
+    box("2026-09-23 03:30:00 UTC", "run")
+    assert named.exists()
+    assert (box.root / "latest.db.zst").resolve() != named
+
+
+def test_the_banner_no_longer_says_the_backend_keeps_no_copy(box):
+    box("2026-09-21 03:30:00 UTC", "run")
+    target = sorted((box.root / "daily").glob("manhwamaniacs-*.db.zst"))[0]
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "stage-restore", str(target)],
+        env={**box.env, "MM_FAKE_NOW": "2026-09-23 01:00:00 UTC"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # Without MM_CONFIRM it only prints the banner and refuses.
+    assert result.returncode == 2
+    banner = result.stdout
+    assert "keeps no copy" not in banner
+    assert ".pre-restore-" in banner

@@ -341,8 +341,9 @@ cmd_stage_restore(){
   ##  DESTRUCTIVE: on the backend's next start the live database is        ##
   ##  REPLACED by $(readlink -f "$src")
   ##  Everything written after that backup was taken is lost. The backend   ##
-  ##  keeps no copy of the file it overwrites (core/backup_restore.py), so  ##
-  ##  this command takes a fresh backup first — that is your undo.          ##
+  ##  moves the database it replaces aside as <db>.pre-restore-<stamp>      ##
+  ##  (core/backup_restore.py), and this command also takes a fresh backup  ##
+  ##  first; the Undo line printed at the end names that exact file.        ##
   ############################################################################
 
 EOT
@@ -350,6 +351,13 @@ EOT
     err "refusing: re-run with MM_CONFIRM=RESTORE $0 stage-restore $src"; exit 2
   fi
   say "taking a pre-restore backup first"; cmd_run
+  # Resolved NOW, while latest.db.zst still points at the copy just taken. The
+  # symlink moves on every run, so an Undo that named it would, after the next
+  # 03:30 run, restore a snapshot of the RESTORED data and silently undo
+  # nothing, while the real pre-restore copy sat in daily/ under a name nobody
+  # was shown.
+  local pre
+  pre="$(readlink -f "$ROOT/latest.db.zst")"
   say "verifying the file you are about to restore"; cmd_verify "$src"
   zstd -q -d "$src" -o "$pending.tmp"; mv -f "$pending.tmp" "$pending"
   say "staged: $pending"
@@ -357,7 +365,8 @@ EOT
   Now:   docker restart manhwamaniacs-backend
   then:  docker logs --since 2m manhwamaniacs-backend | grep -i restore
          (expect "Applied a staged database restore before startup.")
-  Undo:  MM_CONFIRM=RESTORE $0 stage-restore $ROOT/latest.db.zst   (the pre-restore copy just taken)
+  Undo:  MM_CONFIRM=RESTORE $0 stage-restore $pre
+         (the pre-restore copy just taken; it stays in daily/ for $KEEP_DAILY runs)
   Abort before restarting:  rm -f $pending
 EOT
 }

@@ -115,7 +115,12 @@ docker logs --since 2m manhwamaniacs-backend | grep -i restore
 
 Abort before the restart: `rm -f /srv/manhwamaniacs/data/manhwamaniacs.db.pending-restore`
 (or `DELETE /api/backup/pending` from the admin UI).
-Undo after the restart: stage-restore the `latest.db.zst` that step 1 produced.
+Undo after the restart: run the `Undo:` line the command printed. It names the
+pre-restore copy by its full `daily/manhwamaniacs-<stamp>.db.zst` path. Do not
+reach for `latest.db.zst` instead: every run repoints it, so after the next
+nightly it is a snapshot of the RESTORED data and stage-restoring it undoes
+nothing. Lost the printed line? The pre-restore copy is the `daily/` file
+logged by the run just before the restore (`backup.log`).
 
 The app's restore path defends itself as of 2.7.0, so a staged file is no
 longer swapped in blind:
