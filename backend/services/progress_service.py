@@ -145,6 +145,13 @@ class MergedProgress:
     completed_at: datetime | None
     time_spent_seconds: int
     advanced: bool  # did the stored position actually move forward?
+    #: The instant THIS push is taken to describe (its believable stamp), as
+    #: distinct from ``last_read_at``, the row's newest read from any device.
+    #: The reading session a push writes is dated by this: a phone syncing
+    #: last night's offline chapter after the web read it this morning must
+    #: log last night, not this morning. None only on a row read back from
+    #: the database, which describes no push.
+    read_at: datetime | None = None
 
 
 def _believable_stamp(stamp: datetime | None, now: datetime) -> datetime:
@@ -203,6 +210,8 @@ def _credited_seconds(
     stored: MergedProgress | None,
     incoming: ProgressInput,
     incoming_read_at: datetime,
+    *,
+    advances: bool = False,
 ) -> int:
     """The seconds this push may ADD to the chapter's stored total.
 
@@ -220,12 +229,19 @@ def _credited_seconds(
     runs on it: furthest-wins was always idempotent, and this only refuses to
     pay twice.
 
+    **Except when the push moves the position forward** (``advances``). A
+    replay never can: its first delivery already took the row at least that
+    far, and furthest-wins never moves it back. So a forward push with an
+    older stamp is not a replay but a late one -- the phone syncing last
+    night's offline chapter after the web wrote this morning's -- and its
+    minutes are real reading nobody has counted yet.
+
     **A delta is bounded** (:data:`MAX_PUSH_SECONDS`) — see there for why an
     unbounded one is a history-rewriting bug rather than a large number.
     """
     if incoming.time_spent_seconds <= 0:
         return 0
-    if stored is not None and incoming_read_at <= stored.last_read_at:
+    if stored is not None and incoming_read_at <= stored.last_read_at and not advances:
         return 0
     return min(MAX_PUSH_SECONDS, incoming.time_spent_seconds)
 
@@ -248,9 +264,9 @@ def merge_progress(
     """
     now = now or utcnow()
     incoming_read_at = _believable_stamp(incoming.last_read_at, now)
-    credited = _credited_seconds(stored, incoming, incoming_read_at)
 
     if stored is None:
+        credited = _credited_seconds(stored, incoming, incoming_read_at)
         completed_at = now if incoming.is_completed else None
         return MergedProgress(
             chapter_number=incoming.chapter_number,
@@ -262,6 +278,7 @@ def merge_progress(
             completed_at=completed_at,
             time_spent_seconds=credited,
             advanced=True,
+            read_at=incoming_read_at,
         )
 
     # Coalesce across the pair before comparing: within one chapter_key the
@@ -271,6 +288,9 @@ def merge_progress(
     stored_number = _resolve_number(stored.chapter_number, incoming.chapter_number)
     stored_pos = _position(stored_number, stored.last_page)
     incoming_pos = _position(incoming_number, incoming.last_page)
+    credited = _credited_seconds(
+        stored, incoming, incoming_read_at, advances=incoming_pos > stored_pos
+    )
 
     is_completed = stored.is_completed or bool(incoming.is_completed)
     completed_at = stored.completed_at
@@ -292,6 +312,7 @@ def merge_progress(
             completed_at=completed_at,
             time_spent_seconds=time_spent,
             advanced=True,
+            read_at=incoming_read_at,
         )
 
     if incoming_pos == stored_pos and incoming_read_at > stored.last_read_at:
@@ -306,6 +327,7 @@ def merge_progress(
             completed_at=completed_at,
             time_spent_seconds=time_spent,
             advanced=False,
+            read_at=incoming_read_at,
         )
 
     # Incoming is behind (or a stale tie): never rewind. Only sticky flags and
@@ -320,6 +342,7 @@ def merge_progress(
         completed_at=completed_at,
         time_spent_seconds=time_spent,
         advanced=False,
+        read_at=incoming_read_at,
     )
 
 
@@ -644,7 +667,12 @@ class ProgressService:
                 # all, so the session carries the time and no pages.
                 start_page = end_page = max(1, payload.last_page)
                 pages_read = 0 if payload.last_page == previous_last_page else 1
-            ended_at = merged.last_read_at
+            # This push's own instant, not the row's newest: under
+            # furthest-wins a late push from a second device can still move
+            # the position, and dating its pages by the other device's later
+            # read put last night's chapter on this morning's day bucket,
+            # streak and hour histogram.
+            ended_at = merged.read_at or merged.last_read_at
             self.record_session(
                 source_id=source_id,
                 series_key=series_key,
