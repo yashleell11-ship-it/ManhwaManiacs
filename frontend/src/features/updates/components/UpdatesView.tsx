@@ -20,6 +20,7 @@ import {
 import { formatUtcDateTime } from "@/lib/utc-time";
 import { apiErrorMessage, resolveViewState } from "@/lib/view-state";
 import { ApiError } from "@/types/api";
+import { markAllReadLabel, markAllReadRequest } from "../mark-all";
 import { notificationChapterRef } from "../notification-link";
 import {
   useManualCheck,
@@ -106,7 +107,7 @@ export function UpdatesView() {
   const markRead = useMarkNotificationRead();
   const markAllRead = useMarkAllNotificationsRead();
   const { titles } = useFollowedIndex();
-  const { filterRows, ready: modeReady } = useContentModeFilter();
+  const { filterRows, ready: modeReady, mode, novelsEnabled } = useContentModeFilter();
   // This list keeps novel rows in Novels mode, so it needs the same "which
   // reader?" answer — and the same wait for it — that Statistics, Bookmarks,
   // History and the series page already take. Satisfied immediately on a
@@ -190,9 +191,11 @@ export function UpdatesView() {
               size="sm"
               variant="secondary"
               disabled={busy || rows.every((n) => n.is_read)}
-              onClick={() => markAllRead.mutate()}
+              // Clears the mode this list shows, not the whole account: the
+              // other mode's chapters were never on screen to be "read".
+              onClick={() => markAllRead.mutate(markAllReadRequest(novelsEnabled, mode))}
             >
-              Mark all read
+              {markAllReadLabel(novelsEnabled, mode)}
             </Button>
           </CardHeader>
           <CardContent className="space-y-3">

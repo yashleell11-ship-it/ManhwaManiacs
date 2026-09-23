@@ -1,4 +1,5 @@
 import { http } from "@/services/http";
+import type { MarkAllReadRequest } from "./mark-all";
 import type { UpdateNotification, UpdateRun, UpdateSettings } from "./types";
 
 export const updatesApi = {
@@ -20,8 +21,9 @@ export const updatesApi = {
       `/updates/notifications/${notificationId}/read`,
     ),
 
-  markAllRead: () =>
-    http.post<{ updated: number }>("/updates/notifications/read-all"),
+  // `content_kind` limits it to one content mode; omitted, every mode.
+  markAllRead: (body?: MarkAllReadRequest) =>
+    http.post<{ updated: number }>("/updates/notifications/read-all", body),
 
   // --- runs & manual checks ---
   runs: (limit?: number) =>
