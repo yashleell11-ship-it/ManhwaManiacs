@@ -95,7 +95,7 @@ interface NovelChapterViewProps {
   nextChapterHref: string | null;
   /** Short label for the next chapter, e.g. "Chapter 41". */
   nextChapterLabel: string | null;
-  /** Swap into the next chapter with no route navigation. */
+  /** Swap into the next chapter at once, without waiting on its route. */
   onSeamlessNext?: () => void;
   onProgress: (position: NovelProgressPosition) => void;
 }
@@ -123,8 +123,8 @@ const MOVED_NOTICE_MS = 5200;
  *
  * Seamless continuation is the manga reader's mechanism, not a second one: at
  * the bottom an end card appears, and a tap or a continued downward scroll asks
- * the parent to swap the chapter in place — no route navigation, no flash. See
- * `features/reader/components/SourceReader.tsx`.
+ * the parent to swap the chapter in place — no waiting on the route, no
+ * flash. See `features/reader/components/SourceReader.tsx`.
  */
 export function NovelChapterView({
   chapter,

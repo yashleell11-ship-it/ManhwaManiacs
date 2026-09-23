@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { useRouter } from "next/navigation";
 import {
   BOOKMARK_MEDIA_NOVEL,
   useBookmarkCapture,
@@ -67,10 +68,11 @@ export function NovelReader({
     [initialAnchorFraction, initialParagraph],
   );
   const queryClient = useQueryClient();
+  const router = useRouter();
   const scrollElement = useScrollContainer();
 
   // The chapter actually on screen. Starts at the routed key; a seamless
-  // transition advances it without a navigation.
+  // transition advances it at once, ahead of the navigation that follows.
   const [activeChapterKey, setActiveChapterKey] = useState(chapterKey);
   const [resumeBucket, setResumeBucket] = useState(initialPage);
   // Cleared on a seamless advance: chapter 41 does not open at chapter 40's
@@ -193,9 +195,9 @@ export function NovelReader({
    * One deliberate marker at the paragraph being read.
    *
    * Against `activeChapterKey`, not the routed key: a seamless advance moves
-   * the chapter with no navigation, so a bookmark taken after one belongs to
-   * the chapter on screen. `chapter_number` rides along so the bookmark
-   * survives the source re-keying its chapters (design §3).
+   * the chapter before its navigation lands, so a bookmark taken in between
+   * belongs to the chapter on screen. `chapter_number` rides along so the
+   * bookmark survives the source re-keying its chapters (design §3).
    */
   const handleBookmark = useCallback(
     (anchor: ParagraphAnchor) => {
@@ -244,16 +246,23 @@ export function NovelReader({
     setActiveChapterKey(nextChapterKey);
     // A new chapter starts at its first line, not wherever the last one ended.
     setReaderScrollTop(scrollElement, 0);
-    window.history.replaceState(
-      window.history.state,
-      "",
+    // The swap above is what the reader sees at once; this tells the router.
+    // It used to be a bare `history.replaceState`, which moved the address bar
+    // and nothing else, so the router still held the chapter first opened.
+    // "Previous chapter" from the next one points at exactly that route, so
+    // the router kept the mounted reader and the chapter on screen never
+    // changed while the URL did. A real replace lands on the next chapter's
+    // own route and remounts there from the cache the swap already filled.
+    router.replace(
       novelChapterHref({ sourceId, seriesKey, chapterKey: nextChapterKey }),
+      { scroll: false },
     );
   }, [
     activeChapterKey,
     chapter,
     nextChapterKey,
     queryClient,
+    router,
     saveProgress,
     scrollElement,
     seriesKey,
@@ -278,8 +287,8 @@ export function NovelReader({
       seriesTitle={seriesQuery.data?.title ?? seriesKey}
       seriesHref={seriesPageHref({ sourceId, seriesKey })}
       // `activeChapterKey`, not the routed key: a seamless advance moves the
-      // chapter with no navigation, and the contents should open at the one
-      // on screen.
+      // chapter before its navigation lands, and the contents should open at
+      // the one on screen.
       contentsHref={novelContentsHref({ sourceId, seriesKey, chapterKey: activeChapterKey })}
       initialBucket={resumeBucket}
       initialAnchor={resumeAnchor}
