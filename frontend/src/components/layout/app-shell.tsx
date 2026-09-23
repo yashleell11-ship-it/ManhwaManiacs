@@ -33,7 +33,9 @@ import {
   ProfileSwitcherChip,
   shouldRedirectToPicker,
   useActiveProfileStore,
+  useProfiles,
 } from "@/features/profiles";
+import { isSelectionGone } from "@/features/profiles/selection";
 import { Sidebar } from "./sidebar";
 import { Topbar } from "./topbar";
 
@@ -62,6 +64,28 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }
 
   return <AuthenticatedShell>{children}</AuthenticatedShell>;
+}
+
+/**
+ * Drops the remembered profile once this account's own list shows it is gone —
+ * deleted on another device (the phone), or never this account's at all.
+ *
+ * Nothing else on the web would notice: the server reads an id it does not
+ * recognise as "no profile" without an error, so every list simply came back
+ * empty until the first write answered 404. Clearing sends the gate above to
+ * the picker. Only a list that loaded may clear it; see `isSelectionGone`.
+ */
+function StaleProfileCheck() {
+  const activeId = useActiveProfileStore((s) => s.activeProfile?.id ?? null);
+  const clearActiveProfile = useActiveProfileStore((s) => s.clearActiveProfile);
+  const { data: profiles, isSuccess, isFetching } = useProfiles();
+  const gone = isSelectionGone(activeId, { profiles, isSuccess, isFetching });
+
+  useEffect(() => {
+    if (gone) clearActiveProfile();
+  }, [gone, clearActiveProfile]);
+
+  return null;
 }
 
 /**
@@ -211,6 +235,7 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
           drops the rail below 500px of viewport. `!hidden` because the base
           class already resolves to `md:flex` at this width. */}
       <Sidebar className={isReaderChapter ? "[@media(max-height:500px)]:!hidden" : undefined} />
+      <StaleProfileCheck />
 
       <div className="relative flex min-w-0 flex-1 flex-col">
         {/* The novel reader paints its own page, and that page can be cream.

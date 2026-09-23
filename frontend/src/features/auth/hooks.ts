@@ -1,5 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "@/types/api";
+// Direct, not via the profiles barrel, which pulls in the picker components.
+import { useActiveProfileStore } from "@/features/profiles/store";
 import { isUnauthorizedError } from "./access";
 import { authApi } from "./api";
 import type {
@@ -18,6 +20,30 @@ export const BOOTSTRAP_QUERY_KEY = [...AUTH_KEY, "bootstrap"] as const;
 export const SESSIONS_QUERY_KEY = [...AUTH_KEY, "sessions"] as const;
 
 /**
+ * Tell the profile store who is signed in, BEFORE the user reaches the cache.
+ *
+ * The shell renders the app the moment the current user is known, and every
+ * request from then on carries the remembered profile as `X-Profile-Id`. The
+ * store has to have dropped another account's selection by then, not an effect
+ * later, or the first screen's reads go out under that account's profile.
+ */
+function bindSignedInUser(user: User | null): void {
+  useActiveProfileStore.getState().bindSessionUser(user?.id ?? null);
+}
+
+/**
+ * Forget the profile chosen in this session on the way out, so the next
+ * account on this browser starts at the picker — and so the boot script,
+ * which tints the page from the stored selection before React loads, stops
+ * wearing this profile's mood.
+ */
+function forgetSignedInUser(): void {
+  const store = useActiveProfileStore.getState();
+  store.clearActiveProfile();
+  store.bindSessionUser(null);
+}
+
+/**
  * The current signed-in user, or `null` when not authenticated. A 401 from
  * `/auth/me` is the normal "not signed in" outcome, so it resolves to `null`
  * rather than throwing; we never retry the probe.
@@ -27,7 +53,9 @@ export function useCurrentUser() {
     queryKey: CURRENT_USER_QUERY_KEY,
     queryFn: async () => {
       try {
-        return await authApi.me();
+        const user = await authApi.me();
+        bindSignedInUser(user);
+        return user;
       } catch (error) {
         if (error instanceof ApiError && error.status === 401) return null;
         throw error;
@@ -53,6 +81,7 @@ export function useLogin() {
   return useMutation({
     mutationFn: (payload: LoginPayload) => authApi.login(payload),
     onSuccess: (data) => {
+      bindSignedInUser(data.user);
       // Seed the current-user cache directly so the guard admits the app
       // immediately, without a redundant /auth/me round-trip.
       queryClient.setQueryData(CURRENT_USER_QUERY_KEY, data.user);
@@ -65,6 +94,7 @@ export function useRegister() {
   return useMutation({
     mutationFn: (payload: RegisterPayload) => authApi.register(payload),
     onSuccess: (data) => {
+      bindSignedInUser(data.user);
       queryClient.setQueryData(CURRENT_USER_QUERY_KEY, data.user);
       // Creating the first account flips `needs_bootstrap`; keep the gate fresh.
       void queryClient.invalidateQueries({ queryKey: BOOTSTRAP_QUERY_KEY });
@@ -140,6 +170,7 @@ export function useLogout() {
     // still drop every cached query (so the next user starts clean) and mark
     // the session as signed out.
     onSettled: () => {
+      forgetSignedInUser();
       queryClient.removeQueries();
       queryClient.setQueryData(CURRENT_USER_QUERY_KEY, null);
     },
@@ -166,6 +197,7 @@ export function useLogoutAll() {
   return useMutation({
     mutationFn: () => authApi.logoutAll(),
     onSuccess: () => {
+      forgetSignedInUser();
       queryClient.removeQueries();
       queryClient.setQueryData(CURRENT_USER_QUERY_KEY, null);
     },

@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { persist, type PersistStorage, type StorageValue } from "zustand/middleware";
 import { toMood } from "./mood";
+import { selectionForUser, type ProfileSelection } from "./selection";
 import { ACTIVE_PROFILE_STORAGE_KEY } from "./storage-key";
 import type { ActiveProfile, Profile } from "./types";
 
@@ -18,12 +19,25 @@ import type { ActiveProfile, Profile } from "./types";
  * HTTP layer can attach it as an `X-Profile-Id` header. That header is wired in
  * the shared `services/http` client (owned elsewhere); until then the selection
  * lives here and is read on demand.
+ *
+ * The selection records the account it was made under (`ownerUserId`), and the
+ * auth layer tells the store who is signed in (`bindSessionUser`) before
+ * anything renders for them, so a different account signing in on the same
+ * browser starts at the picker instead of inside someone else's profile — see
+ * `selection.ts`.
  */
-interface ActiveProfileState {
-  activeProfile: ActiveProfile | null;
+interface ActiveProfileState extends ProfileSelection {
   hasHydrated: boolean;
+  /** Who is signed in right now, as the auth layer last reported. Not persisted. */
+  sessionUserId: number | null;
   setActiveProfile: (profile: Profile | ActiveProfile) => void;
   clearActiveProfile: () => void;
+  /**
+   * Record who is signed in (`null` once nobody is) and drop a selection some
+   * other account made. A null on its own clears nothing: a session that
+   * merely expired keeps the selection for the same user's next sign-in.
+   */
+  bindSessionUser: (userId: number | null) => void;
   /** Keep the snapshot in sync when the active profile is edited/removed. */
   syncActiveProfile: (profile: Profile) => void;
   setHasHydrated: (value: boolean) => void;
@@ -40,7 +54,7 @@ function toSnapshot(profile: Profile | ActiveProfile): ActiveProfile {
 }
 
 /** What actually goes to localStorage (see `partialize`). */
-type PersistedState = Pick<ActiveProfileState, "activeProfile">;
+type PersistedState = ProfileSelection;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -84,9 +98,16 @@ function readEnvelope(raw: string): StorageValue<PersistedState> | null {
   const snapshot = stored === null ? null : readSnapshot(stored);
   if (stored !== null && snapshot === null) return null;
 
+  // Absent on every blob written before the owner was recorded — that reads as
+  // "owner unknown", not as corruption. Present, it must be a user id.
+  const owner = parsed.state.ownerUserId ?? null;
+  if (owner !== null && !(typeof owner === "number" && Number.isInteger(owner))) {
+    return null;
+  }
+
   const version = parsed.version;
   return {
-    state: { activeProfile: snapshot },
+    state: { activeProfile: snapshot, ownerUserId: owner },
     ...(typeof version === "number" ? { version } : {}),
   };
 }
@@ -148,9 +169,24 @@ export const useActiveProfileStore = create<ActiveProfileState>()(
   persist(
     (set, get) => ({
       activeProfile: null,
+      ownerUserId: null,
       hasHydrated: false,
-      setActiveProfile: (profile) => set({ activeProfile: toSnapshot(profile) }),
-      clearActiveProfile: () => set({ activeProfile: null }),
+      sessionUserId: null,
+      setActiveProfile: (profile) =>
+        set({ activeProfile: toSnapshot(profile), ownerUserId: get().sessionUserId }),
+      clearActiveProfile: () => set({ activeProfile: null, ownerUserId: null }),
+      bindSessionUser: (userId) => {
+        if (get().sessionUserId !== userId) set({ sessionUserId: userId });
+        if (userId === null) return;
+        const current = get();
+        const next = selectionForUser(current, userId);
+        if (
+          next.activeProfile !== current.activeProfile ||
+          next.ownerUserId !== current.ownerUserId
+        ) {
+          set(next);
+        }
+      },
       syncActiveProfile: (profile) => {
         const current = get().activeProfile;
         if (current && current.id === profile.id) {
@@ -162,14 +198,22 @@ export const useActiveProfileStore = create<ActiveProfileState>()(
     {
       name: ACTIVE_PROFILE_STORAGE_KEY,
       storage: activeProfileStorage,
-      // Persist only the selection; `hasHydrated` is runtime-only.
-      partialize: (state) => ({ activeProfile: state.activeProfile }),
+      // Persist only the selection and its owner; `hasHydrated` and the
+      // session user are runtime-only.
+      partialize: (state) => ({
+        activeProfile: state.activeProfile,
+        ownerUserId: state.ownerUserId,
+      }),
       // The gate opens on EVERY path. zustand calls this back with an undefined
       // state when hydration threw — exactly the case that must not strand the
       // app — so fall back to the pre-hydration state handed to the factory,
       // whose `setHasHydrated` closes over the same `set`.
       onRehydrateStorage: (before) => (state) => {
-        (state ?? before).setHasHydrated(true);
+        const store = state ?? before;
+        store.setHasHydrated(true);
+        // A user the auth layer reported before the stored selection was read
+        // back still gets the owner check.
+        if (store.sessionUserId !== null) store.bindSessionUser(store.sessionUserId);
       },
     },
   ),
