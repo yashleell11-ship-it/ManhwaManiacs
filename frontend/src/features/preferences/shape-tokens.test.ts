@@ -117,14 +117,30 @@ describe("the rules a preset moves", () => {
   it("builds both app surfaces out of shape roles only", () => {
     // Fill, blur and edge weight are the surface-treatment axis — the single
     // most visible thing a preset changes. All three have to be indirect, or
-    // `Matte` could not exist without a second stylesheet.
-    for (const [selector, fill, blur, edge] of [
-      [".glass-panel", "--shape-panel-fill", "--shape-panel-blur", "--shape-panel-edge"],
-      [".glass-card", "--shape-card-fill", "--shape-card-blur", "--shape-card-edge"],
+    // `Matte` could not exist without a second stylesheet. The blur is read
+    // as a whole filter value so a preset can say `none` rather than a zero
+    // radius, which would still cost a backdrop pass (`glass-cost.test.ts`);
+    // the base derives that value from the radius role.
+    for (const [selector, fill, backdrop, blur, edge] of [
+      [
+        ".glass-panel",
+        "--shape-panel-fill",
+        "--shape-panel-backdrop",
+        "--shape-panel-blur",
+        "--shape-panel-edge",
+      ],
+      [
+        ".glass-card",
+        "--shape-card-fill",
+        "--shape-card-backdrop",
+        "--shape-card-blur",
+        "--shape-card-edge",
+      ],
     ] as const) {
       const body = shapeRuleBody(`${selector} {`);
       expect(body, selector).toContain(`var(${fill})`);
-      expect(body, selector).toContain(`blur(var(${blur}))`);
+      expect(body, selector).toContain(`backdrop-filter: var(${backdrop})`);
+      expect(SHAPE_ROLES[backdrop], backdrop).toBe(`blur(var(${blur}))`);
       expect(body, selector).toContain(`var(${edge})`);
       expect(body, selector).toContain("var(--shape-edge-width)");
       // And nothing hard-coded is left behind.
@@ -171,6 +187,8 @@ describe("Eclipse-era values survive the extraction", () => {
   it.each([
     ["--shape-panel-blur", "20px"],
     ["--shape-card-blur", "12px"],
+    ["--shape-panel-backdrop", "blur(var(--shape-panel-blur))"],
+    ["--shape-card-backdrop", "blur(var(--shape-card-blur))"],
     ["--shape-edge-width", "1px"],
     ["--shape-page-pad", "1.5rem"],
     ["--shape-page-pad-wide", "2.5rem"],

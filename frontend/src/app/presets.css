@@ -69,6 +69,8 @@
   --shape-card-fill: var(--mm-glass-card);
   --shape-card-edge: var(--mm-glass-border);
   --shape-card-blur: 12px;
+  --shape-panel-backdrop: blur(var(--shape-panel-blur));
+  --shape-card-backdrop: blur(var(--shape-card-blur));
   --shape-edge-width: 1px;
   --shape-glow: var(--mm-glow);
   --shape-panel-shadow: var(--mm-glass-shadow);
@@ -96,8 +98,12 @@
    Surfaces stop being translucent and start being opaque: the panel paints
    from `--mm-surface` and the card from `--mm-elevated`, which are the roles
    every palette already defines as "a surface" and "a raised surface", so the
-   elevation story survives intact. The blur goes to zero, the glow and the
+   elevation story survives intact. The blur goes away, the glow and the
    long shadow go away, and the radius ramp halves.
+
+   The blur goes away as `--shape-*-backdrop: none`, not only as a zero radius:
+   `blur(0px)` is still a filter, and every surface carrying one kept its own
+   layer and its per-frame backdrop pass. `none` is what makes the saving real.
 
    Density is untouched on purpose. Matte is not a smaller app; it is the same
    app rendered as a tool rather than a showcase — and it is measurably cheaper
@@ -111,6 +117,8 @@
   --shape-card-fill: var(--mm-elevated);
   --shape-card-edge: var(--mm-border);
   --shape-card-blur: 0px;
+  --shape-panel-backdrop: none;
+  --shape-card-backdrop: none;
   --shape-glow: none;
   --shape-panel-shadow: none;
 
@@ -201,6 +209,8 @@
   --shape-card-fill: var(--mm-surface);
   --shape-card-edge: var(--mm-border);
   --shape-card-blur: 0px;
+  --shape-panel-backdrop: none;
+  --shape-card-backdrop: none;
   --shape-glow: none;
   --shape-panel-shadow: none;
 

@@ -541,6 +541,14 @@
   --shape-card-fill: var(--mm-glass-card);
   --shape-card-edge: var(--mm-glass-border);
   --shape-card-blur: 12px;
+  /* The whole `backdrop-filter` value, not only its radius. `blur(0px)` is
+     still a filter: the element keeps its own layer and the browser still
+     reads back and re-samples everything behind it on every frame. Only
+     `none` removes that pass, so a preset with nothing to blur sets these to
+     `none`. Derived from the radius so a preset that only moves the radius
+     (Compact, Cinema) keeps working without restating the filter. */
+  --shape-panel-backdrop: blur(var(--shape-panel-blur));
+  --shape-card-backdrop: blur(var(--shape-card-blur));
   /* Border weight for the app's own surfaces — hairline today. */
   --shape-edge-width: 1px;
   /* The two ambient effects, routed through here so a preset can drop them
@@ -651,18 +659,18 @@ main {
  * The two app surfaces. Everything about them that a preset owns — the fill's
  * SOURCE, the blur, the edge weight — reads from `--shape-*`; the colour comes
  * from whichever theme role the shape role points at. `Matte` swaps the fill
- * from the glass roles to the opaque ones and drops the blur to zero without
- * naming a single colour.
+ * from the glass roles to the opaque ones and turns the backdrop pass off
+ * (`none`, not a zero radius) without naming a single colour.
  */
 .glass-panel {
   background: var(--shape-panel-fill);
-  backdrop-filter: blur(var(--shape-panel-blur));
+  backdrop-filter: var(--shape-panel-backdrop);
   border: var(--shape-edge-width) solid var(--shape-panel-edge);
 }
 
 .glass-card {
   background: var(--shape-card-fill);
-  backdrop-filter: blur(var(--shape-card-blur));
+  backdrop-filter: var(--shape-card-backdrop);
   border: var(--shape-edge-width) solid var(--shape-card-edge);
 }
 
@@ -715,9 +723,42 @@ main {
   border: var(--shape-edge-width) dashed
     color-mix(in srgb, var(--color-border) 50%, transparent);
   background: var(--shape-panel-fill);
-  backdrop-filter: blur(var(--shape-panel-blur));
+  backdrop-filter: var(--shape-panel-backdrop);
   padding: var(--shape-empty-pad);
   text-align: center;
+}
+
+/*
+ * The glass, minus the blur: the same fill, edge and radius with no backdrop
+ * pass. For a glass surface that sits on a flat background or is covered by
+ * its own opaque content, where the blur cannot be seen and still costs a
+ * read-back and a re-blur of everything behind it on every scrolled frame.
+ *
+ * Unlayered and declared after all three glass surfaces, which are unlayered
+ * too: a Tailwind utility lives in a layer and so can never override them, and
+ * at equal specificity the later rule wins, whatever order the classes are
+ * written in on the element.
+ */
+.glass-flat {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+/*
+ * Long lists and large cover grids: let the browser skip layout and paint for
+ * rows and cards that are off screen. The intrinsic size is the placeholder
+ * an unrendered item holds until it has been drawn once; `auto` then keeps
+ * the size it last rendered at, so the scrollbar does not jump on the way
+ * back up.
+ */
+.cv-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 3.5rem;
+}
+
+.cv-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 22rem;
 }
 
 * {
