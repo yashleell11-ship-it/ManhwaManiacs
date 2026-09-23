@@ -11,6 +11,7 @@ import 'package:manhwamaniacs/core/platform/system_ui.dart';
 import 'package:manhwamaniacs/features/downloads/providers/bookmark_outbox_provider.dart';
 import 'package:manhwamaniacs/features/downloads/providers/downloads_scope.dart';
 import 'package:manhwamaniacs/features/downloads/providers/progress_outbox_provider.dart';
+import 'package:manhwamaniacs/features/downloads/store/downloads_store.dart';
 import 'package:manhwamaniacs/features/downloads/widgets/open_chapter_scope.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_audio_format.dart';
 import 'package:manhwamaniacs/features/novels/models/novel_chapter.dart';
@@ -238,6 +239,12 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
   Timer? _autoNextTimer;
   bool _autoNextTriggered = false;
 
+  /// Whether the scroll was at the bottom when it last moved. Noted on every
+  /// scroll event, which the paragraph measurement is not: it is two numbers
+  /// the scroll position already holds, and it is the one part of a pending
+  /// save [dispose] can still act on.
+  bool _scrolledToEnd = false;
+
   /// The chapter to continue into, from whichever source knows it: the
   /// online payload carries its own, a disk copy learns it out of band.
   String? get _nextKey =>
@@ -276,6 +283,16 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
   /// resolves its own outbox handles in `build` for the same reason.
   late final ReaderWakelock _wakelock;
 
+  /// Where saves go, resolved in [build] for the same reason as [_wakelock]:
+  /// the save that finishes a chapter is made as the reader leaves it — Next
+  /// navigates away straight after, and [dispose] flushes a pending one — so
+  /// most of it runs after this element is gone, when `ref.read` throws.
+  /// Reading the downloads store through `ref` there used to throw after the
+  /// server save, so the 48 h expiry of a downloaded copy never started.
+  late ProgressOutboxController _progressOutbox;
+  DownloadsStore? _downloadsStore;
+  late SourceProgressNotifier _localProgress;
+
   @override
   void initState() {
     super.initState();
@@ -298,7 +315,18 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
 
   @override
   void dispose() {
-    _progressTimer?.cancel();
+    // A save the debounce was still holding. The paragraphs cannot be
+    // measured any more — the scrollable under this state is unmounted before
+    // it — so only the end of the chapter survives, which is the save that
+    // matters: scroll to the last line and press Back inside half a second,
+    // and the chapter used to stay unread.
+    if (_progressTimer != null) {
+      _progressTimer!.cancel();
+      _progressTimer = null;
+      if (_scrolledToEnd) {
+        _push(completedProgress(widget.chapter.paragraphs.length));
+      }
+    }
     _autoNextTimer?.cancel();
     _scrollController.dispose();
     _bucket.dispose();
@@ -535,6 +563,7 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
 
   void _onScroll() {
     if (_pendingRestoreParagraph != null) return;
+    _scrolledToEnd = _atEnd();
     _progressTimer ??= Timer(
       const Duration(milliseconds: _progressSaveMs),
       () {
@@ -556,15 +585,21 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
     final anchor = _anchorAtReadingLine();
     if (anchor == null) return;
 
-    final position = progressForParagraph(
+    final position = progressAtReadingLine(
       anchor.index,
       widget.chapter.paragraphs.length,
+      atEnd: _atEnd(),
     );
     if (position.bucket != _bucket.value) {
       // No setState: the notifier repaints only the chrome's percent.
       _bucket.value = position.bucket;
     }
+    _push(position);
+  }
 
+  /// Hands [position] to the outbox unless it is no further than what was
+  /// already sent for this chapter.
+  void _push(NovelProgressPosition position) {
     final push = nextProgressPush(position, _furthestSent);
     if (push == null) return;
     _furthestSent = push.bucket;
@@ -577,9 +612,14 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
   /// `last_page` and the bucket count in `page_count`, which is what lets the
   /// server's furthest-wins merge, the library's "continue reading" and the
   /// statistics service all work with no change at all.
+  ///
+  /// Only through the handles resolved in [build]: this runs on after the
+  /// reader has closed whenever it was a closing save.
   Future<void> _saveProgress(NovelProgressPosition position) async {
     final chapter = widget.chapter;
-    await ref.read(progressOutboxControllerProvider).save(
+    final downloadsStore = _downloadsStore;
+    final localProgress = _localProgress;
+    await _progressOutbox.save(
           ProgressPush(
             sourceId: chapter.sourceId,
             seriesKey: chapter.seriesKey,
@@ -594,7 +634,7 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
     if (position.completed) {
       // Read-then-expire: starts the 48h phone-copy timer. A no-op when this
       // chapter was never downloaded.
-      await ref.read(downloadsStoreProvider)?.markRead(
+      await downloadsStore?.markRead(
             (
               sourceId: chapter.sourceId,
               seriesKey: chapter.seriesKey,
@@ -606,8 +646,7 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
     // page merges it with the server's rows, and the outbox may not have
     // flushed by the time Back lands there — Continue must already know.
     // Last, so the saves that matter are never behind this one.
-    if (!mounted) return;
-    await ref.read(sourceProgressProvider.notifier).record(
+    await localProgress.record(
           sourceId: chapter.sourceId,
           seriesId: chapter.seriesKey,
           chapterId: chapter.chapterKey,
@@ -651,7 +690,7 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
       () {
         if (!mounted || _autoNextTriggered) return;
         _autoNextTriggered = true;
-        _openChapter(next);
+        _openNextChapter();
       },
     );
   }
@@ -660,6 +699,22 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
     if (!_scrollController.hasClients) return false;
     final position = _scrollController.position;
     return position.pixels >= position.maxScrollExtent - 8;
+  }
+
+  /// Continue into the next chapter, saying first that this one is finished.
+  ///
+  /// Every way forward comes through here — the foot's button, the chrome's
+  /// and auto-next — and nothing else: Previous and a jump from Contents are
+  /// not the reader finishing this chapter, so they use [_openChapter]
+  /// directly and leave its progress as the scroll left it.
+  void _openNextChapter() {
+    final next = _nextKey;
+    if (next == null) return;
+    // The explicit save supersedes whatever the debounce was holding.
+    _progressTimer?.cancel();
+    _progressTimer = null;
+    _push(completedProgress(widget.chapter.paragraphs.length));
+    _openChapter(next);
   }
 
   void _openChapter(String chapterKey) {
@@ -869,6 +924,9 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
   @override
   Widget build(BuildContext context) {
     final chapter = widget.chapter;
+    _progressOutbox = ref.read(progressOutboxControllerProvider);
+    _downloadsStore = ref.read(downloadsStoreProvider);
+    _localProgress = ref.read(sourceProgressProvider.notifier);
     final surface = _surface(context);
     final prefsKey = novelSeriesPrefsKey(chapter.sourceId, chapter.seriesKey);
     final prefs = ref.watch(novelPreferencesControllerProvider(prefsKey));
@@ -927,9 +985,7 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
                     child: _ChapterFoot(
                       chapter: chapter,
                       surface: surface,
-                      onNext: _nextKey == null
-                          ? null
-                          : () => _openChapter(_nextKey!),
+                      onNext: _nextKey == null ? null : _openNextChapter,
                     ),
                   ),
                 ],
@@ -960,7 +1016,7 @@ class _NovelReaderBodyState extends ConsumerState<_NovelReaderBody> {
               onPrevious: _previousKey == null
                   ? null
                   : () => _openChapter(_previousKey!),
-              onNext: _nextKey == null ? null : () => _openChapter(_nextKey!),
+              onNext: _nextKey == null ? null : _openNextChapter,
               onContents: () => NovelContentsSheet.show(
                 context,
                 sourceId: chapter.sourceId,

@@ -90,6 +90,40 @@ NovelProgressPosition progressForParagraph(
   );
 }
 
+/// The position to report for the paragraph under the reading line, given
+/// whether the scroll has bottomed out.
+///
+/// The end of the scroll counts as the last paragraph. The reading line sits
+/// a quarter of the way down the screen and the chapter's foot is only a
+/// couple of hundred pixels tall, so at the bottom the last paragraph's top is
+/// still below the line unless that one paragraph is most of a screen long —
+/// which almost none is. Measured literally, a 45-paragraph chapter read to
+/// its final word reported bucket 40 and was never complete.
+NovelProgressPosition progressAtReadingLine(
+  int paragraphIndex,
+  int paragraphCount, {
+  required bool atEnd,
+}) =>
+    progressForParagraph(
+      atEnd ? paragraphCount - 1 : paragraphIndex,
+      paragraphCount,
+    );
+
+/// A finished chapter: the last bucket, completed.
+///
+/// What moving on to the NEXT chapter reports, wherever the scroll last was,
+/// the same as the web's `advanceToNextChapter`. A reader who taps Next is
+/// done with this one, and a chapter short enough to fit on one screen never
+/// scrolls at all, so nothing else would ever say so.
+NovelProgressPosition completedProgress(int paragraphCount) {
+  final buckets = bucketCount(paragraphCount);
+  return NovelProgressPosition(
+    bucket: buckets,
+    buckets: buckets,
+    completed: true,
+  );
+}
+
 /// The position actually worth sending, given what has already been sent for
 /// this chapter.
 ///

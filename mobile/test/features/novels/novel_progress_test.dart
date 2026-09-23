@@ -115,6 +115,44 @@ void main() {
     });
   });
 
+  group('finishing a chapter', () {
+    test('the bottom of the scroll is the last paragraph, not the one under '
+        'the reading line', () {
+      // The shape of the stuck production row: 45 paragraphs, and the reading
+      // line could reach no further than index 39 with the scroll bottomed out.
+      final measured = progressAtReadingLine(39, 45, atEnd: false);
+      expect(measured.bucket, 40);
+      expect(measured.completed, isFalse);
+
+      final bottomedOut = progressAtReadingLine(39, 45, atEnd: true);
+      expect(bottomedOut.bucket, 45);
+      expect(bottomedOut.buckets, 45);
+      expect(bottomedOut.completed, isTrue);
+    });
+
+    test('a long chapter bottomed out lands in its final bucket', () {
+      final position = progressAtReadingLine(830, 900, atEnd: true);
+      expect(position.bucket, kMaxProgressBuckets);
+      expect(position.completed, isTrue);
+    });
+
+    test('moving on reports the chapter complete from anywhere in it', () {
+      final done = completedProgress(45);
+      expect(done.bucket, 45);
+      expect(done.buckets, 45);
+      expect(done.completed, isTrue);
+      // Sent once: a second Next, or the close after it, has nothing to add.
+      expect(nextProgressPush(done, 12), isNotNull);
+      expect(nextProgressPush(done, 45), isNull);
+    });
+
+    test('a chapter of one screen can still be finished', () {
+      final done = completedProgress(3);
+      expect(done.bucket, 3);
+      expect(done.completed, isTrue);
+    });
+  });
+
   group('active paragraph', () {
     test('is the last paragraph starting at or above the reading line', () {
       final offsets = [0.0, 100.0, 200.0, 300.0, 400.0];
