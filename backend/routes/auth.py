@@ -24,6 +24,7 @@ from core.rate_limit import (
     register_limit,
     session_key,
 )
+from core.time_utils import utcnow
 from database.models import User
 from services.auth_service import (
     REMEMBER_ME_TTL,
@@ -278,6 +279,11 @@ def register(
         enforce_policy=True,
     )
     user_agent, ip = _client_meta(request)
+    # Registering signs the account in, and on a remember-me session it may
+    # never pass through /auth/login again — so this is its first login, and
+    # without the stamp the owner's Members screen shows an account in daily
+    # use as "never signed in". It rides create_session's commit.
+    user.last_login_at = utcnow()
     token, _ = auth.create_session(
         user, remember=body.remember, user_agent=user_agent, ip_address=ip
     )

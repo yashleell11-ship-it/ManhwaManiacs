@@ -568,4 +568,17 @@ def test_admin_user_list_shape(client):
     assert all(row["is_active"] is True for row in rows.values())
     assert rows["reader"]["id"] == reader["user"]["id"]
     assert rows["reader"]["session_count"] == 2
-    assert rows["owner"]["last_login_at"] is None  # registered, never re-logged in
+    # Registering is a sign-in: an account that never re-logs in (it stays on
+    # its registration session) must not read as "never signed in".
+    assert rows["owner"]["last_login_at"] is not None
+
+
+def test_registering_records_a_login(client):
+    """Only /auth/login used to stamp last_login_at, so members who signed up
+    and stayed on that 90-day session showed as "never signed in · 1 session"
+    on the owner's Members screen."""
+    owner = _register(client, "owner")
+    assert owner["user"]["last_login_at"] is not None
+    me = client.get("/auth/me", headers=_bearer(owner["token"]))
+    assert me.status_code == 200
+    assert me.json()["last_login_at"] is not None
