@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import {
   ArrowLeftRight,
   ArrowRightLeft,
@@ -45,6 +45,7 @@ import {
   type TapZoneConfig,
 } from "../keymap";
 import { MAX_DIMMER, MAX_WARMTH } from "../overlay";
+import { settingsSheetAttributes, settingsSheetFocusTarget } from "../settings-sheet";
 import type { FitMode, ReadingDirection, ReadingMode } from "../types";
 import { ScrubBar } from "./ScrubBar";
 
@@ -282,6 +283,26 @@ export function ReaderControls({
     }
   }
 
+  // Focus follows the sheet (see `settingsSheetFocusTarget`). A LAYOUT effect
+  // on purpose: it runs before the browser processes the sheet going inert,
+  // so focus is still inside the sheet to be seen and handed back.
+  const sheetRef = useRef<HTMLDivElement>(null);
+  const closeSettingsRef = useRef<HTMLButtonElement>(null);
+  const settingsTriggerRef = useRef<HTMLButtonElement>(null);
+  const sheetWasOpenRef = useRef(settingsOpen);
+  useLayoutEffect(() => {
+    const wasOpen = sheetWasOpenRef.current;
+    sheetWasOpenRef.current = settingsOpen;
+    const target = settingsSheetFocusTarget({
+      wasOpen,
+      open: settingsOpen,
+      focusInSheet: sheetRef.current?.contains(document.activeElement) ?? false,
+      chromeVisible: visible,
+    });
+    if (target === "close-button") closeSettingsRef.current?.focus({ preventScroll: true });
+    if (target === "trigger") settingsTriggerRef.current?.focus({ preventScroll: true });
+  }, [settingsOpen, visible]);
+
   const continuous = readingMode === "continuous";
 
   return (
@@ -304,15 +325,17 @@ export function ReaderControls({
           reduceMotion ? "" : "transition-transform duration-300 ease-out",
           settingsOpen ? "translate-y-0" : "translate-y-full",
         )}
+        ref={sheetRef}
         role="dialog"
         aria-label="Reader settings"
-        aria-hidden={!settingsOpen}
+        {...settingsSheetAttributes(settingsOpen)}
       >
         <div className="pointer-events-auto mx-auto max-w-3xl px-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
           <div className="max-h-[75vh] overflow-y-auto rounded-t-3xl border border-border bg-surface-2 p-5 shadow-glass">
             <div className="mb-4 flex items-center justify-between">
               <p className="font-display text-base tracking-wide text-fg">Reader settings</p>
               <Button
+                ref={closeSettingsRef}
                 variant="ghost"
                 size="icon"
                 onClick={() => setSettingsOpen(false)}
@@ -801,6 +824,7 @@ export function ReaderControls({
                   </Button>
                 ) : null}
                 <Button
+                  ref={settingsTriggerRef}
                   variant="ghost"
                   size="icon"
                   onClick={() => setSettingsOpen((open) => !open)}
