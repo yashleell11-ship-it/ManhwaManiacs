@@ -55,6 +55,11 @@ class RetentionMaintenance {
     // orphaned blob is not an expiry decision, it is bytes no profile can
     // reach, and this pass is the only one that ever visits the tree.
     await reclaimOrphanBlobs();
+    // Same for the pin repair, which has to land before any expiry decision
+    // is made: a pinned series' unpinned stragglers are exactly what the
+    // expiry below and the eviction that follows it in "Free up space" would
+    // take.
+    await repairSeriesPins();
     if (interval == null) return 0;
     final db = await database;
     final blob = await blobStore;
@@ -137,6 +142,54 @@ class RetentionMaintenance {
       deleted++;
     }
     return deleted;
+  }
+
+  /// Pins every chapter of a series that has a pinned chapter, in every
+  /// scope. Returns how many rows it pinned.
+  ///
+  /// A pin is on the series ([DownloadsStore.setSeriesPinned] writes every
+  /// row), but chapters queued after the pin used to go in unpinned — fixed
+  /// in `ensureQueued` for new rows only. An install that downloaded more of
+  /// a pinned series before then still holds those rows at `pinned = 0`, and
+  /// retention filters row by row, so the sweep and eviction deleted them
+  /// once read while the Downloads screen called the series pinned. Nothing
+  /// else produces that mix, so evening it out is safe, and once it has run
+  /// there is nothing left for it to change.
+  ///
+  /// The `EXISTS` is re-asked inside each statement rather than trusted from
+  /// the list: an unpin that lands between the two clears every row, and
+  /// must not be undone by a pass that read the series as pinned first.
+  Future<int> repairSeriesPins() async {
+    final db = await database;
+    final pinned = await db.query(
+      DownloadsSchema.savedChapters,
+      distinct: true,
+      columns: [
+        DownloadsSchema.colScopeId,
+        DownloadsSchema.colSourceId,
+        DownloadsSchema.colSeriesKey,
+      ],
+      where: '${DownloadsSchema.colPinned} = 1',
+    );
+
+    var repaired = 0;
+    for (final series in pinned) {
+      final args = [
+        series[DownloadsSchema.colScopeId],
+        series[DownloadsSchema.colSourceId],
+        series[DownloadsSchema.colSeriesKey],
+      ];
+      repaired += await db.rawUpdate(
+        'UPDATE ${DownloadsSchema.savedChapters} SET ${DownloadsSchema.colPinned} = 1 '
+        'WHERE ${DownloadsSchema.colScopeId} = ? AND ${DownloadsSchema.colSourceId} = ? '
+        'AND ${DownloadsSchema.colSeriesKey} = ? AND ${DownloadsSchema.colPinned} = 0 '
+        'AND EXISTS (SELECT 1 FROM ${DownloadsSchema.savedChapters} p '
+        'WHERE p.${DownloadsSchema.colScopeId} = ? AND p.${DownloadsSchema.colSourceId} = ? '
+        'AND p.${DownloadsSchema.colSeriesKey} = ? AND p.${DownloadsSchema.colPinned} = 1)',
+        [...args, ...args],
+      );
+    }
+    return repaired;
   }
 
   /// How long a file must have sat untouched before the reclaim will call it

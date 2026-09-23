@@ -284,4 +284,65 @@ void main() {
       expect(await storeB.getChapter(idB), isNull);
     });
   });
+
+  group('a pinned series with chapters saved before they inherited the pin',
+      () {
+    const pinnedSeries = (sourceId: 'asura', seriesKey: 's');
+    const first = (sourceId: 'asura', seriesKey: 's', chapterKey: 'c1');
+    const straggler = (sourceId: 'asura', seriesKey: 's', chapterKey: 'c2');
+
+    /// The mix older builds left behind: the series pinned, then a chapter
+    /// downloaded after the pin that went in unpinned.
+    Future<DownloadsStore> mixedSeries() async {
+      final store = harness.storeFor('u1p1');
+      await _download(store, chapterKey: 'c1', seriesKey: 's', pageSize: 100);
+      await _download(store, chapterKey: 'c2', seriesKey: 's', pageSize: 100);
+      await store.setSeriesPinned(series: pinnedSeries, pinned: true);
+      final db = await harness.openDatabase();
+      await db.rawUpdate(
+        "UPDATE saved_chapters SET pinned = 0 WHERE chapter_key = 'c2'",
+      );
+      await store.markRead(first);
+      await store.markRead(straggler);
+      return store;
+    }
+
+    test('keeps the straggler through the read-then-expire sweep', () async {
+      final store = await mixedSeries();
+      const plain = (sourceId: 'asura', seriesKey: 'other', chapterKey: 'o1');
+      await _download(store, chapterKey: 'o1', seriesKey: 'other');
+      await store.markRead(plain);
+      // The same series in another profile, which never pinned it.
+      final other = harness.storeFor('u1p2');
+      await _download(other, chapterKey: 'c2', seriesKey: 's');
+      await other.markRead(straggler);
+
+      final deleted = await maintenance.sweepExpired(interval: Duration.zero);
+
+      expect(deleted, 2);
+      expect((await store.getChapter(straggler))!.pinned, isTrue);
+      expect(await store.getChapter(plain), isNull);
+      expect(await other.getChapter(straggler), isNull);
+    });
+
+    test('keeps it through eviction, with the expiry timer off', () async {
+      final store = await mixedSeries();
+
+      await maintenance.sweepExpired(interval: null);
+      final deleted = await maintenance.evictOldestReadFirst(targetBytes: 0);
+
+      expect(deleted, 0);
+      expect(await store.getChapter(straggler), isNotNull);
+    });
+
+    test('an unpinned series stays unpinned', () async {
+      final store = harness.storeFor('u1p1');
+      await _download(store, chapterKey: 'c1', seriesKey: 's');
+      await store.setSeriesPinned(series: pinnedSeries, pinned: true);
+      await store.setSeriesPinned(series: pinnedSeries, pinned: false);
+
+      expect(await maintenance.repairSeriesPins(), 0);
+      expect((await store.getChapter(first))!.pinned, isFalse);
+    });
+  });
 }
