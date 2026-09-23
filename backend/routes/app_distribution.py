@@ -7,10 +7,11 @@ page that tells a person which of those they want.
 Nothing about a build is written down here. The APK path is fixed by the Flutter
 toolchain and overwritten on every build, so pointing at that single file always
 serves the newest APK; sizes and dates come off those files' own stat; the
-version is parsed live from the Flutter ``pubspec.yaml``; the iOS numbers come
-from the metadata CI wrote beside the binary. Shipping a build is therefore the
-whole update -- there is no page to edit afterwards, and no way for the page to
-advertise a version that isn't the one behind the button.
+Android numbers are read out of the APK's own manifest (the Flutter
+``pubspec.yaml`` only names the release, and stands in when there is no APK);
+the iOS numbers come from the metadata CI wrote beside the binary. Shipping a
+build is therefore the whole update -- there is no page to edit afterwards, and
+no way for the page to advertise a version that isn't the one behind the button.
 
 The page itself is dependency-free by requirement, not by taste: CSS inlined, no
 JavaScript, no external requests at all (not even a font CDN). It is served
@@ -22,6 +23,8 @@ from __future__ import annotations
 
 import json
 import os
+import struct
+import zipfile
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
@@ -1225,6 +1228,167 @@ def read_app_version() -> AppVersion:
     return AppVersion(version=version, build=build, apk="/app/download")
 
 
+# android:versionCode / android:versionName. Binary manifests name attributes
+# through a resource-id map, and a shrunk build is free to blank the plain-text
+# names, so the ids are what identify them; the names are only a fallback.
+_ATTR_VERSION_CODE = 0x0101021B
+_ATTR_VERSION_NAME = 0x0101021C
+# Chunk types and typed-value kinds from AOSP's ResourceTypes.h.
+_RES_STRING_POOL = 0x0001
+_RES_XML_RESOURCE_MAP = 0x0180
+_RES_XML_START_ELEMENT = 0x0102
+_TYPE_STRING = 0x03
+_TYPE_INT_DEC = 0x10
+_TYPE_INT_HEX = 0x11
+_NO_INDEX = 0xFFFFFFFF
+
+
+def _pool_length(buf: bytes, pos: int, utf8: bool) -> tuple[int, int]:
+    """A string-pool length prefix: ``(length, position after the prefix)``."""
+    if utf8:
+        n = buf[pos]
+        if n & 0x80:
+            return ((n & 0x7F) << 8) | buf[pos + 1], pos + 2
+        return n, pos + 1
+    (n,) = struct.unpack_from("<H", buf, pos)
+    if n & 0x8000:
+        (low,) = struct.unpack_from("<H", buf, pos + 2)
+        return ((n & 0x7FFF) << 16) | low, pos + 4
+    return n, pos + 2
+
+
+def _string_pool(buf: bytes, pos: int, header_size: int) -> list[str]:
+    count, _styles, flags, strings_start, _ = struct.unpack_from("<5I", buf, pos + 8)
+    offsets = struct.unpack_from(f"<{count}I", buf, pos + header_size)
+    utf8 = bool(flags & 0x100)
+    strings: list[str] = []
+    for offset in offsets:
+        at = pos + strings_start + offset
+        if utf8:
+            _chars, at = _pool_length(buf, at, True)
+            size, at = _pool_length(buf, at, True)
+            strings.append(buf[at : at + size].decode("utf-8", "replace"))
+        else:
+            size, at = _pool_length(buf, at, False)
+            strings.append(buf[at : at + 2 * size].decode("utf-16-le", "replace"))
+    return strings
+
+
+def _manifest_version(axml: bytes) -> tuple[str, int] | None:
+    """``(versionName, versionCode)`` off a compiled AndroidManifest.xml.
+
+    Only the root ``<manifest>`` element is read, so this walks the chunks up to
+    the first start tag and stops. Anything it does not recognise is a ``None``,
+    never an exception: the caller falls back rather than 500ing.
+    """
+    strings: list[str] = []
+    resource_ids: tuple[int, ...] = ()
+    _type, pos, _size = struct.unpack_from("<HHI", axml, 0)
+    while pos + 8 <= len(axml):
+        kind, header_size, size = struct.unpack_from("<HHI", axml, pos)
+        if size < 8:
+            return None
+        if kind == _RES_STRING_POOL:
+            strings = _string_pool(axml, pos, header_size)
+        elif kind == _RES_XML_RESOURCE_MAP:
+            resource_ids = struct.unpack_from(
+                f"<{(size - header_size) // 4}I", axml, pos + header_size
+            )
+        elif kind == _RES_XML_START_ELEMENT:
+            _ns, name, attr_start, attr_size, attr_count = struct.unpack_from(
+                "<IIHHH", axml, pos + header_size
+            )
+            if strings[name] != "manifest":
+                return None
+            code: int | None = None
+            version = ""
+            first = pos + header_size + attr_start
+            for i in range(attr_count):
+                _ans, attr, raw, _vsize, _res0, data_type, data = struct.unpack_from(
+                    "<IIIHBBI", axml, first + i * attr_size
+                )
+                attr_id = resource_ids[attr] if attr < len(resource_ids) else None
+                label = strings[attr] if attr < len(strings) else ""
+                if attr_id == _ATTR_VERSION_CODE or label == "versionCode":
+                    if data_type in (_TYPE_INT_DEC, _TYPE_INT_HEX):
+                        code = data
+                elif attr_id == _ATTR_VERSION_NAME or label == "versionName":
+                    if raw != _NO_INDEX:
+                        version = strings[raw]
+                    elif data_type == _TYPE_STRING:
+                        version = strings[data]
+            if code is None or not version.strip():
+                return None
+            return version.strip(), code
+        pos += size
+    return None
+
+
+_apk_release_cache: tuple[tuple[int, int, int], tuple[str, int] | None] | None = None
+
+
+def read_apk_release(apk: Path) -> tuple[str, int] | None:
+    """``(version, build)`` compiled into the APK /app/download serves.
+
+    Read out of the file itself because it is the one source that cannot drift
+    from the download. The pubspec used to be the answer, and it reaches the box
+    first: ``push.sh all`` syncs it (the deployed-code check needs it) minutes
+    before ``push.sh apk`` publishes the binary, and indefinitely before it if a
+    gate refuses the APK. In that window every phone was offered a build the
+    server did not have, downloaded the old APK under the new name, reinstalled
+    what it already ran, and was offered the same update again.
+
+    ``None`` when there is no APK or it cannot be read; cached on the file's
+    identity, so the zip is opened once per publish, not once per request.
+    """
+    global _apk_release_cache
+    try:
+        stat = apk.stat()
+    except OSError:
+        return None
+    if not apk.is_file():
+        return None
+    key = (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    cached = _apk_release_cache
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    try:
+        with zipfile.ZipFile(apk) as archive:
+            release = _manifest_version(archive.read("AndroidManifest.xml"))
+    except (OSError, KeyError, zipfile.BadZipFile, struct.error, IndexError):
+        release = None
+    _apk_release_cache = (key, release)
+    return release
+
+
+def read_android_release() -> AppVersion:
+    """The served APK's own version and build, or the pubspec's when unreadable.
+
+    What the install page's Android numbers and the download's filename use:
+    both describe the file behind the button.
+    """
+    served = read_apk_release(APK_PATH)
+    if served is None:
+        return read_app_version()
+    return AppVersion(version=served[0], build=served[1], apk="/app/download")
+
+
+def advertised_app_version() -> AppVersion:
+    """What ``/app/version`` tells phones.
+
+    ``build`` is the only number the app acts on (``remoteBuild > localBuild``),
+    so it is the served APK's: a phone is never offered a build the server has
+    not got. ``version`` stays the pubspec's release name because
+    ops/vps/deploy.sh proves a deploy by comparing it with the compiled
+    changelog -- and on every release it runs while the old APK is still up.
+    """
+    info = read_app_version()
+    served = read_apk_release(APK_PATH)
+    if served is None:
+        return info
+    return AppVersion(version=info.version, build=served[1], apk=info.apk)
+
+
 def _ios_meta_path() -> Path:
     """Location of the published .ipa's version metadata (sits beside the .ipa).
 
@@ -1592,7 +1756,10 @@ def _render_shots(cache_key: str) -> str:
 
 def render_landing_html(request: Request | None = None) -> str:
     """The whole install page: self-contained HTML, built from live state."""
-    info = read_app_version()
+    # The APK's own numbers, for the same reason the iPhone card uses the .ipa's:
+    # the header sits over the Download button, and the pubspec runs ahead of it
+    # for the whole of a release.
+    info = read_android_release()
     cache_key = f"{info.version}.{info.build}"
     apk = _artifact(APK_PATH)
     ipa = _artifact(IPA_PATH)
@@ -1725,8 +1892,8 @@ footer{color:var(--muted);font-size:13px;text-align:center;padding-top:8px}
 
 @router.get("/app/version", response_model=AppVersion)
 def app_version() -> AppVersion:
-    """Latest app version metadata, read live from the Flutter pubspec."""
-    return read_app_version()
+    """The build phones are offered: the one /app/download actually serves."""
+    return advertised_app_version()
 
 
 @router.get("/app/changelog", response_model=Changelog)
@@ -1753,7 +1920,7 @@ def app_download() -> FileResponse:
             status_code=404,
             detail="APK not built yet. Run `flutter build apk --release`.",
         )
-    info = read_app_version()
+    info = read_android_release()
     return FileResponse(
         path=APK_PATH,
         media_type="application/vnd.android.package-archive",

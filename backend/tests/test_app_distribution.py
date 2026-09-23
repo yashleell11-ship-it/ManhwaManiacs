@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import struct
+import zipfile
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
@@ -111,6 +113,101 @@ def test_install_page_reads_its_version_live(
         "build": 404,
         "apk": "/app/download",
     }
+
+
+def _compiled_manifest(version_name: str, version_code: int, *, utf8: bool) -> bytes:
+    """A binary AndroidManifest.xml carrying just ``<manifest>`` and its version.
+
+    Laid out the way aapt2 writes one: a string pool, the resource-id map that
+    names the android: attributes, then the root start tag.
+    """
+    strings = ["versionCode", "versionName", "manifest", version_name]
+    data = b""
+    offsets = []
+    for text in strings:
+        offsets.append(len(data))
+        if utf8:
+            raw = text.encode("utf-8")
+            data += bytes([len(text), len(raw)]) + raw + b"\0"
+        else:
+            data += struct.pack("<H", len(text)) + text.encode("utf-16-le") + b"\0\0"
+    data += b"\0" * (-len(data) % 4)
+    header = 28 + 4 * len(strings)
+    pool = struct.pack(
+        "<HHIIIIII",
+        0x0001, 28, header + len(data), len(strings), 0,
+        0x100 if utf8 else 0, header, 0,
+    ) + struct.pack(f"<{len(strings)}I", *offsets) + data
+    ids = struct.pack("<HHI2I", 0x0180, 8, 16, 0x0101021B, 0x0101021C)
+    attrs = struct.pack("<IIIHBBI", 0xFFFFFFFF, 0, 0xFFFFFFFF, 8, 0, 0x10, version_code)
+    attrs += struct.pack("<IIIHBBI", 0xFFFFFFFF, 1, 3, 8, 0, 0x03, 3)
+    element = struct.pack(
+        "<HHIIIIIHHHHHH",
+        0x0102, 16, 36 + len(attrs), 1, 0xFFFFFFFF,
+        0xFFFFFFFF, 2, 20, 20, 2, 0, 0, 0,
+    ) + attrs
+    body = pool + ids + element
+    return struct.pack("<HHI", 0x0003, 8, 8 + len(body)) + body
+
+
+def _released_apk(
+    tmp_path: Path, monkeypatch, version: str, build: int, *, utf8: bool = False
+) -> Path:
+    apk = tmp_path / "app-release.apk"
+    with zipfile.ZipFile(apk, "w") as archive:
+        archive.writestr(
+            "AndroidManifest.xml", _compiled_manifest(version, build, utf8=utf8)
+        )
+    monkeypatch.setattr("routes.app_distribution.APK_PATH", apk)
+    return apk
+
+
+@pytest.mark.parametrize("utf8", [False, True])
+def test_phones_are_only_offered_the_build_the_download_serves(
+    client: TestClient, tmp_path: Path, monkeypatch, utf8: bool
+):
+    # `push.sh all` puts the new pubspec on the box minutes before `push.sh apk`
+    # publishes the binary, and for good if an APK gate refuses it. Phones decide
+    # on `build` alone, so advertising the pubspec's offered every phone an
+    # update that downloaded the APK it already had -- and then offered it again.
+    pubspec = tmp_path / "pubspec.yaml"
+    pubspec.write_text("name: manhwamaniacs\nversion: 7.3.2+405\n", encoding="utf-8")
+    monkeypatch.setattr("routes.app_distribution.PUBSPEC_PATH", pubspec)
+    _released_apk(tmp_path, monkeypatch, "7.3.1", 404, utf8=utf8)
+
+    advertised = client.get("/app/version").json()
+    assert advertised["build"] == 404
+    # The release name stays the pubspec's: ops/vps/deploy.sh proves a deploy by
+    # matching it against the compiled changelog while the old APK is still up.
+    assert advertised["version"] == "7.3.2"
+
+    disposition = client.get("/app/download").headers["content-disposition"]
+    assert "manhwamaniacs-7.3.1.apk" in disposition
+
+    html = client.get("/").text
+    assert "Version 7.3.1 · build 404" in html
+    assert "7.3.2" not in html
+
+
+def test_a_new_apk_is_offered_as_soon_as_it_is_served(
+    client: TestClient, tmp_path: Path, monkeypatch
+):
+    # The other half: the number follows the file, so publishing the APK is the
+    # whole update even before the pubspec catches up.
+    pubspec = tmp_path / "pubspec.yaml"
+    pubspec.write_text("name: manhwamaniacs\nversion: 7.3.1+404\n", encoding="utf-8")
+    monkeypatch.setattr("routes.app_distribution.PUBSPEC_PATH", pubspec)
+    apk = _released_apk(tmp_path, monkeypatch, "7.3.1", 404)
+    assert client.get("/app/version").json()["build"] == 404
+
+    replacement = tmp_path / "next.apk"
+    with zipfile.ZipFile(replacement, "w") as archive:
+        archive.writestr(
+            "AndroidManifest.xml", _compiled_manifest("7.3.2", 405, utf8=False)
+        )
+    replacement.replace(apk)
+
+    assert client.get("/app/version").json()["build"] == 405
 
 
 def test_install_page_reports_the_real_file_size_and_date(
