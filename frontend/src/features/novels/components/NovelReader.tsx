@@ -19,6 +19,7 @@ import { prefetchNovelChapter, useNovelChapter } from "../hooks";
 import { novelChapterHref, novelContentsHref } from "../novel-link";
 import { novelSeriesKey } from "../preferences";
 import type { ParagraphAnchor } from "../paragraph-anchor";
+import { createPendingProgress, flushWhenLeaving } from "../pending-progress";
 import { nextProgressPush, type NovelProgressPosition } from "../progress";
 import { NovelChapterView } from "./NovelChapterView";
 
@@ -114,7 +115,11 @@ export function NovelReader({
     [chapterQuery.data],
   );
 
-  const progressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /**
+   * The debounced progress write. Sent, never dropped, when the reader is
+   * left: see `pending-progress.ts` and the effect below.
+   */
+  const [pendingProgress] = useState(() => createPendingProgress(PROGRESS_SAVE_MS));
   /** Furthest bucket already reported for THIS chapter — never rewound. */
   const furthestSent = useRef(0);
 
@@ -185,10 +190,11 @@ export function NovelReader({
       const push = nextProgressPush(position, furthestSent.current);
       if (!push) return;
       furthestSent.current = push.bucket;
-      if (progressTimer.current) clearTimeout(progressTimer.current);
-      progressTimer.current = setTimeout(() => persistProgress(push), PROGRESS_SAVE_MS);
+      // The closure carries the chapter this position was read in, so a
+      // write that is flushed after the chapter changed still lands there.
+      pendingProgress.schedule(() => persistProgress(push));
     },
-    [persistProgress],
+    [pendingProgress, persistProgress],
   );
 
   /**
@@ -219,11 +225,9 @@ export function NovelReader({
     if (!nextChapterKey || !chapter) return;
 
     // Mark the finished chapter complete straight away — the debounced tracker
-    // never reports the final bucket once the page stops scrolling.
-    if (progressTimer.current) {
-      clearTimeout(progressTimer.current);
-      progressTimer.current = null;
-    }
+    // never reports the final bucket once the page stops scrolling. The
+    // completion covers whatever position of this chapter was still waiting.
+    pendingProgress.cancel();
     saveProgress.mutate({
       ref: { sourceId, seriesKey, chapterKey: activeChapterKey },
       body: {
@@ -261,6 +265,7 @@ export function NovelReader({
     activeChapterKey,
     chapter,
     nextChapterKey,
+    pendingProgress,
     queryClient,
     router,
     saveProgress,
@@ -270,11 +275,10 @@ export function NovelReader({
     takeElapsed,
   ]);
 
-  useEffect(() => {
-    return () => {
-      if (progressTimer.current) clearTimeout(progressTimer.current);
-    };
-  }, []);
+  // Send the waiting write when the page is hidden or put away, and when the
+  // reader unmounts (Back, the series link), instead of dropping the last
+  // half second of reading.
+  useEffect(() => flushWhenLeaving(pendingProgress.flush), [pendingProgress]);
 
   return (
     <NovelChapterView
