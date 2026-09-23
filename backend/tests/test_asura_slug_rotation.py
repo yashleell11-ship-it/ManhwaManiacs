@@ -136,6 +136,32 @@ def test_a_source_whose_keys_do_not_drift_compares_exactly(
     assert len(_follows(db_session, uid, pid)) == 2
 
 
+def test_a_follow_and_the_new_key_page_carry_one_identity(
+    db_session, acct, seed_follow
+):
+    """A client can tell a new-key page is followed without parsing keys.
+
+    The follow keeps the key it was made under, and Browse serves the page
+    under this week's; both payloads carry the connector's identity, so the
+    Follow button on the new page reads "Following" instead of offering a
+    press that hands back the old follow and changes nothing on screen.
+    """
+    from connectors.models import Series
+    from services.browse_service import _serialize_series
+
+    uid, pid = acct
+    seed_follow(uid, pid, source_id=SRC, series_key=OLD, title="TGMR")
+
+    followed = _library(db_session, uid, pid).list_series()["items"]
+    page = _serialize_series(Series(id=NEW, title="TGMR"), SRC)
+
+    assert [row["series_key"] for row in followed] == [OLD]
+    assert followed[0]["series_identity"] == page["series_identity"]
+    # A source whose keys do not drift names a series by its key alone.
+    other = _serialize_series(Series(id=OLD, title="TGMR"), "mangadex")
+    assert other["series_identity"] == OLD
+
+
 # --- reading clears the notification ----------------------------------------------
 
 

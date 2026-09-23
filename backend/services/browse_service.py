@@ -341,6 +341,11 @@ def _serialize_series(series: Series, source_id: str) -> dict[str, object]:
     return {
         "id": series.id,
         "source_id": source_id,
+        # The same answer a followed row carries as ``series_identity``: a
+        # series page matches a follow on it rather than on the exact key,
+        # which on Asura changes every few days while the follow keeps the key
+        # it was made under.
+        "series_identity": series_identity(source_id, series.id),
         "title": series.title,
         "chapter_count": series.chapter_count,
         "description": series.description,

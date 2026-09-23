@@ -1561,6 +1561,12 @@ class FollowedSeriesService:
             "id": row.id,
             "source_id": row.source_id,
             "series_key": row.series_key,
+            # What the source says this key names, for a client asking "is the
+            # series on this page followed?". Equal to ``series_key`` on every
+            # source but one: Asura rotates slug suffixes, so a page served
+            # under this week's key names a series followed under last week's.
+            # Compared, never fetched with -- see ``series_identity``.
+            "series_identity": series_identity(row.source_id, row.series_key),
             "title": row.title,
             "cover_url": row.cover_url
             or f"/sources/{row.source_id}/series/{quote(row.series_key, safe='')}/cover",
