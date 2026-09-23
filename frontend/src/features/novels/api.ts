@@ -1,5 +1,6 @@
 import { http, requestBlob, sourceChapterQuery } from "@/services/http";
 import type { ChapterId, SeriesId } from "@/types/api";
+import { type NovelAudioFormat, novelVoiceSamplePath } from "./audio-url";
 import { bucketCount } from "./progress";
 import { countWords } from "./reading-time";
 import type {
@@ -120,15 +121,16 @@ export const novelsApi = {
    *
    * The caller owns the URL and must revoke it. `signal` abandons a clip the
    * reader has already moved past; see `latest-load.ts`.
+   *
+   * `format` is `browserNovelAudioFormat()`'s answer: the pack is Ogg Opus,
+   * which Safari on an iPhone cannot play at all.
    */
   voiceSampleObjectUrl: async (
     voiceId: string,
-    { signal }: { signal?: AbortSignal } = {},
+    { signal, format }: { signal?: AbortSignal; format: NovelAudioFormat },
   ) => {
-    const { blob } = await requestBlob("/novels/voices/sample", {
-      query: { voice: voiceId },
-      signal,
-    });
+    const { path, query } = novelVoiceSamplePath(voiceId, format);
+    const { blob } = await requestBlob(path, { query, signal });
     return URL.createObjectURL(blob);
   },
 

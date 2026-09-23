@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { novelAudioPath, OGG_OPUS_MIME, pickNovelAudioFormat } from "./audio-url";
+import {
+  novelAudioPath,
+  novelVoiceSamplePath,
+  OGG_OPUS_MIME,
+  pickNovelAudioFormat,
+} from "./audio-url";
 
 /**
  * The audio is fetched, not pointed at with `<audio src>`, because
@@ -68,5 +73,28 @@ describe("pickNovelAudioFormat", () => {
     // "maybe" is the spec's usual answer for a type the browser does handle;
     // only the empty string means no.
     expect(pickNovelAudioFormat("maybe")).toBe("ogg");
+  });
+});
+
+/**
+ * The voice pack's preview clips are Ogg Opus too, so on Safari for iPhone
+ * every "hear this voice" was silent. They are asked for the same way.
+ */
+describe("novelVoiceSamplePath", () => {
+  it("points at the sample endpoint with the voice and the format", () => {
+    expect(novelVoiceSamplePath("libritts-2803", "m4a")).toEqual({
+      path: "/novels/voices/sample",
+      query: { voice: "libritts-2803", format: "m4a" },
+    });
+    expect(novelVoiceSamplePath("libritts-2803", "ogg").query.format).toBe("ogg");
+  });
+
+  it("asks for m4a exactly where a chapter would", () => {
+    // One decision for both, so a browser cannot preview a voice it will then
+    // be unable to hear read a chapter, or the other way round.
+    const ask = (answer: string) =>
+      novelVoiceSamplePath("v", pickNovelAudioFormat(answer)).query.format;
+    expect(ask("")).toBe("m4a");
+    expect(ask("maybe")).toBe("ogg");
   });
 });

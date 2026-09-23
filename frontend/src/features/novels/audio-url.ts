@@ -77,6 +77,27 @@ export function novelAudioPath(
 }
 
 /**
+ * The path and query a voice's preview clip lives at.
+ *
+ * The voice pack is Ogg Opus like every render, so a preview on Safari for
+ * iPhone was as silent as a chapter; the route takes the same `format` the
+ * chapter file route does, decided the same way (`browserNovelAudioFormat`).
+ * Always sent, for the same reason as in `novelAudioPath`.
+ */
+export function novelVoiceSamplePath(
+  voiceId: string,
+  format: NovelAudioFormat,
+): {
+  path: string;
+  query: Record<string, string>;
+} {
+  return {
+    path: "/novels/voices/sample",
+    query: { voice: voiceId, format },
+  };
+}
+
+/**
  * Fetch the chapter's audio and hand back an object URL.
  *
  * The caller owns the URL and must `URL.revokeObjectURL` it — a leaked one

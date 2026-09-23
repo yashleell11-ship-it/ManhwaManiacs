@@ -21,6 +21,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { novelsApi } from "../api";
+import { browserNovelAudioFormat } from "../audio-url";
 import { automaticVoiceOption } from "../cast-labels";
 import { createLatestLoad, keepLoadedUrl } from "../latest-load";
 import type { NovelVoicePayload } from "../types";
@@ -85,7 +86,12 @@ export function NovelVoicePicker({
       setPlaying(voiceId);
       const signal = loads.begin();
       try {
-        const url = await novelsApi.voiceSampleObjectUrl(voiceId, { signal });
+        // Asked the same way as the chapter player: a browser that cannot
+        // read Ogg Opus (Safari on an iPhone) gets the clip as m4a.
+        const url = await novelsApi.voiceSampleObjectUrl(voiceId, {
+          signal,
+          format: browserNovelAudioFormat(),
+        });
         // Another name was pressed, or the picker closed, while this clip
         // was on its way.
         if (!keepLoadedUrl(signal, url)) return;
