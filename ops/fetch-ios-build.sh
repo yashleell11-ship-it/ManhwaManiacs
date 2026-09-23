@@ -150,11 +150,23 @@ print(d["tag_name"], ipa, assets.get("ios-build.json", "-"))
   fi
 
   say "downloading release assets (no credentials required)"
-  curl -sSL -m 600 -o "$TMP/ManhwaManiacs.ipa" "$ipa_url" \
-    || { err "ipa download failed"; return 1; }
+  # The metadata first, and all or nothing. It is what tells SideStore this is
+  # an update; publishing the .ipa without it leaves the PREVIOUS release's
+  # ios-build.json in place, so the manifest names the old build over the new
+  # binary. Nor can a later run patch it up: the stamp says this tag is done,
+  # so nothing would fetch the metadata again. Failing here writes no stamp,
+  # and the next run retries the whole release. -f because without it an HTTP
+  # error page is saved as the file and curl still exits 0.
   if [ "$meta_url" != "-" ]; then
-    curl -sSL -m 60 -o "$TMP/ios-build.json" "$meta_url" || true
+    if ! curl -fsSL -m 60 -o "$TMP/ios-build.json" "$meta_url" \
+       || ! python3 -m json.tool "$TMP/ios-build.json" >/dev/null 2>&1; then
+      err "ios-build.json for $tag did not download as valid JSON — not"
+      err "publishing it; the next run retries the whole release"
+      return 1
+    fi
   fi
+  curl -fsSL -m 600 -o "$TMP/ManhwaManiacs.ipa" "$ipa_url" \
+    || { err "ipa download failed"; return 1; }
 
   publish_files "$TMP/ManhwaManiacs.ipa" "$TMP/ios-build.json" "$tag"
 }
