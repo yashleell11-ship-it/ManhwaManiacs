@@ -48,6 +48,24 @@ void main() {
       expect(android.containsKey('format'), isFalse);
     });
 
+    test('a voice preview asks the same way, and escapes the id', () {
+      // The pack is Ogg Opus too, so every preview on an iPhone was silent.
+      final ios = novelVoiceSampleQuery(
+        voiceId: 'libritts-2803',
+        format: novelAudioFormatFor(TargetPlatform.iOS),
+      );
+      expect(ios, {'voice': 'libritts-2803', 'format': 'm4a'});
+      final android = novelVoiceSampleQuery(
+        voiceId: 'a&b=c',
+        format: novelAudioFormatFor(TargetPlatform.android),
+      );
+      expect(android, {'voice': 'a&b=c'});
+      expect(
+        Uri(queryParameters: android).query,
+        'voice=a%26b%3Dc',
+      );
+    });
+
     test('the repository sends it', () async {
       final adapter = _RecordingAdapter(_m4a);
       final dio = Dio(BaseOptions(baseUrl: 'https://mm.test'))

@@ -111,3 +111,18 @@ Map<String, String> novelAudioFileQuery({
       'chapter': chapterKey,
       if (format != NovelAudioFormat.ogg) 'format': format.wire,
     };
+
+/// The query `GET /novels/voices/sample` is asked with.
+///
+/// The voice pack is Ogg Opus like every render, so a preview on an iPhone
+/// was as silent as a chapter; the route takes the same `format` the chapter
+/// file route does. Sent only when it is not the server's default, for the
+/// same reason as [novelAudioFileQuery].
+Map<String, String> novelVoiceSampleQuery({
+  required String voiceId,
+  required NovelAudioFormat format,
+}) =>
+    {
+      'voice': voiceId,
+      if (format != NovelAudioFormat.ogg) 'format': format.wire,
+    };
