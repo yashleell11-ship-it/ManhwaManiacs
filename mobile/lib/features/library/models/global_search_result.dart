@@ -2,8 +2,9 @@
 /// from the local library and every enabled remote source into a single feed.
 ///
 /// `series_id` is always a STRING here (local ids are numeric strings, source
-/// ids are opaque source-defined strings) and `cover_url` is already an
-/// absolute URL, so callers use it verbatim without reconstructing it.
+/// ids are opaque source-defined strings). `cover_url` is the backend's
+/// relative `/sources/.../cover` proxy path; the cards resolve it against the
+/// API base with `searchResultCoverUrl` rather than reconstructing it.
 class GlobalSearchItem {
   const GlobalSearchItem({
     required this.kind,
@@ -25,7 +26,8 @@ class GlobalSearchItem {
   final String seriesId;
   final String title;
 
-  /// Absolute cover URL served by the backend; consume directly.
+  /// Cover URL as served — relative from the backend, absolute when a retry
+  /// rebuilt the row. Paint it through `searchResultCoverUrl`.
   final String? coverUrl;
   final String? author;
   final Map<String, dynamic>? extra;

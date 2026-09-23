@@ -83,4 +83,32 @@ void main() {
       expect(historyCoverUrl('http://127.0.0.1:8000', '  '), isNull);
     });
   });
+
+  group('searchResultCoverUrl', () {
+    test('resolves the relative path search and suggestions now serve', () {
+      expect(
+        searchResultCoverUrl(
+          'https://app.manhwamaniacs.xyz',
+          '/sources/asurascans/series/nano-machine/cover',
+        ),
+        'https://app.manhwamaniacs.xyz/sources/asurascans/series/'
+        'nano-machine/cover',
+      );
+    });
+
+    test('leaves an absolute cover URL untouched', () {
+      expect(
+        searchResultCoverUrl(
+          'https://app.manhwamaniacs.xyz',
+          'https://example.test/c.jpg',
+        ),
+        'https://example.test/c.jpg',
+      );
+    });
+
+    test('is null when the hit has no cover', () {
+      expect(searchResultCoverUrl('http://127.0.0.1:8000', null), isNull);
+      expect(searchResultCoverUrl('http://127.0.0.1:8000', ' '), isNull);
+    });
+  });
 }

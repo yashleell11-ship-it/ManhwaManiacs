@@ -1,16 +1,20 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:manhwamaniacs/app/theme/app_colors.dart';
 import 'package:manhwamaniacs/app/theme/app_presets.dart';
 import 'package:manhwamaniacs/features/library/models/global_search_result.dart';
+import 'package:manhwamaniacs/features/library/utils/cover_url.dart';
 import 'package:manhwamaniacs/features/sources/utils/source_branding.dart';
+import 'package:manhwamaniacs/shared/providers/core_providers.dart';
 import 'package:manhwamaniacs/shared/widgets/glass_card.dart';
 import 'package:manhwamaniacs/shared/widgets/series_cover_image.dart';
 
-/// List-style result row for a federated search hit. Renders the API-provided
-/// (absolute) [GlobalSearchItem.coverUrl] via [SeriesCoverImage] and tags remote
-/// hits with a source badge so the user can tell library results apart from
-/// results pulled live from an external source.
-class GlobalSearchResultCard extends StatelessWidget {
+/// List-style result row for a federated search hit. Renders
+/// [GlobalSearchItem.coverUrl], resolved against the API base (see
+/// [searchResultCoverUrl]), via [SeriesCoverImage] and tags remote hits with a
+/// source badge so the user can tell library results apart from results pulled
+/// live from an external source.
+class GlobalSearchResultCard extends ConsumerWidget {
   const GlobalSearchResultCard({
     super.key,
     required this.item,
@@ -27,7 +31,7 @@ class GlobalSearchResultCard extends StatelessWidget {
   final String? footnote;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     return GlassCard(
       onTap: onTap,
       padding: EdgeInsets.all(context.space.md),
@@ -35,7 +39,11 @@ class GlobalSearchResultCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SeriesCoverImage(
-            url: item.coverUrl ?? '',
+            url: searchResultCoverUrl(
+                  ref.watch(apiBaseUrlProvider),
+                  item.coverUrl,
+                ) ??
+                '',
             width: 72,
             height: 108,
           ),
@@ -84,7 +92,7 @@ class GlobalSearchResultCard extends StatelessWidget {
 
 /// Compact cover-first card for the search results grid and for the horizontal
 /// shelves under each source section.
-class GlobalSearchResultGridCard extends StatelessWidget {
+class GlobalSearchResultGridCard extends ConsumerWidget {
   const GlobalSearchResultGridCard({
     super.key,
     required this.item,
@@ -106,7 +114,7 @@ class GlobalSearchResultGridCard extends StatelessWidget {
   final bool showSourceBadge;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     return GestureDetector(
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
@@ -127,7 +135,11 @@ class GlobalSearchResultGridCard extends StatelessWidget {
                   fit: StackFit.expand,
                   children: [
                     SeriesCoverImage(
-                      url: item.coverUrl ?? '',
+                      url: searchResultCoverUrl(
+                            ref.watch(apiBaseUrlProvider),
+                            item.coverUrl,
+                          ) ??
+                          '',
                       displayWidth: coverWidth,
                       borderRadius: 0,
                     ),

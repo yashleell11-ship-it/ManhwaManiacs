@@ -41,8 +41,8 @@ class SourcesRepositoryImpl implements SourcesRepository {
         '/sources/search',
         queryParameters: {'q': query, 'page': page, 'per_page': perPage},
       );
-      // cover_url comes back absolute here (unlike /sources/{id}/series), so no
-      // _apiBaseUrl resolution is needed.
+      // cover_url comes back relative, like /sources/{id}/series; the result
+      // cards resolve it against the API base (searchResultCoverUrl).
       return Ok(GroupedSearchResult.fromJson(r.data ?? const {}));
     } on DioException catch (e) {
       return Err(_err(e));
