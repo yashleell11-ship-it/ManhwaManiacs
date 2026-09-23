@@ -4,6 +4,7 @@ import 'package:manhwamaniacs/core/logging/app_logger.dart';
 import 'package:manhwamaniacs/features/downloads/providers/downloads_scope.dart';
 import 'package:manhwamaniacs/features/downloads/store/downloads_store.dart';
 import 'package:manhwamaniacs/features/downloads/utils/progress_outbox_batch.dart';
+import 'package:manhwamaniacs/features/downloads/utils/progress_outbox_priority.dart';
 import 'package:manhwamaniacs/features/reader/models/reading_progress.dart';
 import 'package:manhwamaniacs/shared/providers/repository_providers.dart';
 
@@ -191,14 +192,20 @@ class ProgressOutboxController {
   /// at-least-once delivery the outbox already has (a crash after a 200 and
   /// before the clear replays the row), and it is the server's idempotency
   /// that has to settle it either way.
+  ///
+  /// Past [kProgressOutboxMaxGroups] chapters the least valuable are dropped
+  /// ([outboxGroupsToDrop]), never simply the oldest: the oldest row is often
+  /// the furthest chapter of a series, and losing it rewinds that series on
+  /// every device. The one-time backfill of Sources-tab progress
+  /// (`SourceProgressBackfill`) queues exactly such rows.
   Future<void> _compact(DownloadsStore store) async {
     try {
       final pending = await store.pendingProgressOutbox();
       _queuedSinceRead = 0;
       final groups = collapseProgressOutbox(pending);
-      final excess = groups.length - kProgressOutboxMaxGroups;
+      final dropped = outboxGroupsToDrop(groups);
       for (final (index, group) in groups.indexed) {
-        if (index < excess) {
+        if (dropped.contains(index)) {
           await store.clearProgressOutbox(group.outboxIds);
           continue;
         }
