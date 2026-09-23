@@ -68,7 +68,17 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
-from sqlalchemy import Integer, and_, delete, distinct, func, insert, literal, select
+from sqlalchemy import (
+    Integer,
+    and_,
+    delete,
+    distinct,
+    func,
+    insert,
+    literal,
+    select,
+    tuple_,
+)
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -80,6 +90,7 @@ from database.models import (
     FollowedSeries,
     ReadingDayStats,
     ReadingSession,
+    SourceSeriesCache,
 )
 
 #: Longest span a single reading session may contribute to "time spent".
@@ -789,7 +800,58 @@ class ReadingStatsService:
             item.update(self._roll(r))
             item.pop("series_read")  # always 1 inside a per-series group
             out.append(item)
+        self._fill_cached_titles(out, with_cover=True)
         return out
+
+    def _fill_cached_titles(
+        self, items: list[dict[str, Any]], *, with_cover: bool = False
+    ) -> None:
+        """Name rows whose series is no longer followed, from the series cache.
+
+        The follow join is the only title source the grouped queries have, so a
+        series read but never followed (or unfollowed since) came back with no
+        title at all -- and the clients fell back to the raw ``series_key`` or
+        just the source's name, which put two rows both labelled "novelarchive"
+        at the top of the owner's "Most read". ``source_series_cache`` usually
+        still holds the title, and :meth:`ProgressService._series_titles`
+        already reads it the same way for the history screen.
+
+        One lookup after the query, not a join inside the GROUP BY: the lists
+        are a handful of rows, and the cache has no business shaping the
+        grouping. A miss stays a miss -- the cache is TTL-evicted, and filling
+        it would mean fetching from the source on a statistics render. The 18+
+        gate is untouched: this only relabels rows the gate already let through.
+        """
+        pairs = {
+            (item["source_id"], item["series_key"])
+            for item in items
+            if not item.get("title")
+        }
+        if not pairs:
+            return
+        found = {
+            (source_id, series_key): (title, cover)
+            for source_id, series_key, title, cover in self._db.execute(
+                select(
+                    SourceSeriesCache.source_id,
+                    SourceSeriesCache.series_key,
+                    SourceSeriesCache.title,
+                    SourceSeriesCache.cover_url,
+                ).where(
+                    tuple_(
+                        SourceSeriesCache.source_id, SourceSeriesCache.series_key
+                    ).in_(list(pairs))
+                )
+            ).all()
+            if title
+        }
+        for item in items:
+            hit = found.get((item["source_id"], item["series_key"]))
+            if hit is None or item.get("title"):
+                continue
+            item["title"] = hit[0]
+            if with_cover and not item.get("cover_url"):
+                item["cover_url"] = hit[1]
 
     def _recent(self) -> list[dict[str, Any]]:
         """The last few SITTINGS, deliberately *not* windowed.
@@ -852,7 +914,7 @@ class ReadingStatsService:
             .order_by(last_at.desc())
             .limit(_RECENT_SESSIONS)
         ).all()
-        return [
+        out = [
             {
                 "source_id": r.source_id,
                 "series_key": r.series_key,
@@ -869,6 +931,8 @@ class ReadingStatsService:
             }
             for r in rows
         ]
+        self._fill_cached_titles(out)
+        return out
 
     def chapters_completed(self) -> int:
         """Chapters marked finished in ``chapter_progress`` for this profile.

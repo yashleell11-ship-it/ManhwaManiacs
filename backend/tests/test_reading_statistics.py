@@ -300,6 +300,53 @@ def test_by_series_carries_the_follow_row_and_survives_an_unfollow(
     assert rows[1]["pages_read"] == 9
 
 
+def test_an_unfollowed_series_is_named_from_the_series_cache(
+    db_session, acct, seed_session, seed_follow
+):
+    """Read-but-not-followed history keeps its title when the cache has it.
+
+    Without this the owner's "Most read" led with two raw novelarchive ids,
+    though ``source_series_cache`` held "Shadow Slave" for one of them. A
+    follow title still wins, and a cache miss still comes back empty rather
+    than triggering a source fetch.
+    """
+    from database.models import SourceSeriesCache
+
+    uid, pid = acct
+    seed_follow(uid, pid, series_key="followed", title="Followed One")
+    db_session.add_all(
+        [
+            SourceSeriesCache(
+                source_id="mangadex",
+                series_key="unfollowed",
+                title="Shadow Slave",
+                cover_url="http://c/ss.jpg",
+            ),
+            SourceSeriesCache(
+                source_id="mangadex", series_key="followed", title="Cached Name"
+            ),
+        ]
+    )
+    db_session.commit()
+    seed_session(uid, pid, series_key="unfollowed", chapter_key="c1", pages_read=50)
+    seed_session(uid, pid, series_key="followed", chapter_key="c1", pages_read=20)
+    seed_session(uid, pid, series_key="uncached", chapter_key="c1", pages_read=5)
+
+    out = _stats(db_session, uid, pid).build(30)
+    by_key = {r["series_key"]: r for r in out["by_series"]}
+    assert by_key["unfollowed"]["title"] == "Shadow Slave"
+    assert by_key["unfollowed"]["cover_url"] == "http://c/ss.jpg"
+    assert by_key["followed"]["title"] == "Followed One"
+    assert by_key["uncached"]["title"] is None
+
+    recent = {r["series_key"]: r["title"] for r in out["recent_sessions"]}
+    assert recent == {
+        "unfollowed": "Shadow Slave",
+        "followed": "Followed One",
+        "uncached": None,
+    }
+
+
 def test_recent_sessions_are_not_clipped_by_the_window(
     db_session, acct, seed_session, seed_follow
 ):
