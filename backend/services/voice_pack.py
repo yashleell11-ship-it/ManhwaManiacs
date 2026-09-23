@@ -159,6 +159,22 @@ def sample_path(voice_id: str) -> Path | None:
     return None
 
 
+def sample_paths() -> list[Path]:
+    """Every sample clip the manifest names that is on disk, resolved.
+
+    For the ops backfill that pre-makes each clip's m4a
+    (``python -m services.chapter_audio_m4a``): it works through the same
+    manifest the route does, so it touches exactly the files the route could
+    serve and nothing else in the directory.
+    """
+    root = voices_root()
+    return [
+        root / voice.sample
+        for voice in load_voices()
+        if (root / voice.sample).is_file()
+    ]
+
+
 def is_known_voice(voice_id: str | None) -> bool:
     """Whether [voice_id] is one this server can offer.
 

@@ -121,6 +121,138 @@ class TestSample:
             ).status_code == 404
 
 
+def real_pack(tmp_path, monkeypatch):
+    """A pack whose samples are real Ogg Opus, so ``format=m4a`` transcodes."""
+    from tests.test_chapter_audio_m4a import make_opus
+
+    install_pack(tmp_path, monkeypatch)
+    for name in ("m-low.opus", "m-high.opus"):
+        make_opus(tmp_path / name)
+    return tmp_path / "m-low.opus"
+
+
+def sample(client, voice="libritts-2803", fmt=None, headers=None):
+    params = {"voice": voice}
+    if fmt is not None:
+        params["format"] = fmt
+    return client.get(
+        "/novels/voices/sample", params=params, headers=headers or {}
+    )
+
+
+class TestSampleFormats:
+    """Every preview was silent on an iPhone: the pack is Ogg Opus, and
+    AVPlayer cannot open Ogg at all. ``format=m4a`` is the chapter route's
+    answer, applied to the clips."""
+
+    def test_the_default_is_still_the_clip_itself(
+        self, novels_on, tmp_path, monkeypatch
+    ):
+        clip = real_pack(tmp_path, monkeypatch)
+
+        for fmt in (None, "ogg"):
+            response = sample(novels_on, fmt=fmt)
+            assert response.headers["content-type"] == "audio/ogg"
+            assert response.content == clip.read_bytes()
+        assert not list(tmp_path.rglob("*.m4a"))
+
+    def test_m4a_is_aac_in_mp4_made_once_beside_the_clip(
+        self, novels_on, tmp_path, monkeypatch
+    ):
+        clip = real_pack(tmp_path, monkeypatch)
+
+        first = sample(novels_on, fmt="m4a")
+        stored = clip.with_suffix(".m4a")
+        inode = stored.stat().st_ino
+        second = sample(novels_on, fmt="m4a")
+
+        assert first.status_code == 200
+        assert first.headers["content-type"] == "audio/mp4"
+        assert first.content[4:8] == b"ftyp"
+        assert first.content == second.content == stored.read_bytes()
+        assert stored.stat().st_ino == inode
+        # Only the clip asked for.
+        assert not (tmp_path / "m-high.m4a").exists()
+
+    def test_m4a_answers_a_range_with_206(self, novels_on, tmp_path, monkeypatch):
+        # iOS will not play a progressive MP4 from a server that ignores Range,
+        # and its first request for one is usually a Range.
+        real_pack(tmp_path, monkeypatch)
+
+        part = sample(novels_on, fmt="m4a", headers={"Range": "bytes=0-1"})
+        full = sample(novels_on, fmt="m4a").content
+
+        assert part.status_code == 206
+        assert part.headers["content-type"] == "audio/mp4"
+        assert part.headers["content-range"] == f"bytes 0-1/{len(full)}"
+        assert part.content == full[:2]
+
+    def test_an_unknown_voice_or_a_path_is_404_and_writes_nothing(
+        self, novels_on, tmp_path, monkeypatch
+    ):
+        # The voice id is resolved through the manifest before anything is
+        # made, so no id can name a file to transcode or a place to write.
+        from tests.test_chapter_audio_m4a import make_opus
+
+        pack = tmp_path / "pack"
+        pack.mkdir()
+        real_pack(pack, monkeypatch)
+        outside = make_opus(tmp_path / "outside.opus")
+
+        for attempt in ("nope", "../outside.opus", "../outside"):
+            assert sample(novels_on, attempt, "m4a").status_code == 404
+        # Too long to be an id at all, which is refused before any lookup.
+        assert sample(novels_on, str(outside), "m4a").status_code in (404, 422)
+        assert not list(tmp_path.rglob("*.m4a"))
+
+    def test_any_other_format_is_refused(self, novels_on, tmp_path, monkeypatch):
+        real_pack(tmp_path, monkeypatch)
+
+        assert sample(novels_on, fmt="flac").status_code == 422
+        assert not list(tmp_path.rglob("*.m4a"))
+
+    def test_a_clip_that_will_not_convert_is_the_chapter_routes_error(
+        self, novels_on, tmp_path, monkeypatch
+    ):
+        # install_pack's stand-in bytes are not audio.
+        install_pack(tmp_path, monkeypatch)
+
+        response = sample(novels_on, fmt="m4a")
+
+        assert response.status_code == 500
+        assert response.json()["code"] == "audio_convert_failed"
+        assert not list(tmp_path.rglob("*.m4a"))
+
+    def test_a_pack_this_process_cannot_write_to_is_an_error_not_a_crash(
+        self, novels_on, tmp_path, monkeypatch
+    ):
+        # The pack is copied onto the box by hand and can arrive owned by
+        # someone else. The Ogg preview still plays; m4a says it could not.
+        import os
+
+        if os.geteuid() == 0:
+            import pytest
+
+            pytest.skip("root writes through any mode")
+        clip = real_pack(tmp_path, monkeypatch)
+        tmp_path.chmod(0o555)
+        try:
+            response = sample(novels_on, fmt="m4a")
+            ogg = sample(novels_on)
+        finally:
+            tmp_path.chmod(0o755)
+
+        assert response.status_code == 500
+        assert response.json()["code"] == "audio_convert_failed"
+        assert ogg.content == clip.read_bytes()
+
+    def test_m4a_is_dark_when_novels_are_off(self, novels_off, tmp_path, monkeypatch):
+        real_pack(tmp_path, monkeypatch)
+
+        assert sample(novels_off, fmt="m4a").status_code == 404
+        assert not list(tmp_path.rglob("*.m4a"))
+
+
 class TestNarratorVoice:
     def _post(self, client, voice_id):
         return client.post("/novels/narrator", json={

@@ -38,6 +38,7 @@ import os
 import tempfile
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -140,9 +141,15 @@ def _build(opus: Path, target: Path, deadline: float) -> None:
     source_mtime = opus.stat().st_mtime_ns
     # A unique temp name, not a fixed ".tmp": two PROCESSES can both get here
     # for one chapter, and a shared temp path would interleave their writes.
-    handle, temp_name = tempfile.mkstemp(
-        dir=target.parent, prefix=f"{target.stem}.", suffix=_TEMP_SUFFIX
-    )
+    try:
+        handle, temp_name = tempfile.mkstemp(
+            dir=target.parent, prefix=f"{target.stem}.", suffix=_TEMP_SUFFIX
+        )
+    except OSError as exc:
+        # A directory this process cannot write to — the voice pack is
+        # dropped onto the box by hand, and can arrive owned by someone
+        # else. "Could not be written" is a failed transcode, not a crash.
+        raise TranscodeFailed(f"cannot write beside {opus}: {exc}") from exc
     os.close(handle)
     # mkstemp makes it 0600; everything else in the audio directory is 0644.
     os.chmod(temp_name, 0o644)
@@ -244,14 +251,58 @@ def backfill(root: Path, *, timeout: float = TIMEOUT_SECONDS) -> Backfill:
     return Backfill(made, current, failed, orphans, temps)
 
 
+def backfill_samples(
+    samples: Iterable[Path], *, timeout: float = TIMEOUT_SECONDS
+) -> Backfill:
+    """Make the m4a for every voice sample in [samples] that lacks a current one.
+
+    The voice pack's preview clips are Ogg Opus like the chapters, and just as
+    silent on an iPhone; ``GET /novels/voices/sample?format=m4a`` makes one on
+    first request, and this makes them all ahead of it. Given the resolved
+    paths (``voice_pack.sample_paths``) rather than a directory to glob,
+    because the pack's directory holds whatever its owner dropped there and
+    only what the manifest names is a sample.
+
+    No orphan sweep: an ``.m4a`` in the pack with no clip beside it may be a
+    clip in its own right. Stale temp files beside the samples are swept, as
+    they are for chapters.
+    """
+    made = current = failed = temps = 0
+    now = time.time()
+    samples = list(samples)
+    for folder in {sample.parent for sample in samples}:
+        for temp in folder.glob(f"*{_TEMP_SUFFIX}"):
+            try:
+                if now - temp.stat().st_mtime > STALE_TEMP_SECONDS:
+                    temp.unlink()
+                    temps += 1
+            except OSError:
+                pass
+    for sample in sorted(set(samples)):
+        if is_current(sample, m4a_path(sample)):
+            current += 1
+            continue
+        try:
+            ensure_m4a(sample, timeout=timeout)
+            made += 1
+        except (TranscodeFailed, TranscodeTimeout, OSError) as exc:
+            logger.warning("novels: backfill skipped %s (%s)", sample, exc)
+            failed += 1
+    return Backfill(made, current, failed, 0, temps)
+
+
 def main() -> int:
     """``python -m services.chapter_audio_m4a`` — run once after deploying.
 
     Inside the backend container, where the audio directory is mounted:
     ``docker exec manhwamaniacs-backend python -m services.chapter_audio_m4a``.
     Safe to repeat: current files are skipped.
+
+    Chapters first, then the voice pack's preview clips, so a voice picker on
+    an iPhone is not a cold transcode per voice either.
     """
     from services.chapter_audio_store import audio_root
+    from services.voice_pack import sample_paths, voices_root
 
     logging.basicConfig(level=logging.INFO)
     root = audio_root()
@@ -261,7 +312,13 @@ def main() -> int:
         f"failed {result.failed}, orphans removed {result.orphans_removed}, "
         f"stale temp files removed {result.temps_removed}"
     )
-    return 1 if result.failed else 0
+    voices = backfill_samples(sample_paths())
+    print(
+        f"{voices_root()}: made {voices.made}, already current "
+        f"{voices.current}, failed {voices.failed}, stale temp files removed "
+        f"{voices.temps_removed}"
+    )
+    return 1 if result.failed or voices.failed else 0
 
 
 if __name__ == "__main__":

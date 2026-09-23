@@ -516,6 +516,7 @@ def get_novel_voice_sample(
     request: Request,
     response: Response,
     voice: str = Query(..., min_length=1, max_length=64),
+    audio_format: Literal["ogg", "m4a"] = Query("ogg", alias="format"),
 ) -> FileResponse:
     """The clip demonstrating one voice.
 
@@ -525,11 +526,39 @@ def get_novel_voice_sample(
     The path comes from the manifest, never from joining ``voice`` onto the
     directory — it arrives off a query string, and a path built from user input
     is one ``../`` away from serving whatever else is on the box.
+
+    ``format`` works as it does on ``/novels/audio/file``, for the same
+    reason: the pack is Ogg Opus, and an iPhone cannot open Ogg at all, so
+    every preview there was silent. ``format=m4a`` is the same clip as AAC in
+    MP4, made by the chapter audio's own transcoder from the RESOLVED sample
+    path — only a voice the manifest names ever reaches the filesystem — and
+    kept beside the clip after the first request. The errors are the chapter
+    route's, code for code, so a client needs no new case.
     """
     path = sample_path(voice)
     if path is None:
         raise StarletteHTTPException(status_code=404, detail="Not Found")
-    return FileResponse(path, media_type="audio/ogg")
+    if audio_format == "ogg":
+        return FileResponse(path, media_type="audio/ogg")
+
+    try:
+        m4a = ensure_m4a(path)
+    except FileNotFoundError:
+        # Removed between the lookup and the transcode.
+        raise StarletteHTTPException(status_code=404, detail="Not Found")
+    except TranscodeTimeout:
+        raise AppError(
+            "This voice's sample is still being prepared. Try again shortly.",
+            code="audio_preparing",
+            status_code=503,
+        )
+    except TranscodeFailed:
+        raise AppError(
+            "This voice's sample could not be prepared for this device.",
+            code="audio_convert_failed",
+            status_code=500,
+        )
+    return FileResponse(m4a, media_type="audio/mp4")
 
 
 class NarratorVoice(BaseModel):

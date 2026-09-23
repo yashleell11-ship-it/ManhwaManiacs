@@ -34,6 +34,7 @@ from services.chapter_audio_m4a import (
     TranscodeFailed,
     TranscodeTimeout,
     backfill,
+    backfill_samples,
     ensure_m4a,
     is_current,
     m4a_path,
@@ -352,3 +353,73 @@ class TestBackfill:
 
         assert (result.made, result.failed) == (1, 1)
         assert is_current(good, m4a_path(good))
+
+
+class TestBackfillSamples:
+    """The same command, for the voice pack's preview clips: Ogg Opus like
+    the chapters, and just as silent on an iPhone."""
+
+    def _pack(self, tmp_path, monkeypatch, names):
+        import json
+
+        from services import voice_pack
+
+        clips = []
+        for i, name in enumerate(names):
+            clips.append({
+                "voice_id": f"v{i}", "gender": "male", "median_f0_hz": 100 + i,
+                "license": "CC BY 4.0", "sample": name,
+            })
+        (tmp_path / "manifest.json").write_text(
+            json.dumps({"clips": clips}), encoding="utf-8"
+        )
+        monkeypatch.setenv("MM_VOICES_DIR", str(tmp_path))
+        voice_pack._cached.cache_clear()
+
+    def test_every_named_clip_gets_one_and_a_rerun_does_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        from services.voice_pack import sample_paths
+
+        a = make_opus(tmp_path / "a.opus")
+        b = make_opus(tmp_path / "clips" / "b.opus")
+        # On disk, but not in the manifest: not a sample, so left alone.
+        stray = make_opus(tmp_path / "stray.opus")
+        self._pack(tmp_path, monkeypatch, ["a.opus", "clips/b.opus"])
+
+        first = backfill_samples(sample_paths())
+        second = backfill_samples(sample_paths())
+
+        assert (first.made, first.current, first.failed) == (2, 0, 0)
+        assert (second.made, second.current) == (0, 2)
+        assert is_current(a, m4a_path(a)) and is_current(b, m4a_path(b))
+        assert not m4a_path(stray).exists()
+
+    def test_one_bad_clip_does_not_stop_the_rest(self, tmp_path, monkeypatch):
+        from services.voice_pack import sample_paths
+
+        (tmp_path / "bad.opus").write_bytes(b"not audio")
+        good = make_opus(tmp_path / "good.opus")
+        self._pack(tmp_path, monkeypatch, ["bad.opus", "good.opus"])
+
+        result = backfill_samples(sample_paths())
+
+        assert (result.made, result.failed) == (1, 1)
+        assert is_current(good, m4a_path(good))
+
+    def test_the_command_does_chapters_and_then_voices(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        audio = tmp_path / "audio"
+        voices = tmp_path / "voices"
+        chapter = make_opus(audio / "ab" / "c1.opus")
+        clip = make_opus(voices / "v.opus")
+        self._pack(voices, monkeypatch, ["v.opus"])
+        monkeypatch.setenv("MM_AUDIO_DIR", str(audio))
+
+        assert chapter_audio_m4a.main() == 0
+
+        assert is_current(chapter, m4a_path(chapter))
+        assert is_current(clip, m4a_path(clip))
+        out = capsys.readouterr().out
+        assert f"{voices}: made 1" in out
