@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:manhwamaniacs/features/library/models/followed_series.dart';
 import 'package:manhwamaniacs/features/library/models/read_state.dart';
+import 'package:manhwamaniacs/features/library/utils/local_read_marks.dart';
 import 'package:manhwamaniacs/features/library/utils/read_state_label.dart';
 import 'package:manhwamaniacs/features/library/widgets/home/followed_series_card.dart';
 
@@ -200,5 +201,65 @@ void main() {
       'title': 't',
     });
     expect(legacy.readState, isNull);
+  });
+
+  group('this phone\'s own record under a server "not started"', () {
+    // Before 3.4.0 the Sources-tab reader never sent a position to the
+    // server, so a series read a hundred chapters deep here is "not started"
+    // there. The phone must not print that under a series it has read.
+    const on94 = LocalReadMark(chapterNumber: 94);
+    const unnumbered = LocalReadMark();
+
+    test('says the furthest chapter the phone knows the number of', () {
+      expect(readStateLabel(readStateWithLocal(_notStarted, on94)), 'Ch 94');
+      expect(
+        progressCardLabel(_series(readState: _notStarted), local: on94),
+        'Ch 94',
+      );
+      expect(
+        seriesCardMeta(_series(readState: _notStarted), local: on94),
+        'Ch 94',
+      );
+      expect(
+        followedSeriesCardSubtitle(
+          _series(readState: _notStarted),
+          FollowedSeriesMeta.none,
+          local: on94,
+        ),
+        'Ch 94',
+      );
+    });
+
+    test('says "Started" when no opened chapter carries a number', () {
+      expect(
+        readStateLabel(readStateWithLocal(_notStarted, unnumbered)),
+        'Started',
+      );
+    });
+
+    test('invents no new-chapter count', () {
+      final state = readStateWithLocal(_notStarted, on94);
+      expect(readStateNewCount(state), 0);
+      expect(libraryCardNewCount(state, unreadNotifications: 4), 0);
+    });
+
+    test('never overrides a position the server has', () {
+      final server = _started(newCount: 2);
+      expect(identical(readStateWithLocal(server, on94), server), isTrue);
+      expect(
+        progressCardLabel(_series(readState: server), local: on94),
+        'Ch 5 of 120 · 2 new',
+      );
+    });
+
+    test('changes nothing without a record, or without a server state', () {
+      expect(
+        readStateLabel(readStateWithLocal(_notStarted, null)),
+        'Not started',
+      );
+      // A server older than read states: the card keeps the line it had.
+      expect(readStateWithLocal(null, on94), isNull);
+      expect(progressCardLabel(_series(), local: on94), 'reading');
+    });
   });
 }

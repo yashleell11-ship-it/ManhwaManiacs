@@ -13,6 +13,7 @@ library;
 
 import 'package:manhwamaniacs/features/library/models/followed_series.dart';
 import 'package:manhwamaniacs/features/library/models/read_state.dart';
+import 'package:manhwamaniacs/features/library/utils/local_read_marks.dart';
 import 'package:manhwamaniacs/features/library/utils/series_display.dart';
 
 /// Above this the pill stops counting; "3183 NEW" is noise, not information.
@@ -21,6 +22,29 @@ const int _newCountCap = 99;
 /// 4.0 → "4", 12.5 → "12.5": printed chapter numbers, not measurements.
 String _formatNumber(double value) =>
     value % 1 == 0 ? value.toInt().toString() : value.toString();
+
+/// The server's [state], unless it says "not started" while this phone's own
+/// reader has a record for the series ([local]) — then "started", at the
+/// furthest chapter the phone knows the number of.
+///
+/// The phone's Sources-tab reader kept its positions on the phone alone
+/// before 3.4.0, so the server can be missing a whole series the owner has
+/// been reading here; a card that says "Not started" under it contradicts the
+/// series page one tap away, which merges both stores. Only ever upgrades a
+/// "not started": where the server has a position it is the one both clients
+/// share, and the phone's record is already on its way there. Carries no
+/// position or new-chapter count — without the chapter list the phone cannot
+/// say how many chapters lie past its furthest one, and "0 new" is not a
+/// claim to invent. A null [state] stays null, so a row from a server older
+/// than read states keeps the line it always had.
+ReadState? readStateWithLocal(ReadState? state, LocalReadMark? local) {
+  if (state == null || state.started || local == null) return state;
+  return ReadState(
+    started: true,
+    chapterNumber: local.chapterNumber,
+    total: state.total,
+  );
+}
 
 /// "Not started", "Ch 5 of 120", or null when the row carries no read state
 /// (so the caller keeps whatever it said before).
@@ -74,14 +98,17 @@ String? readStateNote(ReadState? state) {
 
 /// The library list row's meta line: where the reader is and what is
 /// waiting, else — for a row with no read state — the chapter count.
-String seriesCardMeta(FollowedSeries series) =>
-    readStateNote(series.readState) ?? '${series.chapterCount} chapters';
+/// [local] is this phone's own record for the series (`readStateWithLocal`).
+String seriesCardMeta(FollowedSeries series, {LocalReadMark? local}) =>
+    readStateNote(readStateWithLocal(series.readState, local)) ??
+    '${series.chapterCount} chapters';
 
 /// The line under a library grid cover: where the reader is and what is
 /// waiting, else — for a row with no read state — the reading-status word it
-/// always printed.
-String progressCardLabel(FollowedSeries series) =>
-    readStateNote(series.readState) ?? readingStatusLabel(series.readingStatus);
+/// always printed. [local] as for [seriesCardMeta].
+String progressCardLabel(FollowedSeries series, {LocalReadMark? local}) =>
+    readStateNote(readStateWithLocal(series.readState, local)) ??
+    readingStatusLabel(series.readingStatus);
 
 /// The home card's pill count: chapters past the furthest one read when the
 /// row carries a read state, else the unread notifications it always counted.

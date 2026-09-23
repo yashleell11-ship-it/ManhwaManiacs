@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -11,6 +13,7 @@ import 'package:manhwamaniacs/features/library/models/continue_reading_item.dart
 import 'package:manhwamaniacs/features/library/models/followed_series.dart';
 import 'package:manhwamaniacs/features/library/models/library_query.dart';
 import 'package:manhwamaniacs/features/library/models/library_statistics.dart';
+import 'package:manhwamaniacs/features/library/models/read_state.dart';
 import 'package:manhwamaniacs/features/library/models/reading_history_item.dart';
 import 'package:manhwamaniacs/features/library/models/recommendation.dart';
 import 'package:manhwamaniacs/features/library/models/series_detail.dart';
@@ -22,6 +25,8 @@ import 'package:manhwamaniacs/features/library/utils/library_preferences.dart';
 import 'package:manhwamaniacs/features/library/widgets/library/series_grid.dart';
 import 'package:manhwamaniacs/features/novels/widgets/novel_shelf.dart';
 import 'package:manhwamaniacs/features/sources/models/source.dart';
+import 'package:manhwamaniacs/features/sources/models/source_chapter_progress.dart';
+import 'package:manhwamaniacs/features/sources/providers/source_progress_provider.dart';
 import 'package:manhwamaniacs/features/sources/providers/sources_provider.dart';
 import 'package:manhwamaniacs/shared/providers/core_providers.dart';
 import 'package:manhwamaniacs/shared/providers/repository_providers.dart';
@@ -287,6 +292,7 @@ FollowedSeries _series({
   int chapterCount = 10,
   DateTime? createdAt,
   DateTime? updatedAt,
+  ReadState? readState,
 }) {
   return FollowedSeries(
     id: id,
@@ -303,20 +309,30 @@ FollowedSeries _series({
     chapterCount: chapterCount,
     createdAt: createdAt ?? DateTime(2024),
     updatedAt: updatedAt ?? DateTime(2024, 6),
+    readState: readState,
   );
 }
 
 Future<Widget> _buildTestApp({
   LibraryRepository? repo,
   bool novels = false,
+  Map<String, SourceChapterProgress>? phoneProgress,
 }) async {
-  SharedPreferences.setMockInitialValues({});
+  SharedPreferences.setMockInitialValues({
+    // This phone's own reader records, under profile 1 — the profile
+    // [activeProfileOverride] makes active whenever records are given.
+    if (phoneProgress != null)
+      '$sourceProgressPrefsKey:1': jsonEncode(
+        phoneProgress.map((key, value) => MapEntry(key, value.toJson())),
+      ),
+  });
   final prefs = await SharedPreferences.getInstance();
 
   return ProviderScope(
     overrides: [
       apiBaseUrlOverride('http://127.0.0.1:8000'),
       sharedPrefsProvider.overrideWithValue(prefs),
+      if (phoneProgress != null) activeProfileOverride(),
       // Pinned so the screen does not probe /auth/bootstrap-status for the
       // novels gate on its way to answering "no".
       ...contentModeOverrides(
@@ -660,6 +676,65 @@ void main() {
       await openActions(tester, 'Solo Leveling');
 
       expect(find.text('Remove from library'), findsNothing);
+    });
+  });
+
+  group("LibraryScreen and this phone's own reading records", () {
+    // Before 3.4.0 the Sources-tab reader kept its positions on the phone
+    // alone, so the server calls a series read to ch 94 here "not started".
+    // The browse grid must say what the Library tab's cards say.
+    const notStarted = ReadState(started: false, total: 120);
+    final read = SourceChapterProgress(
+      page: 3,
+      pageCount: 20,
+      completed: false,
+      updatedAt: DateTime.utc(2026, 9, 20),
+    );
+
+    Future<void> pumpRead(WidgetTester tester) async {
+      await tester.pumpWidget(
+        await _buildTestApp(
+          repo: _FakeLibraryRepository([
+            _series(
+              id: 1,
+              title: 'Surviving as a Genius',
+              seriesKey: 'surviving-6f7fe6eb',
+              readState: notStarted,
+            ),
+            _series(
+              id: 2,
+              title: 'Never Opened',
+              seriesKey: 'never-opened-6f7fe6eb',
+              readState: notStarted,
+            ),
+          ]),
+          phoneProgress: {
+            'asurascans:surviving-6f7fe6eb:surviving-6f7fe6eb:93': read,
+            'asurascans:surviving-6f7fe6eb:surviving-6f7fe6eb:94': read,
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('a grid card shows the chapter the phone reached',
+        (tester) async {
+      await pumpRead(tester);
+
+      expect(find.byType(SeriesCard), findsNWidgets(2));
+      expect(find.text('Ch 94'), findsOneWidget);
+      expect(find.text('Not started'), findsOneWidget);
+    });
+
+    testWidgets('a list row does too', (tester) async {
+      await pumpRead(tester);
+
+      await tester.tap(find.byIcon(Icons.view_list));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(SeriesListTile), findsNWidgets(2));
+      expect(find.text('Ch 94'), findsOneWidget);
+      expect(find.text('Not started'), findsOneWidget);
     });
   });
 

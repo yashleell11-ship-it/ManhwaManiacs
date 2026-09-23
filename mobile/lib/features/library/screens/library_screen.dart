@@ -15,7 +15,9 @@ import 'package:manhwamaniacs/features/library/models/library_query.dart';
 import 'package:manhwamaniacs/features/library/providers/library_display_provider.dart';
 import 'package:manhwamaniacs/features/library/providers/library_list_provider.dart';
 import 'package:manhwamaniacs/features/library/providers/library_selection_provider.dart';
+import 'package:manhwamaniacs/features/library/providers/local_read_marks_provider.dart';
 import 'package:manhwamaniacs/features/library/utils/library_shelf.dart';
+import 'package:manhwamaniacs/features/library/utils/local_read_marks.dart';
 import 'package:manhwamaniacs/features/library/utils/read_state_label.dart';
 import 'package:manhwamaniacs/features/library/widgets/library/library_skeleton.dart';
 import 'package:manhwamaniacs/features/library/widgets/library/library_toolbar.dart';
@@ -346,6 +348,13 @@ class _LibraryBody extends ConsumerWidget {
     // lazily, long after this build has finished, and a `watch` from there
     // would be a read on a closed element.
     final baseUrl = ref.watch(apiBaseUrlProvider);
+    // This phone's own reading records, for a follow the server still calls
+    // unstarted — the same answer the Library tab's cards give. Selected per
+    // row, so a page turned in the reader does not rebuild the shelf unless
+    // a row's answer moved.
+    final localMarks = ref.watch(
+      localReadMarksProvider.select((marks) => ShelfReadMarks(marks, visible)),
+    );
     return _LibraryScrollView(
       scrollController: scrollController,
       onRefresh: onRefresh,
@@ -403,14 +412,18 @@ class _LibraryBody extends ConsumerWidget {
             gutter: gutter,
             bookAt: (index) {
               final series = visible[index];
+              final readState = readStateWithLocal(
+                series.readState,
+                localMarks.of(series),
+              );
               return libraryShelfBook(
                 series,
                 apiBaseUrl: baseUrl,
                 // Where the reader is, rather than the follow's
                 // reading_status — "reading" for every follow, opened or not.
-                note: readStateLabel(series.readState) ??
+                note: readStateLabel(readState) ??
                     readingStatusNote(series.readingStatus),
-                unreadCount: readStateNewCount(series.readState),
+                unreadCount: readStateNewCount(readState),
                 selected: selectedIds.contains(series.id),
                 onTap: () => onSeriesTap(series),
                 onLongPress: onSeriesLongPress == null

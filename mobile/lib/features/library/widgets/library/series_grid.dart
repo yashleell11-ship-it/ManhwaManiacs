@@ -6,7 +6,9 @@ import 'package:manhwamaniacs/app/theme/app_presets.dart';
 import 'package:manhwamaniacs/core/utils/responsive.dart';
 import 'package:manhwamaniacs/features/library/models/followed_series.dart';
 import 'package:manhwamaniacs/features/library/models/library_query.dart';
+import 'package:manhwamaniacs/features/library/providers/local_read_marks_provider.dart';
 import 'package:manhwamaniacs/features/library/utils/cover_url.dart';
+import 'package:manhwamaniacs/features/library/utils/local_read_marks.dart';
 import 'package:manhwamaniacs/features/library/utils/read_state_label.dart';
 import 'package:manhwamaniacs/features/library/utils/series_display.dart';
 import 'package:manhwamaniacs/shared/providers/core_providers.dart';
@@ -47,6 +49,9 @@ class SeriesCard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final baseUrl = ref.watch(apiBaseUrlProvider);
+    final local = ref.watch(
+      localReadMarksProvider.select((marks) => marks.forFollow(series)),
+    );
 
     return Pressable(
       onTap: onTap,
@@ -182,7 +187,7 @@ class SeriesCard extends ConsumerWidget {
             ),
           ),
           SizedBox(height: context.space.xs),
-          _ProgressLabel(series: series),
+          _ProgressLabel(series: series, local: local),
         ],
       ),
     );
@@ -212,6 +217,9 @@ class SeriesListTile extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final baseUrl = ref.watch(apiBaseUrlProvider);
+    final local = ref.watch(
+      localReadMarksProvider.select((marks) => marks.forFollow(series)),
+    );
 
     return GestureDetector(
       onLongPress: onLongPress,
@@ -267,7 +275,7 @@ class SeriesListTile extends ConsumerWidget {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  seriesCardMeta(series),
+                  seriesCardMeta(series, local: local),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: context.text.caption.copyWith(color: context.colors.muted),
@@ -383,9 +391,12 @@ class _RemoveButton extends StatelessWidget {
 }
 
 class _ProgressLabel extends StatelessWidget {
-  const _ProgressLabel({required this.series});
+  const _ProgressLabel({required this.series, required this.local});
 
   final FollowedSeries series;
+
+  /// This phone's own record for the series — see `readStateWithLocal`.
+  final LocalReadMark? local;
 
   @override
   Widget build(BuildContext context) {
@@ -396,7 +407,8 @@ class _ProgressLabel extends StatelessWidget {
           const SizedBox(width: 4),
           Flexible(
             child: Text(
-              readStateNote(series.readState) ?? 'Favorite',
+              readStateNote(readStateWithLocal(series.readState, local)) ??
+                  'Favorite',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style:
@@ -410,7 +422,7 @@ class _ProgressLabel extends StatelessWidget {
     // Where the reader is, rather than the follow's reading_status — which
     // is "reading" for every follow, opened or not.
     return Text(
-      progressCardLabel(series),
+      progressCardLabel(series, local: local),
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
       style: context.text.caption.copyWith(color: context.colors.muted),

@@ -11,7 +11,9 @@ import 'package:manhwamaniacs/core/utils/responsive.dart';
 import 'package:manhwamaniacs/features/content_mode/content_mode_controller.dart';
 import 'package:manhwamaniacs/features/content_mode/widgets/content_mode_switch.dart';
 import 'package:manhwamaniacs/features/library/models/followed_series.dart';
+import 'package:manhwamaniacs/features/library/providers/local_read_marks_provider.dart';
 import 'package:manhwamaniacs/features/library/utils/library_shelf.dart';
+import 'package:manhwamaniacs/features/library/utils/local_read_marks.dart';
 import 'package:manhwamaniacs/features/library/utils/read_state_label.dart';
 import 'package:manhwamaniacs/features/library/widgets/home/followed_series_card.dart';
 import 'package:manhwamaniacs/features/library/widgets/library/continue_reading_strip.dart';
@@ -193,6 +195,13 @@ class _FollowedShelf extends ConsumerWidget {
     // Resolved here rather than inside the shelf's row builder, which runs
     // lazily — a `watch` from there would be a read on a closed element.
     final baseUrl = ref.watch(apiBaseUrlProvider);
+    // This phone's own reading records, for a follow the server still calls
+    // unstarted — resolved here for the same reason as [baseUrl], and
+    // selected per row so a page turned in the reader does not rebuild the
+    // shelf unless a row's answer moved.
+    final localMarks = ref.watch(
+      localReadMarksProvider.select((marks) => ShelfReadMarks(marks, followed)),
+    );
     final columns = context.layout.columnsFor(context.seriesGridColumns);
     // The grid spans the viewport inside its own horizontal padding, so the
     // tile width is arithmetic rather than a measurement — and a card cannot
@@ -241,7 +250,11 @@ class _FollowedShelf extends ConsumerWidget {
         // Above the shelf, because resuming is what the reader came to do and
         // the shelf is how they find something else. Renders nothing when
         // there is no answer yet, so it never delays the follows below it.
-        SliverToBoxAdapter(child: ContinueReadingStrip(gutter: gutter)),
+        SliverToBoxAdapter(
+          // The follows it names its rows from: the continue payload carried
+          // no title before, and an older server still sends none.
+          child: ContinueReadingStrip(gutter: gutter, followed: followed),
+        ),
         if (isNovelMode)
           NovelShelf(
             itemCount: followed.length,
@@ -252,16 +265,20 @@ class _FollowedShelf extends ConsumerWidget {
             bookAt: (index) {
               final series = followed[index];
               final meta = metaBySeries[series.id] ?? FollowedSeriesMeta.none;
+              final readState = readStateWithLocal(
+                series.readState,
+                localMarks.of(series),
+              );
               return libraryShelfBook(
                 series,
                 apiBaseUrl: baseUrl,
                 // What the grid card says in its one muted line, in the slot
                 // the shelf keeps for it — and beside a chapter count the row
                 // can now show as well, instead of choosing between them.
-                note: readStateLabel(series.readState) ??
+                note: readStateLabel(readState) ??
                     latestChapterNote(meta.latestChapterLabel),
                 unreadCount: libraryCardNewCount(
-                  series.readState,
+                  readState,
                   unreadNotifications: meta.unreadCount,
                 ),
                 onTap: () => onOpenSeries(series),

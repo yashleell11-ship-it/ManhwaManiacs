@@ -3,7 +3,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:manhwamaniacs/app/theme/app_colors.dart';
 import 'package:manhwamaniacs/app/theme/app_presets.dart';
 import 'package:manhwamaniacs/features/library/models/followed_series.dart';
+import 'package:manhwamaniacs/features/library/providers/local_read_marks_provider.dart';
 import 'package:manhwamaniacs/features/library/utils/cover_url.dart';
+import 'package:manhwamaniacs/features/library/utils/local_read_marks.dart';
 import 'package:manhwamaniacs/features/library/utils/read_state_label.dart';
 import 'package:manhwamaniacs/features/sources/utils/chapter_label.dart';
 import 'package:manhwamaniacs/features/updates/models/update_notification.dart';
@@ -90,11 +92,15 @@ class FollowedSeriesMeta {
 /// 120") when the row carries a read state; else the latest chapter we
 /// actually know about, else a chapter count only when the checker has
 /// populated one, else nothing at all.
+///
+/// [local] is this phone's own record for the series: it turns a server
+/// "Not started" into where the phone got to (`readStateWithLocal`).
 String? followedSeriesCardSubtitle(
   FollowedSeries series,
-  FollowedSeriesMeta meta,
-) {
-  final progress = readStateLabel(series.readState);
+  FollowedSeriesMeta meta, {
+  LocalReadMark? local,
+}) {
+  final progress = readStateLabel(readStateWithLocal(series.readState, local));
   if (progress != null) return progress;
   final latest = meta.latestChapterLabel;
   if (latest != null) return 'Latest: $latest';
@@ -136,9 +142,14 @@ class FollowedSeriesCard extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final baseUrl = ref.watch(apiBaseUrlProvider);
     final coverUrl = followedSeriesCoverUrl(baseUrl, series);
-    final subtitle = followedSeriesCardSubtitle(series, meta);
+    // Only this series' answer, so a page turned in the reader rebuilds the
+    // one card it moved rather than the whole shelf.
+    final local = ref.watch(
+      localReadMarksProvider.select((marks) => marks.forFollow(series)),
+    );
+    final subtitle = followedSeriesCardSubtitle(series, meta, local: local);
     final newCount = libraryCardNewCount(
-      series.readState,
+      readStateWithLocal(series.readState, local),
       unreadNotifications: meta.unreadCount,
     );
 

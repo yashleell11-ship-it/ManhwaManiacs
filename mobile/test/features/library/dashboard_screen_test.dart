@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -17,11 +19,14 @@ import 'package:manhwamaniacs/features/library/models/recommendation.dart';
 import 'package:manhwamaniacs/features/library/models/series_detail.dart';
 import 'package:manhwamaniacs/features/library/models/suggestion.dart';
 import 'package:manhwamaniacs/features/library/models/tag.dart';
+import 'package:manhwamaniacs/features/library/providers/dashboard_providers.dart';
 import 'package:manhwamaniacs/features/library/repositories/library_repository.dart';
 import 'package:manhwamaniacs/features/library/screens/dashboard_screen.dart';
 import 'package:manhwamaniacs/features/library/widgets/home/followed_series_card.dart';
 import 'package:manhwamaniacs/features/novels/widgets/novel_shelf.dart';
 import 'package:manhwamaniacs/features/sources/models/source.dart';
+import 'package:manhwamaniacs/features/sources/models/source_chapter_progress.dart';
+import 'package:manhwamaniacs/features/sources/providers/source_progress_provider.dart';
 import 'package:manhwamaniacs/features/sources/providers/sources_provider.dart';
 import 'package:manhwamaniacs/features/updates/models/update_notification.dart';
 import 'package:manhwamaniacs/features/updates/providers/updates_provider.dart';
@@ -307,8 +312,17 @@ Future<Widget> _buildTestApp({
   bool shouldFail = false,
   bool novels = false,
   _FakeLibraryRepository? repo,
+  Map<String, SourceChapterProgress>? phoneProgress,
+  List<ContinueReadingItem>? continueItems,
 }) async {
-  SharedPreferences.setMockInitialValues({});
+  SharedPreferences.setMockInitialValues({
+    // This phone's own reader records, under profile 1 — the profile
+    // [activeProfileOverride] makes active whenever records are given.
+    if (phoneProgress != null)
+      '$sourceProgressPrefsKey:1': jsonEncode(
+        phoneProgress.map((key, value) => MapEntry(key, value.toJson())),
+      ),
+  });
   final prefs = await SharedPreferences.getInstance();
   final notifier = _FakeUpdatesNotifier(state)..shouldFail = shouldFail;
 
@@ -316,6 +330,9 @@ Future<Widget> _buildTestApp({
     overrides: [
       apiBaseUrlOverride('http://127.0.0.1:8000'),
       sharedPrefsProvider.overrideWithValue(prefs),
+      if (phoneProgress != null) activeProfileOverride(),
+      if (continueItems != null)
+        continueReadingProvider.overrideWith((ref) async => continueItems),
       updatesProvider.overrideWith(() => notifier),
       libraryRepositoryProvider
           .overrideWithValue(repo ?? _FakeLibraryRepository()),
@@ -594,6 +611,102 @@ void main() {
       expect(find.textContaining('Latest:'), findsNothing);
     });
 
+    testWidgets(
+        "a server 'Not started' gives way to where this phone's reader got to",
+        (tester) async {
+      // Before 3.4.0 the Sources-tab reader kept its positions on the phone
+      // alone, so the server says "not started" for a series read to ch 94
+      // here. The card must not contradict the series page one tap away.
+      tester.view.physicalSize = const Size(1080, 2400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      final read = SourceChapterProgress(
+        page: 3,
+        pageCount: 20,
+        completed: false,
+        updatedAt: DateTime.utc(2026, 9, 20),
+      );
+      await tester.pumpWidget(
+        await _buildTestApp(
+          state: UpdatesState(
+            notifications: const [],
+            unreadCount: 0,
+            followed: [
+              _followed(
+                id: 1,
+                title: 'Surviving as a Genius',
+                seriesKey: 'surviving-6f7fe6eb',
+                readState: _notStarted,
+              ),
+              _followed(
+                id: 2,
+                title: 'Nano Machine',
+                // Followed under an older slug suffix than the one the
+                // reader was opened with from Browse.
+                seriesKey: 'nano-machine-08677664',
+                readState: _notStarted,
+              ),
+              _followed(
+                id: 3,
+                title: 'Never Opened',
+                seriesKey: 'never-opened-6f7fe6eb',
+                readState: _notStarted,
+              ),
+            ],
+          ),
+          phoneProgress: {
+            'asurascans:surviving-6f7fe6eb:surviving-6f7fe6eb:93': read,
+            'asurascans:surviving-6f7fe6eb:surviving-6f7fe6eb:94': read,
+            'asurascans:nano-machine-6f7fe6eb:nano-machine-6f7fe6eb:330': read,
+          },
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text('Ch 94'), findsOneWidget);
+      expect(find.text('Ch 330'), findsOneWidget);
+      // Only the series this phone never opened still says so.
+      expect(find.text('Not started'), findsOneWidget);
+    });
+
+    testWidgets('a Continue card is named after its series', (tester) async {
+      // The continue payload carried no title, so the strip said "Chapter 12,
+      // page 7" with nothing to tell a dozen series apart. A server older than
+      // the `title` field still sends none: the follows name the row.
+      tester.view.physicalSize = const Size(1080, 2400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      await tester.pumpWidget(
+        await _buildTestApp(
+          state: UpdatesState(
+            notifications: const [],
+            unreadCount: 0,
+            followed: [_followed(id: 1, title: 'Solo Leveling')],
+          ),
+          continueItems: const [
+            ContinueReadingItem(
+              sourceId: 'asurascans',
+              seriesKey: 'solo-leveling',
+              chapterKey: 'solo-leveling:12',
+              chapterNumber: 12,
+              lastPage: 7,
+              pageCount: 20,
+            ),
+          ],
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text('Continue reading'), findsOneWidget);
+      // Once on the card over the strip, once under its cover on the shelf.
+      expect(find.text('Solo Leveling'), findsNWidgets(2));
+      expect(find.text('Chapter 12 · Page 7 of 20'), findsOneWidget);
+    });
+
     testWidgets('falls back to the known chapter count once it is populated',
         (tester) async {
       tester.view.physicalSize = const Size(1080, 2400);
@@ -781,6 +894,49 @@ void main() {
       expect(find.textContaining('Ch 118 of 120'), findsOneWidget);
       expect(find.text('2 NEW'), findsOneWidget);
       expect(find.textContaining('Not started'), findsOneWidget);
+    });
+
+    testWidgets("a shelved book this phone has read is not 'Not started'",
+        (tester) async {
+      // The shelf row says what the grid card says: the phone's own record
+      // over a server that has none. A chapter key with no number in it
+      // cannot say which chapter, only that the book was opened.
+      tester.view.physicalSize = const Size(1080, 2400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+
+      await tester.pumpWidget(
+        await _buildTestApp(
+          state: UpdatesState(
+            notifications: const [],
+            unreadCount: 0,
+            followed: [
+              _followed(
+                id: 1,
+                title: 'Dune',
+                seriesKey: 'dune',
+                readState: _notStarted,
+              ),
+            ],
+          ),
+          novels: true,
+          phoneProgress: {
+            'asurascans:dune:dune/chapter-one': SourceChapterProgress(
+              page: 40,
+              pageCount: 100,
+              completed: false,
+              updatedAt: DateTime.utc(2026, 9, 20),
+            ),
+          },
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.byType(NovelShelf), findsOneWidget);
+      expect(find.textContaining('Started'), findsOneWidget);
+      expect(find.textContaining('Not started'), findsNothing);
     });
 
     testWidgets('shows length and latest chapter together, not one or other',
