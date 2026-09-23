@@ -145,6 +145,26 @@ class SourceConnector(ABC):
     def get_chapter_pages(self, chapter_id: str) -> list[Page]:
         """Return all pages for a chapter."""
 
+    def series_identity(self, series_key: str) -> str:
+        """The part of ``series_key`` that names the series, not the URL.
+
+        Keys are opaque to the rest of the app and stay so: they are stored,
+        fetched with and compared exactly as the connector handed them out.
+        This exists for the one source whose keys drift -- a site that renames
+        a series' URL over time while the old one keeps resolving -- so that
+        "is this the series the profile already follows" can be answered
+        without anyone outside the connector parsing its keys.
+
+        Two keys name the same series iff their identities are equal. The
+        default is the key itself, which is the truth for every source whose
+        keys do not drift. Must be cheap and never touch the network.
+        """
+        return series_key
+
+    def chapter_identity(self, chapter_key: str) -> str:
+        """``series_identity`` for a chapter key. The default is the key."""
+        return chapter_key
+
     def find_page(self, page_id: str) -> Page | None:
         """Locate a page by ID. Every connector that serves images MUST override this.
         The default is intentionally unimplemented — O(series × chapters × pages) API

@@ -43,7 +43,11 @@ from database.models import (
     Tag,
 )
 from database.session import get_db
-from services.browse_service import BrowseService, get_browse_service
+from services.browse_service import (
+    BrowseService,
+    get_browse_service,
+    series_identity,
+)
 from services.reading_stats_service import ReadingStatsService
 from services.source_cache_service import SourceCacheService
 
@@ -355,6 +359,8 @@ class FollowedSeriesService:
                 )
             )
         ).scalar_one_or_none()
+        if existing is None:
+            existing = self._followed_under_another_key(source_id, series_key)
         if existing is not None:
             if self._hidden(existing):
                 raise AppError(
@@ -427,6 +433,42 @@ class FollowedSeriesService:
             self._cache.write_through(source_id, series_key, meta, chapters)
         # Progress outlives an unfollow, so a re-follow can already be started.
         return self._serialize_with_state(row)
+
+    def _followed_under_another_key(
+        self, source_id: str, series_key: str
+    ) -> FollowedSeries | None:
+        """This profile's follow of the same series under an older key, if any.
+
+        Asura rotates the suffix on its slugs and the old one keeps resolving,
+        so a series followed last week under ``...-08677664`` is served from
+        Browse this week as ``...-05c7df14``. An exact-key check missed it and
+        inserted a second follow; both then diffed the same live list, so every
+        new chapter was notified twice and a follow slot was spent.
+
+        The existing row is returned untouched. Its key is still the one its
+        ``known_chapters``, notifications and progress are stored under and it
+        is still fetched with; re-keying it would make the next sweep see every
+        chapter as new. Which keys name the same series is the connector's
+        call (``series_identity``) -- nothing here parses a key -- and for
+        every source whose keys do not drift this costs no query at all.
+        """
+        identity = series_identity(source_id, series_key)
+        if identity == series_key:
+            return None
+        candidates = self._db.execute(
+            self._scope(
+                select(FollowedSeries)
+                .where(
+                    FollowedSeries.source_id == source_id,
+                    FollowedSeries.series_key.startswith(identity, autoescape=True),
+                )
+                .order_by(FollowedSeries.id)
+            )
+        ).scalars()
+        for row in candidates:
+            if series_identity(source_id, row.series_key) == identity:
+                return row
+        return None
 
     def unfollow(self, followed_id: int) -> None:
         self._require_owner()

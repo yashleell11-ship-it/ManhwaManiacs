@@ -44,7 +44,12 @@ from database.models import (
     UpdateNotification,
 )
 from database.session import get_db
-from services.browse_service import BrowseService, get_browse_service
+from services.browse_service import (
+    BrowseService,
+    chapter_identity,
+    get_browse_service,
+    series_identity,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from services.bookmark_service import BookmarkService
@@ -719,6 +724,61 @@ class ProgressService:
             )
             .values(is_read=True)
         )
+        self._clear_update_notification_aliases(
+            user_id, profile_id, source_id, series_key, chapter_keys
+        )
+
+    def _clear_update_notification_aliases(
+        self,
+        user_id: int,
+        profile_id: int,
+        source_id: str,
+        series_key: str,
+        chapter_keys: set[str],
+    ) -> None:
+        """The same, for a notification stored under another key of this series.
+
+        Asura rotates the suffix on its slugs and the old one keeps resolving:
+        a follow made under ``...-08677664`` is notified ``...-08677664:275``,
+        while the reader who opens the series from Browse today reads
+        ``...-05c7df14:275``. The exact match above missed it, and the badge
+        kept counting a chapter already read.
+
+        Which keys are the same series and chapter is the connector's call
+        (``series_identity`` / ``chapter_identity``); nothing here parses a
+        key. A source whose keys do not drift returns early without a query,
+        so this costs every other progress push nothing.
+        """
+        identity = series_identity(source_id, series_key)
+        if identity == series_key:
+            return
+        wanted = {chapter_identity(source_id, key) for key in chapter_keys}
+        candidates = self._db.execute(
+            select(
+                UpdateNotification.id,
+                UpdateNotification.series_key,
+                UpdateNotification.chapter_key,
+            ).where(
+                UpdateNotification.user_id == user_id,
+                UpdateNotification.profile_id == profile_id,
+                UpdateNotification.source_id == source_id,
+                UpdateNotification.series_key != series_key,
+                UpdateNotification.series_key.startswith(identity, autoescape=True),
+                UpdateNotification.is_read.is_(False),
+            )
+        ).all()
+        ids = [
+            row.id
+            for row in candidates
+            if series_identity(source_id, row.series_key) == identity
+            and chapter_identity(source_id, row.chapter_key) in wanted
+        ]
+        if ids:
+            self._db.execute(
+                update(UpdateNotification)
+                .where(UpdateNotification.id.in_(ids))
+                .values(is_read=True)
+            )
 
     def _claim_row(
         self,

@@ -309,6 +309,39 @@ def _normalize_source_chapter_id(chapter_id: str) -> str:
     return fully_unquote(chapter_id).strip().strip("/")
 
 
+def _identity_connector(source_id: str) -> SourceConnector | None:
+    # No gate here, on purpose: an identity is a string the caller already
+    # holds, reshaped. Nothing about the source is fetched or disclosed, and
+    # every caller has applied its own gate before it gets this far.
+    try:
+        return create_connector(source_id)
+    except Exception:  # noqa: BLE001 - an unknown source has no aliases
+        return None
+
+
+def _identity(source_id: str, method: str, key: str) -> str:
+    # Anything that is not a plain connector answering with a string -- an
+    # unknown source, a stand-in without the method -- means "no aliases",
+    # which is exactly the behaviour from before identities existed.
+    try:
+        identity = getattr(_identity_connector(source_id), method)(key)
+    except Exception:  # noqa: BLE001
+        return key
+    return identity if isinstance(identity, str) and identity else key
+
+
+def series_identity(source_id: str, series_key: str) -> str:
+    """What ``source_id`` says ``series_key`` names; see
+    ``SourceConnector.series_identity``. Equal to the key for every source
+    whose keys do not drift, which is the fast path callers test for."""
+    return _identity(source_id, "series_identity", series_key)
+
+
+def chapter_identity(source_id: str, chapter_key: str) -> str:
+    """``series_identity`` for a chapter key."""
+    return _identity(source_id, "chapter_identity", chapter_key)
+
+
 def _serialize_series(series: Series, source_id: str) -> dict[str, object]:
     return {
         "id": series.id,

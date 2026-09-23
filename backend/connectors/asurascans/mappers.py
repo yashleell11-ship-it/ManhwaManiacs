@@ -28,6 +28,33 @@ def series_id_to_api_key(series_id: str) -> str:
     return series_id.strip().strip("/")
 
 
+#: The eight hex digits Asura appends to every series slug, and changes
+#: site-wide every few days: production's cache holds The Great Mage Returns
+#: After 4000 Years under -53fc8424, -6f7fe6eb, -05c7df14 and -08677664, and
+#: every one of them still resolves.
+_SLUG_SUFFIX = re.compile(r"-[0-9a-f]{8}$")
+
+
+def series_identity(series_id: str) -> str:
+    """The slug without its rotating suffix: what names the SERIES.
+
+    Only an identity to compare by, never a key to fetch with -- whether the
+    bare slug resolves on the API is unknown, and the suffixed key a row was
+    stored under is known to.
+    """
+    key = series_id_to_api_key(series_id)
+    return _SLUG_SUFFIX.sub("", key) or key
+
+
+def chapter_identity(chapter_id: str) -> str:
+    """``series_identity`` for a ``<slug>:<number>`` chapter id."""
+    parsed = parse_chapter_id(chapter_id)
+    if parsed is None:
+        return chapter_id
+    series_id, chapter_ref = parsed
+    return f"{series_identity(series_id)}:{chapter_ref}"
+
+
 def make_chapter_id(series_id: str, chapter_number: int | str) -> str:
     return f"{series_id_to_api_key(series_id)}:{chapter_number}"
 

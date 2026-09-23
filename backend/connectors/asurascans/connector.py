@@ -9,12 +9,14 @@ from connectors.ids import fully_unquote
 from connectors.asurascans.mappers import (
     API_BASE,
     PAGE_SIZE,
+    chapter_identity as _chapter_identity,
     chapter_item_to_chapter,
     chapter_pages_to_pages,
     page_id_chapter_id,
     parse_chapter_id,
     series_detail_to_series,
     series_id_to_api_key,
+    series_identity as _series_identity,
     series_item_to_series,
     series_list_to_paginated,
 )
@@ -119,6 +121,19 @@ class AsuraScansConnector(SourceConnector):
 
     def _normalize_series_id(self, series_id: str) -> str:
         return series_id_to_api_key(fully_unquote(series_id))
+
+    # Asura rotates the suffix on every slug (see ``mappers._SLUG_SUFFIX``),
+    # and the old slug keeps resolving. So one series reaches readers under
+    # several keys, and a follow made under last week's key must still be
+    # recognised from this week's. Keys stay what they are -- rows already
+    # stored under old suffixes keep working, and are still fetched with --
+    # and only the question "same series?" goes through these.
+
+    def series_identity(self, series_key: str) -> str:
+        return _series_identity(fully_unquote(series_key))
+
+    def chapter_identity(self, chapter_key: str) -> str:
+        return _chapter_identity(fully_unquote(chapter_key))
 
     def get_series_list(self, page: int, *, sort: str | None = None) -> PaginatedSeriesList:
         if page < 1:
