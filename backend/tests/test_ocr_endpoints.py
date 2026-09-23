@@ -478,3 +478,71 @@ def test_a_percent_encoded_key_matches_the_chapter_it_names(
     up = _upload(api, h, "chapter%201", "the hero swung")
     assert up.status_code == 200, up.text
     assert up.json()["chapter_key"] == "chapter 1"
+
+
+# --- a chapter released since the last sweep --------------------------------
+
+
+def _browse_with(app, chapters):
+    fake = FakeBrowse(
+        series={
+            (SRC, SERIES): {
+                "meta": {"id": SERIES, "title": "The Max Level Hero"},
+                "chapters": [{"id": key, "number": n} for n, key in enumerate(chapters, 1)],
+            }
+        }
+    )
+    app.dependency_overrides[get_browse_service] = lambda: fake
+    return fake
+
+
+def test_a_chapter_newer_than_every_snapshot_is_accepted_after_one_refresh(
+    app, client, h, follows, db_session
+):
+    """The follow snapshot and the series cache both lag the source: a chapter
+    released since the last sweep is in neither, and a reader who opened it
+    from the source screen had its OCR refused. A miss refreshes the chapter
+    list once, and the upload lands."""
+    from database.models import SourceSeriesCache
+
+    fake = _browse_with(app, ["c1", "c2", "c3", "c4"])
+
+    up = _upload(client, h, "c4", "the newest chapter")
+    assert up.status_code == 200, up.text
+    assert fake.calls.count(f"get_chapters:{SRC}/{SERIES}") == 1
+    row = db_session.get(SourceSeriesCache, (SRC, SERIES))
+    db_session.refresh(row)
+    assert "c4" in row.chapters
+
+
+def test_a_miss_against_a_freshly_written_list_costs_no_source_request(
+    app, client, h, acct, seed_follow, db_session
+):
+    """Invented keys must not buy a live source request each: a list written
+    in the last few minutes is taken as the answer."""
+    from database.models import SourceSeriesCache
+
+    uid, pid = acct
+    seed_follow(uid, pid, source_id=SRC, series_key=SERIES)
+    db_session.add(
+        SourceSeriesCache(source_id=SRC, series_key=SERIES, chapters='[{"id": "c1"}]')
+    )
+    db_session.commit()
+    fake = _browse_with(app, ["c1", "c2"])
+
+    for n in range(3):
+        made = _upload(client, h, f"{SERIES}:9999{n}", "the the the")
+        assert made.status_code == 404, made.text
+        assert made.json()["code"] == "chapter_not_found"
+    assert fake.calls == []
+
+
+def test_a_source_that_fails_the_refresh_is_a_404_not_a_500(
+    app, client, h, follows
+):
+    fake = _browse_with(app, ["c1"])
+    fake.down = True
+
+    made = _upload(client, h, "c9", "unknown chapter")
+    assert made.status_code == 404, made.text
+    assert made.json()["code"] == "chapter_not_found"

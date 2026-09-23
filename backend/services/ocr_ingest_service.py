@@ -28,6 +28,8 @@ that every follower, the owner included, then got as search hits.
 from __future__ import annotations
 
 import json
+import logging
+from datetime import timedelta
 from typing import Annotated, Any
 
 from fastapi import Depends
@@ -48,6 +50,12 @@ from core.time_utils import utcnow
 from database.models import ChapterOcr, FollowedSeries, SourceSeriesCache, User
 from database.session import get_db
 from services.browse_service import BrowseService, get_browse_service
+
+logger = logging.getLogger(__name__)
+
+#: How young a cached chapter list must be for a miss against it to stand
+#: without a refresh (``OcrIngestService._refresh_chapter_list``).
+_CHAPTER_REFRESH_FLOOR = timedelta(minutes=5)
 
 
 def _word_count(text: str) -> int:
@@ -314,9 +322,58 @@ class OcrIngestService:
         or in the series' ``source_series_cache`` chapter list, read here
         regardless of its TTL: an expired list still names chapters that
         exist. Keys are compared fully unquoted, the form the row is stored
-        under. Nothing is fetched upstream: that would cost a live source
-        request per refused upload.
+        under.
+
+        Both of those lag the source: a chapter released since the last sweep
+        is in neither, and a reader who opened it from the source screen then
+        had its OCR refused. On a miss the series' chapter list is refreshed
+        once, through the cache, unless that list was written in the last
+        :data:`_CHAPTER_REFRESH_FLOOR` -- so invented keys cost at most one
+        source request per series per window, not one per upload.
         """
+        if self._chapter_is_known(source_id, series_key, chapter_key):
+            return
+        if self._refresh_chapter_list(source_id, series_key) and self._chapter_is_known(
+            source_id, series_key, chapter_key
+        ):
+            return
+        raise AppError(
+            "Chapter not found.", code="chapter_not_found", status_code=404
+        )
+
+    def _refresh_chapter_list(self, source_id: str, series_key: str) -> bool:
+        """Re-read the series' chapter list into the cache. True if it ran.
+
+        Skipped while the cached list is younger than the floor. A source that
+        fails to answer is not the caller's fault and not a reason to 500 an
+        upload: the check then answers from what was already known.
+        """
+        fetched_at = self._db.execute(
+            select(SourceSeriesCache.fetched_at).where(
+                SourceSeriesCache.source_id == source_id,
+                SourceSeriesCache.series_key == series_key,
+                SourceSeriesCache.chapters.is_not(None),
+            )
+        ).scalar_one_or_none()
+        if fetched_at is not None and utcnow() - fetched_at < _CHAPTER_REFRESH_FLOOR:
+            return False
+        from services.source_cache_service import SourceCacheService
+
+        try:
+            SourceCacheService(self._db, self._browse).get_series_meta(
+                source_id, series_key, force=True
+            )
+        except Exception:  # noqa: BLE001 - a refresh that fails is a miss
+            logger.warning(
+                "ocr: chapter list refresh failed for %s/%s", source_id, series_key,
+                exc_info=True,
+            )
+            return False
+        return True
+
+    def _chapter_is_known(
+        self, source_id: str, series_key: str, chapter_key: str
+    ) -> bool:
         blobs = (
             self._db.execute(
                 select(FollowedSeries.known_chapters).where(
@@ -336,10 +393,8 @@ class OcrIngestService:
         for blob in blobs:
             for key in self._chapter_keys_of(blob):
                 if key == chapter_key or fully_unquote(key) == chapter_key:
-                    return
-        raise AppError(
-            "Chapter not found.", code="chapter_not_found", status_code=404
-        )
+                    return True
+        return False
 
     @staticmethod
     def _geometry_bytes(normalized_pages: list[dict[str, Any]]) -> int:
