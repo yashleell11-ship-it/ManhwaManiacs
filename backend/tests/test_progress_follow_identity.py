@@ -39,6 +39,7 @@ from sqlalchemy import event, select
 
 from core.time_utils import utcnow
 from database.models import ChapterProgress, ReadingSession
+from services.browse_service import series_identity
 from services.followed_series_service import FollowedSeriesService
 from services.progress_service import (
     ProgressInput,
@@ -53,6 +54,10 @@ OLD = f"{BASE}-08677664"  # the key the follow was made under
 NEW = f"{BASE}-05c7df14"  # the key Browse hands out this week
 LATER = f"{BASE}-53fc8424"  # yet another rotation
 LOOKALIKE = "the-great-mage-05c7df14"  # a different series sharing the prefix
+# A different series whose slug BEGINS with this one's identity, so the SQL
+# ``LIKE`` prefix does match it and only the connector's ``series_identity``
+# (``...-4000-years-2``) keeps it out.
+PREFIX_LOOKALIKE = f"{BASE}-2-05c7df14"
 
 
 def _known(series_key: str, numbers=range(1, 6)) -> str:
@@ -831,3 +836,97 @@ def test_a_further_page_under_another_suffix_outranks_a_newer_earlier_page(
     got = _views(db_session, *rotated, rotated_follow.id)
     assert got["strip"] == [(OLD, f"{OLD}:3", 3.0, 15, 20)]
     assert got == _views(db_session, *single, single_follow.id)
+
+
+# --- a lookalike the LIKE prefix DOES match ----------------------------------------
+
+
+def test_the_prefix_lookalike_shares_the_like_prefix_but_not_the_identity():
+    """What the tests below rely on: the ``LIKE`` narrowing lets this series'
+    rows through, so only the Python ``series_identity`` check rejects them."""
+    identity = series_identity(SRC, OLD)
+    assert PREFIX_LOOKALIKE.startswith(identity)
+    assert series_identity(SRC, PREFIX_LOOKALIKE) != identity
+
+
+def test_a_prefix_lookalike_row_does_not_start_or_move_the_read_state(
+    db_session, acct, seed_follow, seed_progress
+):
+    uid, pid = acct
+    seed_follow(uid, pid, source_id=SRC, series_key=OLD, known_chapters=_known(OLD))
+    seed_progress(uid, pid, source_id=SRC, series_key=PREFIX_LOOKALIKE,
+                  chapter_key=f"{PREFIX_LOOKALIKE}:4", chapter_number=4.0)
+
+    assert _state(db_session, uid, pid)["started"] is False
+
+    seed_progress(uid, pid, source_id=SRC, series_key=NEW, chapter_key=f"{NEW}:2",
+                  chapter_number=2.0)
+    state = _state(db_session, uid, pid)
+
+    assert (state["chapter_key"], state["chapter_number"], state["position"]) == (
+        f"{OLD}:2", 2.0, 2
+    )
+
+
+def test_a_prefix_lookalike_row_stays_off_the_continue_strip(
+    db_session, acct, seed_follow, seed_progress
+):
+    uid, pid = acct
+    now = utcnow()
+    seed_follow(uid, pid, source_id=SRC, series_key=OLD, known_chapters=_known(OLD))
+    seed_progress(uid, pid, source_id=SRC, series_key=PREFIX_LOOKALIKE,
+                  chapter_key=f"{PREFIX_LOOKALIKE}:4", chapter_number=4.0,
+                  last_page=7, last_read_at=now)
+
+    assert _library(db_session, uid, pid).continue_reading() == []
+
+    seed_progress(uid, pid, source_id=SRC, series_key=NEW, chapter_key=f"{NEW}:2",
+                  chapter_number=2.0, last_page=3,
+                  last_read_at=now - timedelta(days=1))
+    strip = _library(db_session, uid, pid).continue_reading()
+
+    assert [(r["series_key"], r["chapter_key"], r["last_page"]) for r in strip] == [
+        (OLD, f"{OLD}:2", 3)
+    ]
+    # Stamped by this series' own newest read, not the lookalike's.
+    assert strip[0]["last_read_at"] == (now - timedelta(days=1)).isoformat()
+
+
+def test_a_prefix_lookalike_row_stays_out_of_the_detail_overlay(
+    db_session, acct, seed_follow, seed_progress
+):
+    uid, pid = acct
+    follow = seed_follow(uid, pid, source_id=SRC, series_key=OLD,
+                         known_chapters=_known(OLD))
+    seed_progress(uid, pid, source_id=SRC, series_key=NEW, chapter_key=f"{NEW}:3",
+                  chapter_number=3.0, last_page=5)
+    seed_progress(uid, pid, source_id=SRC, series_key=PREFIX_LOOKALIKE,
+                  chapter_key=f"{PREFIX_LOOKALIKE}:3", chapter_number=3.0,
+                  last_page=20, is_completed=True)
+    seed_progress(uid, pid, source_id=SRC, series_key=PREFIX_LOOKALIKE,
+                  chapter_key=f"{PREFIX_LOOKALIKE}:4", chapter_number=4.0,
+                  last_page=9)
+
+    overlay = _library(db_session, uid, pid).get_detail(follow.id)["progress"]
+
+    assert overlay == {f"{OLD}:3": {"last_page": 5, "is_completed": False}}
+
+
+def test_a_prefix_lookalike_is_neither_a_push_target_nor_a_series_page_row(
+    db_session, acct, seed_follow, seed_progress
+):
+    uid, pid = acct
+    seed_follow(uid, pid, source_id=SRC, series_key=PREFIX_LOOKALIKE,
+                known_chapters=_known(PREFIX_LOOKALIKE))
+    seed_progress(uid, pid, source_id=SRC, series_key=PREFIX_LOOKALIKE,
+                  chapter_key=f"{PREFIX_LOOKALIKE}:3", chapter_number=3.0,
+                  last_page=20, is_completed=True)
+    svc = _progress(db_session, uid, pid)
+
+    result = svc.save_one(_push(NEW, 3, 4))
+
+    assert (result["series_key"], result["last_page"]) == (NEW, 4)
+    assert [
+        (r["chapter_key"], r["last_page"])
+        for r in svc.get_series_progress(SRC, NEW)
+    ] == [(f"{NEW}:3", 4)]
