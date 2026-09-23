@@ -84,9 +84,11 @@ export type SeriesContinue =
  * (`backend/tests/fixtures/reading_navigation_cases.json`).
  *
  * "Furthest" is highest chapter number; an unnumbered chapter ranks below
- * every numbered one, and between unnumbered chapters the newest read wins —
- * the order the server ranks its rows in. A position for a key the list does
- * not carry is ignored: there is no chapter to open for it.
+ * every numbered one, and between unnumbered chapters (or two that share a
+ * number) the newest read wins — the order the server ranks its rows in. Where
+ * neither says when it was read, the one later in reading order wins. A
+ * position for a key the list does not carry is ignored: there is no chapter
+ * to open for it.
  *
  * Null only when the series has no chapters at all.
  */
@@ -148,8 +150,9 @@ function librarySourceChapters(detail: LibrarySeriesChapters): SourceChapterSumm
  * the source or novel page for the same book could send the same reader to
  * different places. It now asks this rule, through the payload it already has.
  *
- * The library overlay carries no read times, so between unnumbered chapters —
- * the one place the rule looks at them — the first in reading order is taken.
+ * The library overlay carries no read times, so between unnumbered chapters or
+ * chapters that share a number — the one place the rule looks at them — the
+ * last in reading order is taken.
  */
 export function librarySeriesContinue(detail: LibrarySeriesChapters): SeriesContinue | null {
   const progress: Record<string, SeriesChapterPosition> = {};
@@ -184,7 +187,11 @@ function isFurther(
   if (number != null && bestNumber != null && number !== bestNumber) {
     return number > bestNumber;
   }
-  return readAt > bestReadAt;
+  // A tie — two rows with no read time, as every library row is — goes to the
+  // later chapter: the caller walks reading order upwards, so the row in hand
+  // is further along the list. Keeping the first sent a reader who had
+  // finished a and b and was half through c back into b.
+  return readAt >= bestReadAt;
 }
 
 /**

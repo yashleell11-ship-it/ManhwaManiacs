@@ -170,6 +170,47 @@ describe("librarySeriesContinue", () => {
       ),
     ).toEqual({ kind: "resume", point: { chapterKey: "c1", page: 7 } });
   });
+
+  // The overlay has no read times, so the tie between chapters of the same
+  // rank has to go to the one further along the list. Taking the first sent a
+  // reader back into a chapter they had already finished.
+  it("in a book that numbers nothing, resumes the chapter furthest along the list", () => {
+    const unnumbered = ["a", "b", "c", "d"].map((key) => ({
+      key,
+      number: null,
+      title: null,
+      published_at: null,
+    }));
+    expect(
+      librarySeriesContinue({
+        ...payload({
+          a: { last_page: 20, is_completed: true },
+          b: { last_page: 20, is_completed: true },
+          c: { last_page: 7, is_completed: false },
+        }),
+        chapters: unnumbered,
+      }),
+    ).toEqual({ kind: "resume", point: { chapterKey: "c", page: 7 } });
+  });
+
+  it("between chapters that share a number, resumes the later one", () => {
+    const split = [
+      { key: "c1", number: 1, title: null, published_at: null },
+      { key: "c2-part1", number: 2, title: null, published_at: null },
+      { key: "c2-part2", number: 2, title: null, published_at: null },
+      { key: "c3", number: 3, title: null, published_at: null },
+    ];
+    expect(
+      librarySeriesContinue({
+        ...payload({
+          c1: { last_page: 20, is_completed: true },
+          "c2-part1": { last_page: 20, is_completed: true },
+          "c2-part2": { last_page: 4, is_completed: false },
+        }),
+        chapters: split,
+      }),
+    ).toEqual({ kind: "resume", point: { chapterKey: "c2-part2", page: 4 } });
+  });
 });
 
 describe("libraryReadingOrder", () => {
