@@ -19,7 +19,7 @@ import { shelfCountLine } from "../count-line";
 import { continueReadingSeriesKey } from "../continue-reading";
 import { useContinueReading, useSeriesList } from "../hooks";
 import { followedShelfNote } from "../read-state";
-import { ContinueReadingStrip } from "./ContinueReading";
+import { ContinueReadingRail, ContinueReadingStrip } from "./ContinueReading";
 import { FollowedSeriesCard } from "./FollowedSeriesCard";
 
 /**
@@ -29,9 +29,12 @@ import { FollowedSeriesCard } from "./FollowedSeriesCard";
  * set. One heading, one grid of covers. Browse Sources is the single call to
  * action, in the empty state or the small header button.
  *
- * Below `md` it also carries the one-row resume strip that used to be a hero
- * card and a rail on `/library/browse` — this is the tab a phone opens on, and
- * "where was I" belongs on it. See `ContinueReadingStrip`.
+ * It also carries "where was I", because this is the tab every client opens
+ * on: below `md` as the one-row `ContinueReadingStrip`, from `md` up as the
+ * hero card and rail (`ContinueReadingRail`). The rail used to live only on
+ * `/library/browse`, so a desktop landing here saw covers and a muted
+ * "Ch X of Y" and nothing to resume from. Exactly one of the two shows at any
+ * width.
  */
 export function LibraryShelfView() {
   const seriesQuery = useSeriesList({
@@ -53,10 +56,10 @@ export function LibraryShelfView() {
     () => filterRows(continueQuery.data, (item) => item.source_id),
     [filterRows, continueQuery.data],
   );
-  // The progress payload carries no title, and the shelf is already holding
-  // every followed row — so the join happens here rather than through
-  // `useFollowedIndex`, which would refetch the same 200 rows under a second
-  // cache key to learn one string.
+  // The fallback for a progress payload without a title (an older server).
+  // The shelf is already holding every followed row, so the join happens here
+  // rather than through `useFollowedIndex`, which would refetch the same rows
+  // under a second cache key to learn one string.
   const continueTitles = useMemo(() => {
     const map = new Map<string, string>();
     for (const series of followed) {
@@ -151,6 +154,12 @@ export function LibraryShelfView() {
         titles={continueTitles}
         novels={isNovelMode}
         className="mt-5 md:hidden"
+      />
+      <ContinueReadingRail
+        items={continueItems}
+        titles={continueTitles}
+        novels={isNovelMode}
+        className="mb-0 mt-6 hidden md:block"
       />
 
       {isNovelMode ? (
