@@ -537,13 +537,9 @@ def paid(monkeypatch):
         }
         return httpx.Response(200, json=body)
 
+    # Under the service's own deadline transport, as in production.
     transport = httpx.MockTransport(handle)
-    real = deepseek_client.complete_json
-    monkeypatch.setattr(
-        suggestion_service.deepseek_client,
-        "complete_json",
-        lambda *a, **k: real(*a, transport=transport, **k),
-    )
+    monkeypatch.setattr(suggestion_service, "_upstream_transport", lambda: transport)
     return seen
 
 
@@ -700,6 +696,103 @@ def test_an_unreadable_account_ledger_refuses_every_account(
 
     service.suggest("anything", base_url="http://x/")
     assert len(paid) == 1
+
+
+# --- an answer nobody can receive is not waited for ----------------------
+#
+# The web's request went through Next's /api rewrite, which gave up at 30 s,
+# while the call behind it could run 180 s per attempt, twice: DeepSeek
+# answered, the ledgers were charged, and the reader got a 500. Cloudflare's
+# edge gives up at ~100 s whatever Next does, so the whole call has to end
+# before that. Run on a fake clock so a slow answer costs no real time.
+
+EDGE_GIVES_UP_AT = 100.0
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """A clock only the test moves. deepseek_client's pause between attempts
+    advances it instead of sleeping."""
+    import types
+
+    now = [1000.0]
+    monkeypatch.setattr(suggestion_service, "_now", lambda: now[0])
+
+    def _sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    monkeypatch.setattr(deepseek_client, "time", types.SimpleNamespace(sleep=_sleep))
+    return now
+
+
+def test_a_slow_answer_is_abandoned_before_the_edge_gives_up(
+    service, shelf, clock, monkeypatch
+):
+    """DeepSeek keeps a slow request open with blank lines, so httpx's
+    per-read timeout never fires. The deadline still does, and the retry is
+    refused rather than sent after it."""
+    import httpx
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-not-a-real-key-0000000000")
+    _fill_shelf(shelf)
+    start = clock[0]
+    sent: list[httpx.Request] = []
+
+    class KeepAlive(httpx.SyncByteStream):
+        def __iter__(self):
+            while True:
+                clock[0] += 5
+                yield b"\n"
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(200, stream=KeepAlive())
+
+    transport = httpx.MockTransport(handle)
+    monkeypatch.setattr(suggestion_service, "_upstream_transport", lambda: transport)
+
+    with pytest.raises(AppError) as exc:
+        service.suggest("anything", base_url="http://x/")
+
+    assert exc.value.code == "ai_failed"
+    assert len(sent) == 1
+    # Given up at the deadline (to within one blank line), plus
+    # deepseek_client's one pause before the retry that was then refused --
+    # and all of it inside the edge's limit.
+    assert clock[0] - start <= suggestion_service.TIMEOUT_SECONDS + 5 + 2
+    assert clock[0] - start < EDGE_GIVES_UP_AT
+
+
+def test_the_retry_gets_only_what_the_first_attempt_left(
+    service, shelf, clock, paid, monkeypatch
+):
+    """A 503 is retried once. The second attempt's own timeouts are cut to
+    what remains, so a server that then says nothing at all is let go in
+    time, not a whole per-read timeout later."""
+    import httpx
+
+    _fill_shelf(shelf)
+    start = clock[0]
+    answers = suggestion_service._upstream_transport()  # the paid mock
+    timeouts: list[dict] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        timeouts.append(dict(request.extensions["timeout"]))
+        if len(timeouts) == 1:
+            clock[0] += 60
+            return httpx.Response(503)
+        return answers.handle_request(request)
+
+    transport = httpx.MockTransport(handle)
+    monkeypatch.setattr(suggestion_service, "_upstream_transport", lambda: transport)
+
+    result = service.suggest("anything", base_url="http://x/")
+
+    assert result["items"][0]["title"] == "Filler Book 0"
+    assert len(timeouts) == 2
+    left = suggestion_service.TIMEOUT_SECONDS - (60 + 2)
+    assert all(v <= left for v in timeouts[1].values())
+    assert (clock[0] - start) + timeouts[1]["read"] < EDGE_GIVES_UP_AT
 
 
 # --- over HTTP ------------------------------------------------------------

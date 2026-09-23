@@ -29,6 +29,17 @@ const nextConfig: NextConfig = {
     return [{ source: "/", destination: "/library", permanent: false }];
   },
 
+  // How long the /api rewrite waits on the backend before answering 500 for
+  // it. Next's default is 30 s, and an AI suggestion takes ~40 s or more: the
+  // backend finished, DeepSeek charged the day's allowance, and the reader got
+  // "Couldn't suggest anything" -- every retry paid again. It is an idle
+  // timeout, so a streamed response is unaffected. It must stay above the
+  // suggestion call's whole deadline (backend/services/suggestion_service.py,
+  // TIMEOUT_SECONDS plus deepseek_client's 2 s pause before its retry).
+  experimental: {
+    proxyTimeout: 120_000,
+  },
+
   async rewrites() {
     return [
       {

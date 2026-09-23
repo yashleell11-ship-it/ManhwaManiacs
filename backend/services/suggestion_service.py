@@ -40,10 +40,13 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 from urllib.parse import quote
 
+import httpx
 from fastapi import Depends
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
@@ -130,9 +133,102 @@ MAX_TOKENS = 20000
 #: the same thing twice is asking for another look, not a receipt.
 TEMPERATURE = 0.4
 
-#: Scaled with MAX_TOKENS, not with the visible answer, for the same reason.
-#: Mobile's receiveTimeout must stay comfortably above this.
-TIMEOUT_SECONDS = 180.0
+#: The WHOLE paid call -- both of deepseek_client's attempts and the pause
+#: between them -- has to end before anything in front of this request gives
+#: up on it. It used to be 180 s per attempt, sized for MAX_TOKENS alone,
+#: while the web's request went through Next's /api rewrite, which cut it off
+#: at 30 s: DeepSeek answered, the ledgers were charged, and the reader got a
+#: 500 and a "try again" that paid a second time. Next now waits longer
+#: (next.config.ts, proxyTimeout), but Cloudflare's edge in front of both the
+#: site and app.manhwamaniacs.xyz answers 524 at ~100 s and cannot be raised.
+#: An answer that arrives after that is paid for and delivered to nobody, so
+#: this stops short of it. ~10k tokens of fixed reasoning is ~40 s, which
+#: leaves room for a slow one. Mobile's receiveTimeout must stay above it.
+#:
+#: Enforced by _DeadlineTransport, not by httpx's own ``timeout``: that one is
+#: per read, and DeepSeek holds a slow non-streaming request open by sending
+#: blank lines, so a per-read timeout never fires on the case it exists for.
+TIMEOUT_SECONDS = 90.0
+
+
+def _now() -> float:
+    """The deadline's clock -- a seam so a test can run a slow answer in no
+    time."""
+    return time.monotonic()
+
+
+def _upstream_transport() -> httpx.BaseTransport:
+    """What actually carries the request -- a seam for the mock DeepSeek."""
+    return httpx.HTTPTransport()
+
+
+class _DeadlineTransport(httpx.BaseTransport):
+    """One wall-clock deadline for every attempt made through it.
+
+    Set when constructed, so the retry deepseek_client makes gets only what
+    the first attempt left: a request that cannot start in time is refused
+    before it is sent, which is also before it is paid for. A server that
+    sends nothing is cut at the deadline by shrinking the request's own
+    timeouts to what is left; one that keeps the connection alive with blank
+    lines is cut between chunks.
+    """
+
+    def __init__(self, seconds: float) -> None:
+        self._deadline = _now() + seconds
+        self._inner: httpx.BaseTransport | None = None
+
+    def remaining(self, request: httpx.Request) -> float:
+        left = self._deadline - _now()
+        if left <= 0:
+            raise httpx.ReadTimeout("suggestion deadline passed", request=request)
+        return left
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        left = self.remaining(request)
+        timeouts = request.extensions.get("timeout") or {}
+        request.extensions["timeout"] = {
+            name: left if timeouts.get(name) is None else min(timeouts[name], left)
+            for name in ("connect", "read", "write", "pool")
+        }
+        # deepseek_client opens a Client per attempt, and closing that Client
+        # closes this transport, so the carrier is rebuilt rather than reused.
+        if self._inner is None:
+            self._inner = _upstream_transport()
+        response = self._inner.handle_request(request)
+        return httpx.Response(
+            status_code=response.status_code,
+            headers=response.headers,
+            stream=_DeadlineStream(
+                cast(httpx.SyncByteStream, response.stream), self, request
+            ),
+            extensions=response.extensions,
+        )
+
+    def close(self) -> None:
+        if self._inner is not None:
+            self._inner.close()
+            self._inner = None
+
+
+class _DeadlineStream(httpx.SyncByteStream):
+    def __init__(
+        self,
+        inner: httpx.SyncByteStream,
+        transport: _DeadlineTransport,
+        request: httpx.Request,
+    ) -> None:
+        self._inner = inner
+        self._transport = transport
+        self._request = request
+
+    def __iter__(self) -> Iterator[bytes]:
+        for chunk in self._inner:
+            self._transport.remaining(self._request)
+            yield chunk
+
+    def close(self) -> None:
+        self._inner.close()
+
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
@@ -445,6 +541,7 @@ class SuggestionService:
                 ceiling=self._global_ceiling(),
                 budget_path=BUDGET_PATH,
                 account_budget=self._account_budget(),
+                transport=_DeadlineTransport(TIMEOUT_SECONDS),
             )
         except LLMBudgetExhausted as exc:
             raise AppError(
