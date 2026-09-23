@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { cn } from "@/lib/cn";
 import { parsePageInput, scrubPercent } from "../scrub";
 import type { ReadingDirection } from "../types";
@@ -39,12 +39,17 @@ export function ScrubBar({
   const current = Math.min(total, Math.max(1, dragPage ?? page));
   const percent = scrubPercent(current, total);
 
+  const jumpInputRef = useRef<HTMLInputElement>(null);
   const submitJump = (event: React.FormEvent) => {
     event.preventDefault();
     const target = parsePageInput(draft, pageCount);
     if (target == null) return;
     setDraft("");
     onSeek(target);
+    // Hand focus back to the page. A focused text box holds the reader's
+    // controls on screen (chrome-autohide), so leaving it focused after the
+    // jump kept the bar up for the rest of the chapter.
+    jumpInputRef.current?.blur();
   };
 
   return (
@@ -97,6 +102,7 @@ export function ScrubBar({
           Jump to page
         </label>
         <input
+          ref={jumpInputRef}
           id="reader-jump-to-page"
           inputMode="numeric"
           autoComplete="off"

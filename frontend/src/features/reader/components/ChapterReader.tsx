@@ -1071,8 +1071,16 @@ export function ChapterReader({
       if (continuous) autoScroll.toggle();
     },
     onEscape: handleEscape,
-    onPreviousChapter: goPreviousChapter,
-    onNextChapter: goNextChapter,
+    // A chapter jump from the keyboard is reading, like a page turn: mark the
+    // scroll it causes as intended so the controls get out of the way.
+    onPreviousChapter: () => {
+      intendScroll();
+      goPreviousChapter();
+    },
+    onNextChapter: () => {
+      intendScroll();
+      goNextChapter();
+    },
     onOpenSeries: openSeries,
     onBookmark: handleBookmark,
     onZoomIn: zoomIn,
