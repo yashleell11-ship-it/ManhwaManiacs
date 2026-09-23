@@ -138,6 +138,35 @@ class Changelog(BaseModel):
 # consume the exact same source of truth.
 _RELEASE_NOTES: list[ChangelogEntry] = [
     ChangelogEntry(
+        version="3.4.1",
+        build=54,
+        date="September 2026",
+        highlights=[
+            "The phone's novel reader marks chapters read. Scrolling to the "
+            "very bottom could never bring the last paragraph up to where the "
+            "reader counts from, and Next did not save the finish either, so "
+            "most chapters stayed unread a few paragraphs from the end. Both "
+            "now count, and a downloaded chapter starts its expiry once read",
+            "On the website, Previous chapter works after the reader has "
+            "carried you into the next one, a chapter finished by scrolling "
+            "on a desktop is marked read, and reopening a chapter puts you "
+            "where you actually were rather than a few paragraphs ahead",
+            "Search results and suggestions on the website show their covers "
+            "— every one of them was blank",
+            "A new search on the phone shows it is searching instead of "
+            "showing the last search's results, and the website says when "
+            "some sources could not be searched instead of quietly leaving "
+            "them out",
+            "Collections can add from every series you follow, not just the "
+            "first 200, and an Asura series you already follow shows as "
+            "followed even after the site renames its link",
+            "Reading stats name series you no longer follow, a pin left on a "
+            "removed source no longer stops you pinning others, and the "
+            "website's 'new version' prompt goes away once another tab has "
+            "updated",
+        ],
+    ),
+    ChangelogEntry(
         version="3.4.0",
         build=53,
         date="September 2026",
