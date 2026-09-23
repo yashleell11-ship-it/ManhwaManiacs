@@ -144,6 +144,19 @@ export interface ContinueReadingItem {
   last_page: number;
   page_count: number;
   last_read_at: string | null;
+  /**
+   * The follow row's title, joined by the server. Absent from a server older
+   * than the field and null when the row has none, so a card still falls back
+   * to the followed-index join (`resolveSeriesTitle`).
+   */
+  title?: string | null;
+  /**
+   * The follow row's cover: the source's absolute URL or a backend-relative
+   * proxy path, like `FollowedSeries.cover_url` — resolve it with
+   * `libraryCoverUrl`. Absent or null means "use the source cover proxy for
+   * this item's key".
+   */
+  cover_url?: string | null;
 }
 
 /**

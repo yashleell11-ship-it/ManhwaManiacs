@@ -4,7 +4,7 @@ import Link from "next/link";
 import { ChevronRight, Play } from "lucide-react";
 import { useChapterHref } from "@/features/novels/use-chapter-href";
 import { cn } from "@/lib/cn";
-import { seriesCoverUrl } from "../api";
+import { libraryCoverUrl, seriesCoverUrl } from "../api";
 import {
   continueReadingChapterLabel,
   continueReadingKey,
@@ -27,6 +27,35 @@ const RAIL_COVER_SIZES = "70px";
 /** The phone strip's cover: a fixed `w-11` (44px) thumbnail. */
 const STRIP_COVER_SIZES = "44px";
 
+/**
+ * The series title a resume card shows.
+ *
+ * The server joins the follow row's title into each item. A server older than
+ * that field sends none, and then the title comes from the caller's
+ * followed-series map exactly as it always did, falling back to the key. The
+ * payload's own title wins because it needs no second list to be loaded, and
+ * the shelf's list stops at 200 rows, so its map can miss a series.
+ */
+export function continueItemTitle(
+  item: ContinueReadingItem,
+  titles: ReadonlyMap<string, string>,
+): string {
+  const own = item.title?.trim();
+  return own ? own : resolveSeriesTitle(item, titles);
+}
+
+/**
+ * The cover a resume card shows, sized for `sizes`.
+ *
+ * The follow row's own cover when the server sends it (the one the library
+ * card for that series shows), else the source cover proxy for the item's key,
+ * which is all an older server's payload can name.
+ */
+export function continueItemCoverUrl(item: ContinueReadingItem, sizes: string): string {
+  const own = item.cover_url?.trim();
+  return own ? libraryCoverUrl(own, sizes) : seriesCoverUrl(continueReadingRef(item), sizes);
+}
+
 interface ContinueReadingProps {
   items: ContinueReadingItem[];
   isLoading?: boolean;
@@ -38,25 +67,58 @@ interface ContinueReadingProps {
 }
 
 /**
- * The "pick up where you left off" section, on `/library/browse` from `md` up.
+ * The "pick up where you left off" section on `/library/browse`, from `md` up.
  *
- * Fed by `GET /library/continue-reading` (most recent unfinished chapter per
- * `(source_id, series_key)`). The lead item renders as a large hero card; the
- * rest follow in the horizontal rail. Covers come from the source proxy; the
- * resume link drops straight onto the last page read. The payload has no series
- * title, so it is joined from the followed-series index (falls back to the key).
- *
- * A hero card plus a rail is roughly 400px of vertical space, which is why the
- * phone gets `ContinueReadingStrip` on `/library` instead — see below.
+ * `ContinueReadingRail` with its fallback titles joined from the whole
+ * followed-series index, for a screen that does not already hold the followed
+ * rows. `/library` does hold them, so it renders the rail directly with the map
+ * it already built.
  */
 export function ContinueReading({ items, isLoading, novels }: ContinueReadingProps) {
   const { titles } = useFollowedIndex();
+  return (
+    <ContinueReadingRail items={items} isLoading={isLoading} novels={novels} titles={titles} />
+  );
+}
+
+interface ContinueReadingRailProps extends ContinueReadingProps {
+  /**
+   * `source_id:series_key -> title`, the fallback for an item the server sent
+   * without a title (see `continueItemTitle`).
+   */
+  titles: ReadonlyMap<string, string>;
+  className?: string;
+}
+
+/**
+ * The hero card plus the horizontal rail: the desktop "where was I".
+ *
+ * Fed by `GET /library/continue-reading` (most recent unfinished chapter per
+ * `(source_id, series_key)`). The lead item renders as a large hero card; the
+ * rest follow in the horizontal rail. The resume link drops straight onto the
+ * last page read.
+ *
+ * A hero card plus a rail is roughly 400px of vertical space, which is why the
+ * phone gets `ContinueReadingStrip` instead (see below) and both screens show
+ * this only from `md` up.
+ */
+export function ContinueReadingRail({
+  items,
+  isLoading,
+  novels,
+  titles,
+  className,
+}: ContinueReadingRailProps) {
   // Resolves to whichever reader the row's source calls for.
   const chapterHref = useChapterHref();
 
   if (isLoading) {
     return (
-      <section className="mb-8" aria-busy="true" aria-label="Loading continue reading">
+      <section
+        className={cn("mb-8", className)}
+        aria-busy="true"
+        aria-label="Loading continue reading"
+      >
         <div className="mb-3 h-4 w-40 animate-pulse rounded bg-surface-2" />
         <div className="mb-4 h-[220px] w-full animate-pulse rounded-3xl bg-surface-2 sm:h-[260px]" />
         <div className="flex gap-4 overflow-hidden">
@@ -77,9 +139,10 @@ export function ContinueReading({ items, isLoading, novels }: ContinueReadingPro
 
   const [hero, ...rest] = items;
   const heroPercent = continueReadingPercent(hero);
+  const heroTitle = continueItemTitle(hero, titles);
 
   return (
-    <section className="mb-8">
+    <section className={cn("mb-8", className)}>
       <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted">
         Continue Reading
       </h2>
@@ -91,8 +154,8 @@ export function ContinueReading({ items, isLoading, novels }: ContinueReadingPro
         <article className="glass-card relative flex gap-4 overflow-hidden rounded-3xl p-3 transition-colors group-hover:border-primary/40 group-focus-visible:border-primary/60 sm:gap-6 sm:p-4">
           <div className="relative aspect-[2/3] w-28 shrink-0 overflow-hidden rounded-2xl bg-surface-2 sm:w-40 md:w-44">
             <CoverImage
-              src={seriesCoverUrl(continueReadingRef(hero), HERO_COVER_SIZES)}
-              alt={resolveSeriesTitle(hero, titles)}
+              src={continueItemCoverUrl(hero, HERO_COVER_SIZES)}
+              alt={heroTitle}
               fill
               className="object-cover"
               sizes={HERO_COVER_SIZES}
@@ -107,9 +170,7 @@ export function ContinueReading({ items, isLoading, novels }: ContinueReadingPro
             <p className="text-[11px] font-semibold uppercase tracking-widest text-primary">
               Jump back in
             </p>
-            <h3 className="line-clamp-2 text-lg font-semibold text-fg sm:text-2xl">
-              {resolveSeriesTitle(hero, titles)}
-            </h3>
+            <h3 className="line-clamp-2 text-lg font-semibold text-fg sm:text-2xl">{heroTitle}</h3>
             <p className="text-sm text-muted">
               {continueReadingChapterLabel(hero)} &middot;{" "}
               {novels
@@ -137,6 +198,7 @@ export function ContinueReading({ items, isLoading, novels }: ContinueReadingPro
         <div className="flex snap-x snap-mandatory gap-4 overflow-x-auto scroll-smooth pb-2">
           {rest.map((item) => {
             const percent = continueReadingPercent(item);
+            const title = continueItemTitle(item, titles);
             return (
               <Link
                 key={continueReadingKey(item)}
@@ -146,8 +208,8 @@ export function ContinueReading({ items, isLoading, novels }: ContinueReadingPro
                 <article className="glass-card flex h-full gap-3 overflow-hidden rounded-2xl p-2 transition-colors hover:border-primary/40">
                   <div className="relative h-[104px] w-[70px] shrink-0 overflow-hidden rounded-lg bg-surface-2">
                     <CoverImage
-                      src={seriesCoverUrl(continueReadingRef(item), RAIL_COVER_SIZES)}
-                      alt={resolveSeriesTitle(item, titles)}
+                      src={continueItemCoverUrl(item, RAIL_COVER_SIZES)}
+                      alt={title}
                       fill
                       className="object-cover"
                       sizes={RAIL_COVER_SIZES}
@@ -160,9 +222,7 @@ export function ContinueReading({ items, isLoading, novels }: ContinueReadingPro
 
                   <div className="flex min-w-0 flex-1 flex-col justify-between py-1 pr-1">
                     <div className="min-w-0">
-                      <p className="truncate text-sm font-medium text-fg">
-                        {resolveSeriesTitle(item, titles)}
-                      </p>
+                      <p className="truncate text-sm font-medium text-fg">{title}</p>
                       <p className="mt-0.5 truncate text-xs text-muted">
                         {continueReadingChapterLabel(item)}
                       </p>
@@ -196,9 +256,10 @@ export function ContinueReading({ items, isLoading, novels }: ContinueReadingPro
 interface ContinueReadingStripProps {
   items: ContinueReadingItem[];
   /**
-   * `source_id:series_key -> title`, built by the caller. The strip's caller
-   * (the shelf) already holds the whole followed set, so passing the map keeps
-   * the phone's landing screen from refetching 200 rows to render one title.
+   * `source_id:series_key -> title`, built by the caller, for an item the
+   * server sent without a title. The strip's caller (the shelf) already holds
+   * the whole followed set, so passing the map keeps the phone's landing
+   * screen from refetching 200 rows to render one title.
    */
   titles: ReadonlyMap<string, string>;
   novels?: boolean;
@@ -208,14 +269,13 @@ interface ContinueReadingStripProps {
 /**
  * The same "where was I", in one row, for the phone.
  *
- * `ContinueReading` — a hero card plus a horizontal rail under a section header
- * — pushed the first cover on `/library/browse` below the fold at 375px, and
- * the Flutter client shows no continue-reading section on either library screen
- * at all (`ContinueReadingSection` in `dashboard_sections.dart` is defined and
- * never built). But resuming is the single most useful thing on a reading app's
- * home screen, and `/library/browse` was its only home on the web, so it moves
- * here rather than disappearing: the most recent unfinished chapter, one tap, on
- * the tab a phone actually opens on.
+ * `ContinueReadingRail` (a hero card plus a horizontal rail under a section
+ * header) pushed the first cover on `/library/browse` below the fold at 375px,
+ * and the Flutter client shows no continue-reading section on either library
+ * screen at all (`ContinueReadingSection` in `dashboard_sections.dart` is
+ * defined and never built). But resuming is the single most useful thing on a
+ * reading app's home screen, so below `md` it is this strip: the most recent
+ * unfinished chapter, one tap, on the tab a phone actually opens on.
  *
  * Only the lead item. The rail's job was breadth; a strip's is the one answer.
  */
@@ -233,7 +293,7 @@ export function ContinueReadingStrip({
 
   const [item] = items;
   const percent = continueReadingPercent(item);
-  const title = resolveSeriesTitle(item, titles);
+  const title = continueItemTitle(item, titles);
 
   return (
     <Link
@@ -243,7 +303,7 @@ export function ContinueReadingStrip({
       <article className="glass-card flex items-center gap-3 overflow-hidden rounded-2xl p-2 transition-colors group-hover:border-primary/40 group-focus-visible:border-primary/60">
         <div className="relative aspect-[2/3] w-11 shrink-0 overflow-hidden rounded-lg bg-surface-2">
           <CoverImage
-            src={seriesCoverUrl(continueReadingRef(item), STRIP_COVER_SIZES)}
+            src={continueItemCoverUrl(item, STRIP_COVER_SIZES)}
             alt=""
             fill
             className="object-cover"
