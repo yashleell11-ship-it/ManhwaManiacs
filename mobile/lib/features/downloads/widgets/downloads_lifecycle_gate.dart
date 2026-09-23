@@ -5,11 +5,13 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:manhwamaniacs/features/downloads/providers/bookmark_outbox_provider.dart';
 import 'package:manhwamaniacs/features/downloads/providers/currently_open_chapter_provider.dart';
+import 'package:manhwamaniacs/features/downloads/providers/downloads_scope.dart';
 import 'package:manhwamaniacs/features/downloads/providers/progress_outbox_provider.dart';
 import 'package:manhwamaniacs/features/downloads/providers/retention_maintenance_provider.dart';
 import 'package:manhwamaniacs/features/downloads/providers/storage_settings_provider.dart';
 import 'package:manhwamaniacs/features/downloads/queue/download_queue_controller.dart';
 import 'package:manhwamaniacs/features/ocr/controllers/ocr_run_controller.dart';
+import 'package:manhwamaniacs/features/sources/providers/source_progress_backfill.dart';
 
 /// Wraps the app and drives every piece of 1c-M3 that has to run on a
 /// schedule rather than in response to a single user action:
@@ -25,7 +27,12 @@ import 'package:manhwamaniacs/features/ocr/controllers/ocr_run_controller.dart';
 ///   silent stall.
 /// - **Progress outbox flush** on launch, resume, and connectivity regained
 ///   — a save made offline reaches the server the moment any of those give
-///   it a chance, without the reader itself ever blocking on it.
+///   it a chance, without the reader itself ever blocking on it. The same
+///   flush also runs when a session scope appears (sign-in resolving after
+///   the first frame, a profile picked or switched to).
+/// - **Source-progress backfill** just before that flush: once per profile,
+///   the Sources-tab progress builds before 3.4.0 kept only on the phone is
+///   queued into the outbox (`SourceProgressBackfill`).
 /// - **Bookmark outbox flush** on the same three triggers, and a full
 ///   bookmark *sync* (push then pull) on launch and resume. The pull is not
 ///   done on every connectivity blip: a flush is free when there is nothing
@@ -57,6 +64,20 @@ class _DownloadsLifecycleGateState extends ConsumerState<DownloadsLifecycleGate>
         _flushOutbox();
       }
     });
+    // At launch the session is usually not known yet (auth restores after the
+    // first frame), so the launch pass below finds no scope and does nothing.
+    // A scope appearing — sign-in resolved, a profile picked or switched to —
+    // is the first moment that profile's progress can be backfilled or sent.
+    //
+    // Deferred a microtask: Riverpod calls this listener BEFORE it marks the
+    // scope's dependents stale, so a store read inside it is the previous
+    // scope's — `null` on sign-in, which would make the pass a no-op.
+    ref.listenManual<String?>(activeDownloadsScopeIdProvider, (previous, next) {
+      if (next == null || next == previous) return;
+      scheduleMicrotask(() {
+        if (mounted) unawaited(_backfillThenFlushProgress());
+      });
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) => _onActive(isLaunch: true));
   }
 
@@ -82,8 +103,21 @@ class _DownloadsLifecycleGateState extends ConsumerState<DownloadsLifecycleGate>
     if (!mounted) return;
     _sweep();
     ref.read(downloadQueueControllerProvider.notifier).resumePendingOnLaunch();
-    _flushOutbox();
+    unawaited(_backfillThenFlushProgress());
+    unawaited(ref.read(bookmarkOutboxControllerProvider).flush());
     unawaited(ref.read(bookmarkOutboxControllerProvider).sync());
+  }
+
+  /// Queues this profile's stranded Sources-tab progress (once per profile,
+  /// see [SourceProgressBackfill]) and then flushes the progress outbox, so
+  /// the backfilled rows leave in the same flush rather than waiting for the
+  /// next trigger.
+  Future<void> _backfillThenFlushProgress() async {
+    // Both read now, while this state is certainly mounted.
+    final backfill = ref.read(sourceProgressBackfillProvider);
+    final outbox = ref.read(progressOutboxControllerProvider);
+    await backfill.run();
+    await outbox.flush();
   }
 
   Future<void> _sweep() async {
