@@ -211,7 +211,6 @@ export function ChapterReader({
   const router = useRouter();
   const scrollElement = useScrollContainer();
   const toggleControls = useReaderStore((state) => state.toggleControls);
-  const setControlsVisible = useReaderStore((state) => state.setControlsVisible);
   const {
     pageGap,
     cinema,
@@ -347,10 +346,7 @@ export function ChapterReader({
   // value that a tap toggles and reading hides (see `useCinema`). Turning
   // cinema off always leaves the chrome up.
   const chromeVisible = cinemaCtl.chromeVisible;
-  const toggleCinema = useCallback(() => {
-    cinemaCtl.toggle();
-    if (cinemaCtl.enabled) setControlsVisible(true);
-  }, [cinemaCtl, setControlsVisible]);
+  const toggleCinema = cinemaCtl.toggle;
 
   const autoScroll = useAutoScroll({
     scrollElement,

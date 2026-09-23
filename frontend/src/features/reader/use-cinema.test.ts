@@ -97,9 +97,12 @@ describe("createCinemaMachine", () => {
 
 describe("useCinema", () => {
   // Code only: the doc comments explain why the reducer went, by name.
-  const source = readFileSync(new URL("./use-cinema.ts", import.meta.url), "utf8")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/\/\/.*$/gm, "");
+  const codeOf = (file: string) =>
+    readFileSync(new URL(file, import.meta.url), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/.*$/gm, "");
+  const source = codeOf("./use-cinema.ts");
+  const controller = codeOf("./chrome-controller.ts");
 
   it("renders from the machine rather than a reducer that re-renders on every event", () => {
     expect(source).not.toMatch(/\buseReducer\b/);
@@ -108,7 +111,17 @@ describe("useCinema", () => {
 
   it("hands pointer, key and scroll events to the autohide rules, not to a blanket reveal", () => {
     // The bug: any pointermove, keydown or scroll here revealed the chrome.
-    expect(source).toMatch(/installChromeAutohide\(/);
-    expect(source).not.toMatch(/"pointermove"|"keydown"|"scroll"/);
+    expect(source).toMatch(/controller\.install\(/);
+    expect(controller).toMatch(/installChromeAutohide\(/);
+    for (const code of [source, controller]) {
+      expect(code).not.toMatch(/"pointermove"|"keydown"|"scroll"|"wheel"/);
+    }
+  });
+
+  it("leaves every decision to the controller, where it is tested", () => {
+    // No timers, machine events or store writes of its own: those are
+    // `createChromeController`'s, and run under chrome-controller.test.ts.
+    expect(source).toMatch(/createChromeController\(/);
+    expect(source).not.toMatch(/\bsetTimeout\b|\bmachine\.send\b|\bsetControlsVisible\(\s*(true|false)/);
   });
 });

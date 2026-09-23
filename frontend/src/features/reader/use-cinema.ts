@@ -1,15 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { usePrefersReducedMotion } from "@/components/premium/use-prefers-reduced-motion";
+import type { ReaderViewport } from "./chrome-autohide";
+import { chromeVisible, createChromeController } from "./chrome-controller";
 import {
-  installChromeAutohide,
-  pageTurnConceals,
-  type ChromeAutohide,
-  type ReaderViewport,
-} from "./chrome-autohide";
-import {
-  CINEMA_IDLE_MS,
   cinemaReduce,
   INITIAL_CINEMA_STATE,
   type CinemaEvent,
@@ -27,7 +22,7 @@ export interface CinemaController {
   chromeVisible: boolean;
   /** Animate transitions, or swap instantly (`prefers-reduced-motion`). */
   reducedMotion: boolean;
-  /** Toggle cinema mode (control / keyboard shortcut). */
+  /** Toggle cinema mode (control / keyboard shortcut). Turning it off leaves the chrome up. */
   toggle: () => void;
   /** A tap in cinema mode — reveals the chrome and re-arms the idle timer. */
   notifyActivity: () => void;
@@ -95,12 +90,16 @@ export function createCinemaMachine(initial: CinemaState = INITIAL_CINEMA_STATE)
 /**
  * Shows and hides the reader chrome in both modes, by the rules in
  * `chrome-autohide.ts`: reading on hides it; the pointer at the chrome's edge,
- * Tab, focus inside it or the end of the strip brings it back; nothing hides
- * it from under the pointer or keyboard focus. Outside cinema mode that drives
- * the reader store's `controlsVisible` (a tap still toggles it). With cinema
- * mode engaged it drives the {@link cinemaReduce} machine, which also hides
- * the chrome after {@link CINEMA_IDLE_MS} standing idle. Cinema auto-engages
- * once the reader settles when the per-profile preference is on.
+ * Tab, keyboard focus inside it or the end of the strip brings it back;
+ * nothing hides it from under the pointer, keyboard focus or typing. Outside
+ * cinema mode that drives the reader store's `controlsVisible` (a tap still
+ * toggles it). With cinema mode engaged it drives the {@link cinemaReduce}
+ * machine, which also hides the chrome after `CINEMA_IDLE_MS` standing idle.
+ * Cinema auto-engages once the reader settles when the per-profile preference
+ * is on.
+ *
+ * Every decision is `createChromeController`'s, where it is tested; this only
+ * hands it the props and the DOM.
  */
 export function useCinema({
   persistedEnabled,
@@ -112,96 +111,31 @@ export function useCinema({
 }: UseCinemaInput): CinemaController {
   const reducedMotion = usePrefersReducedMotion();
   const [machine] = useState(() => createCinemaMachine());
+  const [controller] = useState(() =>
+    createChromeController({
+      machine,
+      setControlsVisible: (visible) => useReaderStore.getState().setControlsVisible(visible),
+    }),
+  );
   // `machine.get` doubles as the server snapshot: the reader starts with the
   // chrome up on both sides of hydration.
   const state = useSyncExternalStore(machine.subscribe, machine.get, machine.get);
   const controlsVisible = useReaderStore((store) => store.controlsVisible);
-  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const autohide = useRef<ChromeAutohide | null>(null);
 
-  const clearIdle = useCallback(() => {
-    if (idleTimer.current) {
-      clearTimeout(idleTimer.current);
-      idleTimer.current = null;
-    }
-  }, []);
-
-  const armIdle = useCallback(() => {
-    clearIdle();
-    const elapse = () => {
-      // Never out from under a resting pointer or a focused control: look
-      // again a full idle period later.
-      if (autohide.current?.held()) {
-        idleTimer.current = setTimeout(elapse, CINEMA_IDLE_MS);
-        return;
-      }
-      idleTimer.current = null;
-      machine.send({ type: "idle" });
-    };
-    idleTimer.current = setTimeout(elapse, CINEMA_IDLE_MS);
-  }, [clearIdle, machine]);
-
-  const reveal = useCallback(() => {
-    if (machine.get().enabled) {
-      // A no-op while the chrome is already up; the idle timer still restarts.
-      machine.send({ type: "activity" });
-      armIdle();
-    } else {
-      useReaderStore.getState().setControlsVisible(true);
-    }
-  }, [armIdle, machine]);
-
-  const conceal = useCallback(() => {
-    if (autohide.current?.held()) return;
-    if (machine.get().enabled) {
-      clearIdle();
-      machine.send({ type: "conceal" });
-    } else {
-      useReaderStore.getState().setControlsVisible(false);
-    }
-  }, [clearIdle, machine]);
-
-  const notifyActivity = useCallback(() => {
-    if (machine.get().enabled) reveal();
-  }, [machine, reveal]);
-
-  const toggle = useCallback(() => {
-    const next = !machine.get().enabled;
-    machine.send({ type: "toggle" });
-    onEnabledChange(next);
-    if (next) armIdle();
-    else clearIdle();
-  }, [armIdle, clearIdle, machine, onEnabledChange]);
-
-  // Auto-engage from the persisted preference, once the reader has settled.
-  const autoEngagedRef = useRef(false);
   useEffect(() => {
-    if (!active || autoEngagedRef.current) return;
-    autoEngagedRef.current = true;
-    if (persistedEnabled) {
-      machine.send({ type: "enable" });
-      armIdle();
-    }
-  }, [active, persistedEnabled, armIdle, machine]);
+    controller.autoEngage(persistedEnabled, active);
+  }, [active, controller, persistedEnabled]);
 
-  // The end of the strip brings the chrome up (Next is what you want there),
-  // and the scroll rule reads this so the last few pixels do not take it away.
-  const atEndRef = useRef(atEnd);
   useEffect(() => {
-    atEndRef.current = atEnd;
-    if (active && atEnd) reveal();
-  }, [active, atEnd, reveal]);
+    controller.setAtEnd(atEnd, active);
+  }, [active, atEnd, controller]);
 
-  // A page turn in a paged mode is reading on, like a downward scroll.
-  const pagedPositionRef = useRef(pagedPosition);
   useEffect(() => {
-    const previous = pagedPositionRef.current;
-    pagedPositionRef.current = pagedPosition;
-    if (active && pageTurnConceals(previous, pagedPosition)) conceal();
-  }, [active, conceal, pagedPosition]);
+    controller.showPage(pagedPosition, active);
+  }, [active, controller, pagedPosition]);
 
-  // Pointer, key, focus and scroll listeners. A tap on the page stays the
-  // reader's own: its toggle, or notifyActivity in cinema mode.
+  // Pointer, key, focus and scroll listeners. A tap on the page
+  // stays the reader's own: its toggle, or notifyActivity in cinema mode.
   useEffect(() => {
     if (!active) return;
     // Measured now and on resize, not on every pointer move: the reader's box
@@ -211,34 +145,33 @@ export function useCinema({
       viewport = measureReaderViewport(scrollElement);
     };
     window.addEventListener("resize", remeasure, { passive: true });
-    const handle = installChromeAutohide({
+    const uninstall = controller.install({
       events: window,
       scroller: scrollElement,
       viewport: () => viewport,
       activeElement: () => document.activeElement,
-      atEnd: () => atEndRef.current,
-      reveal,
-      conceal,
     });
-    autohide.current = handle;
     return () => {
-      handle.teardown();
+      uninstall();
       window.removeEventListener("resize", remeasure);
-      autohide.current = null;
     };
-  }, [active, conceal, reveal, scrollElement]);
+  }, [active, controller, scrollElement]);
 
-  useEffect(() => clearIdle, [clearIdle]);
+  useEffect(() => controller.dispose, [controller]);
+
+  const toggle = useCallback(() => {
+    onEnabledChange(controller.toggle());
+  }, [controller, onEnabledChange]);
 
   return useMemo(
     () => ({
       enabled: state.enabled,
-      chromeVisible: state.enabled ? state.chrome === "shown" : controlsVisible,
+      chromeVisible: chromeVisible(state, controlsVisible),
       reducedMotion,
       toggle,
-      notifyActivity,
+      notifyActivity: controller.notifyActivity,
     }),
-    [state.enabled, state.chrome, controlsVisible, reducedMotion, toggle, notifyActivity],
+    [state, controlsVisible, reducedMotion, toggle, controller],
   );
 }
 
