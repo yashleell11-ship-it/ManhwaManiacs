@@ -376,6 +376,13 @@ from connectors.models import Chapter, Page  # noqa: E402
 from tests.test_browse_service_ssrf import _FakeConnector  # noqa: E402
 
 
+def _vary(response) -> set[str]:
+    """The ``Vary`` tokens, case-folded. CORS adds ``Origin`` on some Starlette
+    versions (1.7.0 on every response when origins are listed), so these tests
+    assert what this route owns — ``Accept`` — not the whole header."""
+    return {t.strip().lower() for t in response.headers.get("Vary", "").split(",") if t.strip()}
+
+
 class _PageConnector(_FakeConnector):
     """Registry-level fake serving one fixed page image for any page id."""
 
@@ -426,7 +433,7 @@ def test_route_without_w_is_byte_for_byte_what_it_always_was(client, page_connec
     assert response.content == page_connector._data
     assert response.headers["content-type"].startswith("image/jpeg")
     assert "X-Page-Width" not in response.headers
-    assert "Vary" not in response.headers
+    assert "accept" not in _vary(response)
 
 
 def test_route_with_w_serves_fewer_bytes_and_says_what_it_served(
@@ -444,7 +451,7 @@ def test_route_with_w_serves_fewer_bytes_and_says_what_it_served(
     assert small.status_code == 200
     assert small.headers["content-type"].startswith("image/webp")
     assert small.headers["X-Page-Width"] == "800"
-    assert small.headers["Vary"] == "Accept"
+    assert "accept" in _vary(small)
     assert len(small.content) < len(full.content)
     assert _dimensions(small.content)[0] == 800
 
@@ -466,7 +473,7 @@ def test_route_header_is_absent_when_the_original_was_served(client):
     assert response.content == connector._data
     assert "X-Page-Width" not in response.headers
     # Vary still rides along: the answer COULD have depended on Accept.
-    assert response.headers["Vary"] == "Accept"
+    assert "accept" in _vary(response)
 
 
 def test_route_above_the_ladder_serves_the_original(client, page_connector):
@@ -487,7 +494,7 @@ def test_route_without_webp_in_accept_gets_jpeg(client, page_connector):
     )
 
     assert response.headers["content-type"].startswith("image/jpeg")
-    assert response.headers["Vary"] == "Accept"
+    assert "accept" in _vary(response)
 
 
 def test_route_rejects_a_nonsense_width_at_validation(client, page_connector):

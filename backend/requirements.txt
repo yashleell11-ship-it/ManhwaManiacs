@@ -1,4 +1,7 @@
 fastapi==0.138.2
+# Pinned to what the suite runs against: FastAPI allows a range, and 1.7.0
+# changed the headers every response carries (Vary: Origin) under CI alone.
+starlette==1.6.0
 uvicorn==0.49.0
 python-multipart==0.0.32
 curl_cffi==0.15.0

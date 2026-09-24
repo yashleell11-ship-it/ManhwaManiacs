@@ -529,6 +529,13 @@ from connectors.models import Series as ConnectorSeries  # noqa: E402
 from tests.test_browse_service_ssrf import _FakeConnector  # noqa: E402
 
 
+def _vary(response) -> set[str]:
+    """The ``Vary`` tokens, case-folded. CORS adds ``Origin`` on some Starlette
+    versions (1.7.0 on every response when origins are listed), so these tests
+    assert what this route owns — ``Accept`` — not the whole header."""
+    return {t.strip().lower() for t in response.headers.get("Vary", "").split(",") if t.strip()}
+
+
 class _CoverConnector(_FakeConnector):
     """Registry-level fake serving one fixed cover for any series id."""
 
@@ -580,7 +587,7 @@ def test_route_without_w_is_byte_for_byte_what_it_always_was(
     assert response.content == cover_connector._data
     assert response.headers["content-type"].startswith("image/jpeg")
     assert "X-Cover-Width" not in response.headers
-    assert "Vary" not in response.headers
+    assert "accept" not in _vary(response)
     # The no-``?w=`` path stores nothing: only DERIVED bytes are ever written.
     assert db_session.query(SourceCoverCache).count() == 0
 
@@ -598,7 +605,7 @@ def test_route_with_w_serves_a_fraction_of_the_bytes(client, cover_connector):
     assert small.status_code == 200
     assert small.headers["content-type"].startswith("image/webp")
     assert small.headers["X-Cover-Width"] == "360"
-    assert small.headers["Vary"] == "Accept"
+    assert "accept" in _vary(small)
     assert len(small.content) < len(full.content) / 10
 
 
@@ -634,7 +641,7 @@ def test_route_without_webp_in_accept_gets_jpeg(client, cover_connector):
     )
 
     assert response.headers["content-type"].startswith("image/jpeg")
-    assert response.headers["Vary"] == "Accept"
+    assert "accept" in _vary(response)
 
 
 def test_route_second_request_is_served_from_the_cache(client, cover_connector):
